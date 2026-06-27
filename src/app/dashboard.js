@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect } from "react";
 import { supabase } from "../lib/supabase";
+import Admin from "./admin";
 
 const LEVELS = [
   { id: "ce1", name: "CE1", full: "Cours Élémentaire 1", primary: "Primary 3" },
@@ -295,6 +296,23 @@ export default function Dashboard({ teacher, onLogout }) {
             <div style={{ fontSize: 13, color: "#6B7280", marginTop: 4 }}>{s.l}</div>
           </div>
         ))}
+      </div>
+
+      <div
+        onClick={() => goTo("admin")}
+        style={{
+          background: "linear-gradient(135deg, #0F4C35, #1A7A56)",
+          borderRadius: 12, padding: "18px 20px", marginBottom: 24,
+          cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center"
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: "white" }}>+ Créer une nouvelle leçon</div>
+          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.7)", marginTop: 2 }}>
+            Ajouter du contenu à la plateforme
+          </div>
+        </div>
+        <span style={{ color: "white", fontSize: 22 }}>→</span>
       </div>
 
       <h2 style={{ fontSize: 18, fontWeight: 700, color: "#374151", marginBottom: 16 }}>Toutes les disciplines</h2>
@@ -616,6 +634,7 @@ export default function Dashboard({ teacher, onLogout }) {
         {screen === "subject" && <SubjectScreen />}
         {screen === "component" && <ComponentScreen />}
         {screen === "lesson" && <LessonScreen />}
+        {screen === "admin" && <Admin onBack={() => goTo("dashboard", null, null)} />}
       </div>
     </div>
   );
