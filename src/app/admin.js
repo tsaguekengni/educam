@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { supabase } from "../lib/supabase";
 
 const LEVELS = [
@@ -128,12 +128,17 @@ const labelStyle = {
 };
 
 export default function Admin({ onBack }) {
-  const [step, setStep] = useState(1); // 1=lesson info, 2=sections, 3=exercises, 4=review
+  const [view, setView] = useState("list"); // list, create, edit
+  const [allLessons, setAllLessons] = useState([]);
+  const [loadingLessons, setLoadingLessons] = useState(true);
+  const [editingId, setEditingId] = useState(null);
+  const [deleteConfirm, setDeleteConfirm] = useState(null);
+
+  // Form state
+  const [step, setStep] = useState(1);
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
 
-  // Lesson info
   const [subjectId, setSubjectId] = useState("francais");
   const [componentId, setComponentId] = useState("expression-orale");
   const [levelId, setLevelId] = useState("cm1");
@@ -142,12 +147,10 @@ export default function Admin({ onBack }) {
   const [objective, setObjective] = useState("");
   const [duration, setDuration] = useState("45 minutes");
 
-  // Sections
   const [sections, setSections] = useState([
     { type: "intro", title: "Introduction", icon: "💡", content: "", videoUrl: "" },
   ]);
 
-  // Exercises
   const [exercises, setExercises] = useState([
     { question: "", type: "open", options: ["", "", "", ""], answer: "" },
   ]);
@@ -155,10 +158,230 @@ export default function Admin({ onBack }) {
   const selectedSubject = SUBJECTS.find(s => s.id === subjectId);
   const components = selectedSubject?.components || [];
 
+  // Load all lessons
+  useEffect(() => {
+    fetchAllLessons();
+  }, []);
+
+  const fetchAllLessons = async () => {
+    setLoadingLessons(true);
+    const { data } = await supabase
+      .from("lessons")
+      .select("*")
+      .order("created_at", { ascending: false });
+    setAllLessons(data || []);
+    setLoadingLessons(false);
+  };
+
+  const resetForm = () => {
+    setStep(1);
+    setError("");
+    setEditingId(null);
+    setSubjectId("francais");
+    setComponentId("expression-orale");
+    setLevelId("cm1");
+    setUnitNumber(1);
+    setTitle("");
+    setObjective("");
+    setDuration("45 minutes");
+    setSections([{ type: "intro", title: "Introduction", icon: "💡", content: "", videoUrl: "" }]);
+    setExercises([{ question: "", type: "open", options: ["", "", "", ""], answer: "" }]);
+  };
+
+  const startCreate = () => {
+    resetForm();
+    setView("create");
+  };
+
+  const startEdit = async (lesson) => {
+    setEditingId(lesson.id);
+    setSubjectId(lesson.subject_id);
+    setComponentId(lesson.component_id);
+    setLevelId(lesson.level);
+    setUnitNumber(lesson.unit_number);
+    setTitle(lesson.title);
+    setObjective(lesson.objective || "");
+    setDuration(lesson.duration || "45 minutes");
+    setStep(1);
+    setError("");
+
+    // Load sections
+    const { data: sectionData } = await supabase
+      .from("lesson_sections")
+      .select("*")
+      .eq("lesson_id", lesson.id)
+      .order("section_order");
+
+    if (sectionData && sectionData.length > 0) {
+      setSections(sectionData.map(s => ({
+        type: s.section_type,
+        title: s.title,
+        icon: s.icon,
+        content: s.content || "",
+        videoUrl: s.video_url || "",
+      })));
+    } else {
+      setSections([{ type: "intro", title: "Introduction", icon: "💡", content: "", videoUrl: "" }]);
+    }
+
+    // Load exercises
+    const { data: exerciseData } = await supabase
+      .from("exercises")
+      .select("*")
+      .eq("lesson_id", lesson.id)
+      .order("exercise_order");
+
+    if (exerciseData && exerciseData.length > 0) {
+      setExercises(exerciseData.map(ex => ({
+        question: ex.question,
+        type: ex.exercise_type,
+        options: ex.options ? (typeof ex.options === "string" ? JSON.parse(ex.options) : ex.options).concat(["", "", "", ""]).slice(0, 4) : ["", "", "", ""],
+        answer: ex.answer || "",
+      })));
+    } else {
+      setExercises([{ question: "", type: "open", options: ["", "", "", ""], answer: "" }]);
+    }
+
+    setView("edit");
+  };
+
+  const handleDelete = async (lessonId) => {
+    // Sections and exercises cascade delete thanks to our DB setup
+    const { error } = await supabase.from("lessons").delete().eq("id", lessonId);
+    if (!error) {
+      setAllLessons(allLessons.filter(l => l.id !== lessonId));
+      setDeleteConfirm(null);
+    }
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError("");
+
+    try {
+      if (editingId) {
+        // UPDATE existing lesson
+        const { error: updateError } = await supabase
+          .from("lessons")
+          .update({
+            subject_id: subjectId,
+            component_id: componentId,
+            level: levelId,
+            unit_number: unitNumber,
+            theme: THEMES[unitNumber - 1],
+            title: title,
+            objective: objective,
+            duration: duration,
+          })
+          .eq("id", editingId);
+
+        if (updateError) throw updateError;
+
+        // Delete old sections and exercises, then re-insert
+        await supabase.from("lesson_sections").delete().eq("lesson_id", editingId);
+        await supabase.from("exercises").delete().eq("lesson_id", editingId);
+
+        // Re-insert sections
+        const sectionsToInsert = sections.map((s, i) => ({
+          lesson_id: editingId,
+          section_order: i + 1,
+          section_type: s.type,
+          title: s.title,
+          icon: s.icon,
+          content: s.type === "video" ? null : s.content,
+          video_url: s.type === "video" ? s.videoUrl : null,
+        }));
+
+        const { error: sectionsError } = await supabase.from("lesson_sections").insert(sectionsToInsert);
+        if (sectionsError) throw sectionsError;
+
+        // Re-insert exercises
+        const exercisesToInsert = exercises
+          .filter(ex => ex.question.trim())
+          .map((ex, i) => ({
+            lesson_id: editingId,
+            exercise_order: i + 1,
+            question: ex.question,
+            exercise_type: ex.type,
+            options: ex.type === "choice" ? JSON.stringify(ex.options.filter(o => o.trim())) : null,
+            answer: ex.answer || null,
+          }));
+
+        if (exercisesToInsert.length > 0) {
+          const { error: exercisesError } = await supabase.from("exercises").insert(exercisesToInsert);
+          if (exercisesError) throw exercisesError;
+        }
+
+      } else {
+        // CREATE new lesson
+        const { data: lessonData, error: lessonError } = await supabase
+          .from("lessons")
+          .insert({
+            subject_id: subjectId,
+            component_id: componentId,
+            level: levelId,
+            unit_number: unitNumber,
+            theme: THEMES[unitNumber - 1],
+            title: title,
+            objective: objective,
+            duration: duration,
+          })
+          .select()
+          .single();
+
+        if (lessonError) throw lessonError;
+
+        const sectionsToInsert = sections.map((s, i) => ({
+          lesson_id: lessonData.id,
+          section_order: i + 1,
+          section_type: s.type,
+          title: s.title,
+          icon: s.icon,
+          content: s.type === "video" ? null : s.content,
+          video_url: s.type === "video" ? s.videoUrl : null,
+        }));
+
+        const { error: sectionsError } = await supabase.from("lesson_sections").insert(sectionsToInsert);
+        if (sectionsError) throw sectionsError;
+
+        const exercisesToInsert = exercises
+          .filter(ex => ex.question.trim())
+          .map((ex, i) => ({
+            lesson_id: lessonData.id,
+            exercise_order: i + 1,
+            question: ex.question,
+            exercise_type: ex.type,
+            options: ex.type === "choice" ? JSON.stringify(ex.options.filter(o => o.trim())) : null,
+            answer: ex.answer || null,
+          }));
+
+        if (exercisesToInsert.length > 0) {
+          const { error: exercisesError } = await supabase.from("exercises").insert(exercisesToInsert);
+          if (exercisesError) throw exercisesError;
+        }
+      }
+
+      await fetchAllLessons();
+      setView("list");
+      resetForm();
+    } catch (err) {
+      setError("Erreur: " + err.message);
+    }
+
+    setSaving(false);
+  };
+
+  // ============ HELPERS ============
+  const getSubjectName = (id) => SUBJECTS.find(s => s.id === id)?.name || id;
+  const getComponentName = (subId, compId) => {
+    const sub = SUBJECTS.find(s => s.id === subId);
+    return sub?.components.find(c => c.id === compId)?.name || compId;
+  };
+  const getLevelName = (id) => LEVELS.find(l => l.id === id)?.name || id;
+
   const addSection = () => {
     setSections([...sections, { type: "content", title: "", icon: "📖", content: "", videoUrl: "" }]);
   };
-
   const updateSection = (index, field, value) => {
     const updated = [...sections];
     updated[index][field] = value;
@@ -168,172 +391,169 @@ export default function Admin({ onBack }) {
     }
     setSections(updated);
   };
-
-  const removeSection = (index) => {
-    if (sections.length > 1) {
-      setSections(sections.filter((_, i) => i !== index));
-    }
-  };
+  const removeSection = (index) => { if (sections.length > 1) setSections(sections.filter((_, i) => i !== index)); };
 
   const addExercise = () => {
     setExercises([...exercises, { question: "", type: "open", options: ["", "", "", ""], answer: "" }]);
   };
-
   const updateExercise = (index, field, value) => {
     const updated = [...exercises];
     updated[index][field] = value;
     setExercises(updated);
   };
-
   const updateOption = (exIndex, optIndex, value) => {
     const updated = [...exercises];
     updated[exIndex].options[optIndex] = value;
     setExercises(updated);
   };
+  const removeExercise = (index) => { if (exercises.length > 1) setExercises(exercises.filter((_, i) => i !== index)); };
 
-  const removeExercise = (index) => {
-    if (exercises.length > 1) {
-      setExercises(exercises.filter((_, i) => i !== index));
-    }
-  };
+  // ============ HEADER ============
+  const AdminHeader = () => (
+    <div style={{ background: "#0F4C35", padding: "14px 24px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ fontSize: 24 }}>📚</span>
+        <span style={{ color: "white", fontSize: 20, fontWeight: 800 }}>EduCam</span>
+        <span style={{ color: "rgba(255,255,255,0.6)", fontSize: 14, marginLeft: 8 }}>Administration</span>
+      </div>
+      <button onClick={onBack} style={{
+        background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.2)",
+        color: "white", padding: "8px 14px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer"
+      }}>
+        ← Tableau de bord
+      </button>
+    </div>
+  );
 
-  const handleSave = async () => {
-    setSaving(true);
-    setError("");
-
-    try {
-      // 1. Create lesson
-      const { data: lessonData, error: lessonError } = await supabase
-        .from("lessons")
-        .insert({
-          subject_id: subjectId,
-          component_id: componentId,
-          level: levelId,
-          unit_number: unitNumber,
-          theme: THEMES[unitNumber - 1],
-          title: title,
-          objective: objective,
-          duration: duration,
-        })
-        .select()
-        .single();
-
-      if (lessonError) throw lessonError;
-
-      // 2. Create sections
-      const sectionsToInsert = sections.map((s, i) => ({
-        lesson_id: lessonData.id,
-        section_order: i + 1,
-        section_type: s.type,
-        title: s.title,
-        icon: s.icon,
-        content: s.type === "video" ? null : s.content,
-        video_url: s.type === "video" ? s.videoUrl : null,
-      }));
-
-      const { error: sectionsError } = await supabase
-        .from("lesson_sections")
-        .insert(sectionsToInsert);
-
-      if (sectionsError) throw sectionsError;
-
-      // 3. Create exercises (if any have content)
-      const exercisesToInsert = exercises
-        .filter(ex => ex.question.trim())
-        .map((ex, i) => ({
-          lesson_id: lessonData.id,
-          exercise_order: i + 1,
-          question: ex.question,
-          exercise_type: ex.type,
-          options: ex.type === "choice" ? JSON.stringify(ex.options.filter(o => o.trim())) : null,
-          answer: ex.answer || null,
-        }));
-
-      if (exercisesToInsert.length > 0) {
-        const { error: exercisesError } = await supabase
-          .from("exercises")
-          .insert(exercisesToInsert);
-
-        if (exercisesError) throw exercisesError;
-      }
-
-      setSaved(true);
-    } catch (err) {
-      setError("Erreur: " + err.message);
-    }
-
-    setSaving(false);
-  };
-
-  // ============ SUCCESS SCREEN ============
-  if (saved) {
+  // ============ LESSON LIST ============
+  if (view === "list") {
     return (
       <div style={{ minHeight: "100vh", background: "#F9FAFB", fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
-        <div style={{ background: "#0F4C35", padding: "14px 24px", display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 24 }}>📚</span>
-          <span style={{ color: "white", fontSize: 20, fontWeight: 800 }}>EduCam</span>
-          <span style={{ color: "rgba(255,255,255,0.6)", fontSize: 14, marginLeft: 8 }}>Administration</span>
-        </div>
-        <div style={{ maxWidth: 600, margin: "0 auto", padding: "80px 20px", textAlign: "center" }}>
-          <div style={{ fontSize: 64, marginBottom: 20 }}>✅</div>
-          <h1 style={{ fontSize: 24, fontWeight: 800, color: "#111827", marginBottom: 8 }}>
-            Leçon créée avec succès!
-          </h1>
-          <p style={{ color: "#6B7280", fontSize: 15, marginBottom: 32 }}>
-            "{title}" a été ajoutée à la plateforme.
-          </p>
-          <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
-            <button
-              onClick={() => {
-                setSaved(false);
-                setStep(1);
-                setTitle("");
-                setObjective("");
-                setSections([{ type: "intro", title: "Introduction", icon: "💡", content: "", videoUrl: "" }]);
-                setExercises([{ question: "", type: "open", options: ["", "", "", ""], answer: "" }]);
-              }}
-              style={{
-                padding: "12px 24px", background: "#0F4C35", color: "white",
-                border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer"
-              }}
-            >
-              + Créer une autre leçon
-            </button>
-            <button
-              onClick={onBack}
-              style={{
-                padding: "12px 24px", background: "white", color: "#374151",
-                border: "1px solid #D1D5DB", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer"
-              }}
-            >
-              Retour au tableau de bord
+        <AdminHeader />
+        <div style={{ maxWidth: 800, margin: "0 auto", padding: "32px 20px 60px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 28 }}>
+            <div>
+              <h1 style={{ fontSize: 24, fontWeight: 800, color: "#111827", margin: "0 0 4px" }}>
+                Gestion des leçons
+              </h1>
+              <p style={{ color: "#6B7280", margin: 0, fontSize: 14 }}>
+                {allLessons.length} leçon{allLessons.length !== 1 ? "s" : ""} créée{allLessons.length !== 1 ? "s" : ""}
+              </p>
+            </div>
+            <button onClick={startCreate} style={{
+              padding: "12px 20px", background: "#0F4C35", color: "white",
+              border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer"
+            }}>
+              + Nouvelle leçon
             </button>
           </div>
+
+          {loadingLessons ? (
+            <p style={{ textAlign: "center", color: "#6B7280", padding: "40px 0" }}>Chargement...</p>
+          ) : allLessons.length === 0 ? (
+            <div style={{
+              textAlign: "center", padding: "60px 20px", background: "white",
+              borderRadius: 12, border: "1px solid #E5E7EB"
+            }}>
+              <div style={{ fontSize: 48, marginBottom: 16 }}>📝</div>
+              <p style={{ fontSize: 16, fontWeight: 600, color: "#374151", marginBottom: 4 }}>
+                Aucune leçon pour le moment
+              </p>
+              <p style={{ fontSize: 14, color: "#9CA3AF", marginBottom: 20 }}>
+                Commencez par créer votre première leçon
+              </p>
+              <button onClick={startCreate} style={{
+                padding: "12px 24px", background: "#0F4C35", color: "white",
+                border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer"
+              }}>
+                + Créer une leçon
+              </button>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {allLessons.map(lesson => (
+                <div key={lesson.id} style={{
+                  background: "white", borderRadius: 10, border: "1px solid #E5E7EB",
+                  padding: "16px 18px"
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 15, fontWeight: 700, color: "#1F2937", marginBottom: 4 }}>
+                        {lesson.title}
+                      </div>
+                      <div style={{ fontSize: 13, color: "#6B7280", lineHeight: 1.5 }}>
+                        {getSubjectName(lesson.subject_id)} → {getComponentName(lesson.subject_id, lesson.component_id)}
+                      </div>
+                      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                        <span style={{
+                          fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 20,
+                          background: "#EFF6FF", color: "#3B82F6"
+                        }}>
+                          {getLevelName(lesson.level)}
+                        </span>
+                        <span style={{
+                          fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 20,
+                          background: "#F0FDF4", color: "#16A34A"
+                        }}>
+                          Unité {lesson.unit_number}: {lesson.theme}
+                        </span>
+                        <span style={{
+                          fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 20,
+                          background: "#F5F3FF", color: "#7C3AED"
+                        }}>
+                          {lesson.duration}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", gap: 6, marginLeft: 12 }}>
+                      <button onClick={() => startEdit(lesson)} style={{
+                        padding: "6px 14px", background: "#EFF6FF", border: "1px solid #BFDBFE",
+                        borderRadius: 6, fontSize: 12, fontWeight: 600, color: "#3B82F6", cursor: "pointer"
+                      }}>
+                        Modifier
+                      </button>
+                      {deleteConfirm === lesson.id ? (
+                        <div style={{ display: "flex", gap: 4 }}>
+                          <button onClick={() => handleDelete(lesson.id)} style={{
+                            padding: "6px 10px", background: "#DC2626", border: "none",
+                            borderRadius: 6, fontSize: 12, fontWeight: 600, color: "white", cursor: "pointer"
+                          }}>
+                            Confirmer
+                          </button>
+                          <button onClick={() => setDeleteConfirm(null)} style={{
+                            padding: "6px 10px", background: "#F3F4F6", border: "1px solid #D1D5DB",
+                            borderRadius: 6, fontSize: 12, fontWeight: 600, color: "#374151", cursor: "pointer"
+                          }}>
+                            Annuler
+                          </button>
+                        </div>
+                      ) : (
+                        <button onClick={() => setDeleteConfirm(lesson.id)} style={{
+                          padding: "6px 14px", background: "#FEF2F2", border: "1px solid #FECACA",
+                          borderRadius: 6, fontSize: 12, fontWeight: 600, color: "#DC2626", cursor: "pointer"
+                        }}>
+                          Supprimer
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     );
   }
 
+  // ============ CREATE / EDIT FORM ============
   return (
     <div style={{ minHeight: "100vh", background: "#F9FAFB", fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
-      {/* Header */}
-      <div style={{ background: "#0F4C35", padding: "14px 24px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 24 }}>📚</span>
-          <span style={{ color: "white", fontSize: 20, fontWeight: 800 }}>EduCam</span>
-          <span style={{ color: "rgba(255,255,255,0.6)", fontSize: 14, marginLeft: 8 }}>Administration</span>
-        </div>
-        <button onClick={onBack} style={{
-          background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.2)",
-          color: "white", padding: "8px 14px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer"
-        }}>
-          ← Tableau de bord
-        </button>
-      </div>
-
+      <AdminHeader />
       <div style={{ maxWidth: 700, margin: "0 auto", padding: "32px 20px 60px" }}>
         <h1 style={{ fontSize: 24, fontWeight: 800, color: "#111827", marginBottom: 4 }}>
-          Créer une nouvelle leçon
+          {editingId ? "Modifier la leçon" : "Créer une nouvelle leçon"}
         </h1>
         <p style={{ color: "#6B7280", fontSize: 14, marginBottom: 28 }}>
           Étape {step} sur 3 — {step === 1 ? "Informations de base" : step === 2 ? "Contenu de la leçon" : "Exercices"}
@@ -344,8 +564,7 @@ export default function Admin({ onBack }) {
           {[1, 2, 3].map(s => (
             <div key={s} style={{
               flex: 1, height: 4, borderRadius: 4,
-              background: s <= step ? "#0F4C35" : "#E5E7EB",
-              transition: "background 0.3s"
+              background: s <= step ? "#0F4C35" : "#E5E7EB"
             }} />
           ))}
         </div>
@@ -359,7 +578,7 @@ export default function Admin({ onBack }) {
           </div>
         )}
 
-        {/* ============ STEP 1: LESSON INFO ============ */}
+        {/* STEP 1 */}
         {step === 1 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
@@ -380,7 +599,6 @@ export default function Admin({ onBack }) {
                 </select>
               </div>
             </div>
-
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
               <div>
                 <label style={labelStyle}>Niveau *</label>
@@ -389,35 +607,20 @@ export default function Admin({ onBack }) {
                 </select>
               </div>
               <div>
-                <label style={labelStyle}>Unité (centre d'intérêt) *</label>
+                <label style={labelStyle}>Unité *</label>
                 <select value={unitNumber} onChange={(e) => setUnitNumber(parseInt(e.target.value))} style={inputStyle}>
                   {THEMES.map((t, i) => <option key={i} value={i + 1}>Unité {i + 1}: {t}</option>)}
                 </select>
               </div>
             </div>
-
             <div>
               <label style={labelStyle}>Titre de la leçon *</label>
-              <input
-                type="text"
-                placeholder="Ex: La matière: les quatre états"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                style={inputStyle}
-              />
+              <input type="text" placeholder="Ex: La matière: les quatre états" value={title} onChange={(e) => setTitle(e.target.value)} style={inputStyle} />
             </div>
-
             <div>
               <label style={labelStyle}>Objectif pédagogique *</label>
-              <textarea
-                placeholder="Ex: Identifier les quatre états de la matière et associer des corps à des états de la matière."
-                value={objective}
-                onChange={(e) => setObjective(e.target.value)}
-                rows={3}
-                style={{ ...inputStyle, resize: "vertical" }}
-              />
+              <textarea placeholder="Ex: Identifier les quatre états de la matière..." value={objective} onChange={(e) => setObjective(e.target.value)} rows={3} style={{ ...inputStyle, resize: "vertical" }} />
             </div>
-
             <div>
               <label style={labelStyle}>Durée</label>
               <select value={duration} onChange={(e) => setDuration(e.target.value)} style={inputStyle}>
@@ -427,123 +630,17 @@ export default function Admin({ onBack }) {
                 <option value="90 minutes">90 minutes</option>
               </select>
             </div>
-
-            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
-              <button
-                onClick={() => {
-                  if (!title.trim() || !objective.trim()) {
-                    setError("Veuillez remplir le titre et l'objectif");
-                    return;
-                  }
-                  setError("");
-                  setStep(2);
-                }}
-                style={{
-                  padding: "12px 28px", background: "#0F4C35", color: "white",
-                  border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer"
-                }}
-              >
-                Suivant →
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* ============ STEP 2: SECTIONS ============ */}
-        {step === 2 && (
-          <div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-              {sections.map((section, i) => (
-                <div key={i} style={{
-                  background: "white", borderRadius: 10, border: "1px solid #E5E7EB",
-                  padding: "18px", position: "relative"
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-                    <span style={{ fontSize: 15, fontWeight: 700, color: "#1F2937" }}>
-                      Section {i + 1}
-                    </span>
-                    {sections.length > 1 && (
-                      <button onClick={() => removeSection(i)} style={{
-                        background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 6,
-                        padding: "4px 10px", fontSize: 12, color: "#DC2626", cursor: "pointer"
-                      }}>
-                        Supprimer
-                      </button>
-                    )}
-                  </div>
-
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
-                    <div>
-                      <label style={labelStyle}>Type</label>
-                      <select
-                        value={section.type}
-                        onChange={(e) => updateSection(i, "type", e.target.value)}
-                        style={inputStyle}
-                      >
-                        {SECTION_TYPES.map(t => (
-                          <option key={t.id} value={t.id}>{t.icon} {t.name}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label style={labelStyle}>Titre de la section</label>
-                      <input
-                        type="text"
-                        placeholder="Ex: Les quatre états de la matière"
-                        value={section.title}
-                        onChange={(e) => updateSection(i, "title", e.target.value)}
-                        style={inputStyle}
-                      />
-                    </div>
-                  </div>
-
-                  {section.type === "video" ? (
-                    <div>
-                      <label style={labelStyle}>URL de la vidéo (YouTube ou autre)</label>
-                      <input
-                        type="text"
-                        placeholder="https://www.youtube.com/watch?v=..."
-                        value={section.videoUrl}
-                        onChange={(e) => updateSection(i, "videoUrl", e.target.value)}
-                        style={inputStyle}
-                      />
-                    </div>
-                  ) : section.type !== "exercise" ? (
-                    <div>
-                      <label style={labelStyle}>Contenu</label>
-                      <textarea
-                        placeholder="Écrivez le contenu de cette section..."
-                        value={section.content}
-                        onChange={(e) => updateSection(i, "content", e.target.value)}
-                        rows={6}
-                        style={{ ...inputStyle, resize: "vertical" }}
-                      />
-                    </div>
-                  ) : (
-                    <p style={{ fontSize: 13, color: "#6B7280", fontStyle: "italic" }}>
-                      Les exercices seront ajoutés à l'étape suivante.
-                    </p>
-                  )}
-                </div>
-              ))}
-            </div>
-
-            <button onClick={addSection} style={{
-              width: "100%", padding: "12px", marginTop: 14,
-              background: "white", border: "2px dashed #D1D5DB", borderRadius: 10,
-              fontSize: 14, fontWeight: 600, color: "#6B7280", cursor: "pointer"
-            }}>
-              + Ajouter une section
-            </button>
-
-            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 24 }}>
-              <button onClick={() => setStep(1)} style={{
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8 }}>
+              <button onClick={() => { resetForm(); setView("list"); }} style={{
                 padding: "12px 24px", background: "white", border: "1px solid #D1D5DB",
                 borderRadius: 8, fontSize: 14, fontWeight: 600, color: "#374151", cursor: "pointer"
               }}>
-                ← Précédent
+                ← Annuler
               </button>
-              <button onClick={() => setStep(3)} style={{
+              <button onClick={() => {
+                if (!title.trim() || !objective.trim()) { setError("Veuillez remplir le titre et l'objectif"); return; }
+                setError(""); setStep(2);
+              }} style={{
                 padding: "12px 28px", background: "#0F4C35", color: "white",
                 border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer"
               }}>
@@ -553,7 +650,70 @@ export default function Admin({ onBack }) {
           </div>
         )}
 
-        {/* ============ STEP 3: EXERCISES ============ */}
+        {/* STEP 2 */}
+        {step === 2 && (
+          <div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              {sections.map((section, i) => (
+                <div key={i} style={{
+                  background: "white", borderRadius: 10, border: "1px solid #E5E7EB", padding: "18px"
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                    <span style={{ fontSize: 15, fontWeight: 700, color: "#1F2937" }}>Section {i + 1}</span>
+                    {sections.length > 1 && (
+                      <button onClick={() => removeSection(i)} style={{
+                        background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 6,
+                        padding: "4px 10px", fontSize: 12, color: "#DC2626", cursor: "pointer"
+                      }}>Supprimer</button>
+                    )}
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+                    <div>
+                      <label style={labelStyle}>Type</label>
+                      <select value={section.type} onChange={(e) => updateSection(i, "type", e.target.value)} style={inputStyle}>
+                        {SECTION_TYPES.map(t => <option key={t.id} value={t.id}>{t.icon} {t.name}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>Titre</label>
+                      <input type="text" placeholder="Titre de la section" value={section.title} onChange={(e) => updateSection(i, "title", e.target.value)} style={inputStyle} />
+                    </div>
+                  </div>
+                  {section.type === "video" ? (
+                    <div>
+                      <label style={labelStyle}>URL de la vidéo</label>
+                      <input type="text" placeholder="https://www.youtube.com/watch?v=..." value={section.videoUrl} onChange={(e) => updateSection(i, "videoUrl", e.target.value)} style={inputStyle} />
+                    </div>
+                  ) : section.type !== "exercise" ? (
+                    <div>
+                      <label style={labelStyle}>Contenu</label>
+                      <textarea placeholder="Contenu de cette section..." value={section.content} onChange={(e) => updateSection(i, "content", e.target.value)} rows={6} style={{ ...inputStyle, resize: "vertical" }} />
+                    </div>
+                  ) : (
+                    <p style={{ fontSize: 13, color: "#6B7280", fontStyle: "italic" }}>Les exercices seront ajoutés à l'étape suivante.</p>
+                  )}
+                </div>
+              ))}
+            </div>
+            <button onClick={addSection} style={{
+              width: "100%", padding: "12px", marginTop: 14,
+              background: "white", border: "2px dashed #D1D5DB", borderRadius: 10,
+              fontSize: 14, fontWeight: 600, color: "#6B7280", cursor: "pointer"
+            }}>+ Ajouter une section</button>
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 24 }}>
+              <button onClick={() => setStep(1)} style={{
+                padding: "12px 24px", background: "white", border: "1px solid #D1D5DB",
+                borderRadius: 8, fontSize: 14, fontWeight: 600, color: "#374151", cursor: "pointer"
+              }}>← Précédent</button>
+              <button onClick={() => setStep(3)} style={{
+                padding: "12px 28px", background: "#0F4C35", color: "white",
+                border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer"
+              }}>Suivant →</button>
+            </div>
+          </div>
+        )}
+
+        {/* STEP 3 */}
         {step === 3 && (
           <div>
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -562,107 +722,64 @@ export default function Admin({ onBack }) {
                   background: "white", borderRadius: 10, border: "1px solid #E5E7EB", padding: "18px"
                 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-                    <span style={{ fontSize: 15, fontWeight: 700, color: "#1F2937" }}>
-                      Exercice {i + 1}
-                    </span>
+                    <span style={{ fontSize: 15, fontWeight: 700, color: "#1F2937" }}>Exercice {i + 1}</span>
                     {exercises.length > 1 && (
                       <button onClick={() => removeExercise(i)} style={{
                         background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 6,
                         padding: "4px 10px", fontSize: 12, color: "#DC2626", cursor: "pointer"
-                      }}>
-                        Supprimer
-                      </button>
+                      }}>Supprimer</button>
                     )}
                   </div>
-
                   <div style={{ marginBottom: 12 }}>
                     <label style={labelStyle}>Type d'exercice</label>
-                    <select
-                      value={ex.type}
-                      onChange={(e) => updateExercise(i, "type", e.target.value)}
-                      style={inputStyle}
-                    >
+                    <select value={ex.type} onChange={(e) => updateExercise(i, "type", e.target.value)} style={inputStyle}>
                       <option value="open">Question ouverte</option>
                       <option value="fill">Texte à trous</option>
                       <option value="choice">Choix multiple</option>
                     </select>
                   </div>
-
                   <div style={{ marginBottom: 12 }}>
                     <label style={labelStyle}>Question</label>
-                    <textarea
-                      placeholder="Ex: Cite trois exemples de matière à l'état solide."
-                      value={ex.question}
-                      onChange={(e) => updateExercise(i, "question", e.target.value)}
-                      rows={2}
-                      style={{ ...inputStyle, resize: "vertical" }}
-                    />
+                    <textarea placeholder="Votre question..." value={ex.question} onChange={(e) => updateExercise(i, "question", e.target.value)} rows={2} style={{ ...inputStyle, resize: "vertical" }} />
                   </div>
-
                   {ex.type === "choice" && (
                     <div style={{ marginBottom: 12 }}>
-                      <label style={labelStyle}>Options (2 à 4 choix)</label>
+                      <label style={labelStyle}>Options</label>
                       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                         {ex.options.map((opt, j) => (
                           <div key={j} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <span style={{ fontSize: 13, fontWeight: 600, color: "#6B7280", width: 20 }}>
-                              {String.fromCharCode(65 + j)}.
-                            </span>
-                            <input
-                              type="text"
-                              placeholder={`Option ${j + 1}`}
-                              value={opt}
-                              onChange={(e) => updateOption(i, j, e.target.value)}
-                              style={{ ...inputStyle, flex: 1 }}
-                            />
+                            <span style={{ fontSize: 13, fontWeight: 600, color: "#6B7280", width: 20 }}>{String.fromCharCode(65 + j)}.</span>
+                            <input type="text" placeholder={`Option ${j + 1}`} value={opt} onChange={(e) => updateOption(i, j, e.target.value)} style={{ ...inputStyle, flex: 1 }} />
                           </div>
                         ))}
                       </div>
                     </div>
                   )}
-
                   {(ex.type === "fill" || ex.type === "choice") && (
                     <div>
                       <label style={labelStyle}>Réponse correcte</label>
-                      <input
-                        type="text"
-                        placeholder={ex.type === "choice" ? "Ex: Gazeux" : "Ex: liquide"}
-                        value={ex.answer}
-                        onChange={(e) => updateExercise(i, "answer", e.target.value)}
-                        style={inputStyle}
-                      />
+                      <input type="text" placeholder="Réponse..." value={ex.answer} onChange={(e) => updateExercise(i, "answer", e.target.value)} style={inputStyle} />
                     </div>
                   )}
                 </div>
               ))}
             </div>
-
             <button onClick={addExercise} style={{
               width: "100%", padding: "12px", marginTop: 14,
               background: "white", border: "2px dashed #D1D5DB", borderRadius: 10,
               fontSize: 14, fontWeight: 600, color: "#6B7280", cursor: "pointer"
-            }}>
-              + Ajouter un exercice
-            </button>
-
+            }}>+ Ajouter un exercice</button>
             <div style={{ display: "flex", justifyContent: "space-between", marginTop: 24 }}>
               <button onClick={() => setStep(2)} style={{
                 padding: "12px 24px", background: "white", border: "1px solid #D1D5DB",
                 borderRadius: 8, fontSize: 14, fontWeight: 600, color: "#374151", cursor: "pointer"
+              }}>← Précédent</button>
+              <button onClick={handleSave} disabled={saving} style={{
+                padding: "12px 28px", background: saving ? "#6B7280" : "#0F4C35",
+                color: "white", border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600,
+                cursor: saving ? "default" : "pointer"
               }}>
-                ← Précédent
-              </button>
-              <button
-                onClick={handleSave}
-                disabled={saving}
-                style={{
-                  padding: "12px 28px",
-                  background: saving ? "#6B7280" : "#0F4C35",
-                  color: "white", border: "none", borderRadius: 8,
-                  fontSize: 14, fontWeight: 600, cursor: saving ? "default" : "pointer"
-                }}
-              >
-                {saving ? "Enregistrement..." : "Enregistrer la leçon ✓"}
+                {saving ? "Enregistrement..." : editingId ? "Sauvegarder les modifications ✓" : "Enregistrer la leçon ✓"}
               </button>
             </div>
           </div>
