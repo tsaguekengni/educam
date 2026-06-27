@@ -109,7 +109,7 @@ const THEMES = [
   "Les voyages", "La santé", "Sports et loisirs", "Dans l'espace"
 ];
 
-export default function Dashboard({ teacher }) {
+export default function Dashboard({ teacher, onLogout }) {
   const [selectedLevel, setSelectedLevel] = useState(
     LEVELS.find(l => l.id === teacher?.level) || LEVELS[2]
   );
@@ -222,13 +222,29 @@ export default function Dashboard({ teacher }) {
             </option>
           ))}
         </select>
-        <div style={{
-          width: 36, height: 36, borderRadius: "50%", background: "#D97706",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          color: "white", fontSize: 12, fontWeight: 700
-        }}>
-          {teacher?.full_name?.split(" ").map(n => n[0]).join("") || "ME"}
-        </div>
+        <button
+          onClick={async () => {
+            const { createClient } = await import("@supabase/supabase-js");
+            const supabase = createClient(
+              process.env.NEXT_PUBLIC_SUPABASE_URL,
+              process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+            );
+            await supabase.auth.signOut();
+            onLogout();
+          }}
+          style={{
+            background: "rgba(255,255,255,0.15)",
+            border: "1px solid rgba(255,255,255,0.2)",
+            color: "white",
+            padding: "8px 14px",
+            borderRadius: 8,
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: "pointer"
+          }}
+        >
+          Déconnexion
+        </button>
       </div>
     </div>
   );

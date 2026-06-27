@@ -110,7 +110,7 @@ export default function Home() {
   };
 
   if (session && teacher) {
-    return <Dashboard teacher={teacher} />;
+    return <Dashboard teacher={teacher} onLogout={() => { setSession(null); setTeacher(null); }} />;
   }
 
   return (
