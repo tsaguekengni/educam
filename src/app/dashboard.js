@@ -152,6 +152,7 @@ export default function Dashboard({ teacher, onLogout }) {
   const [lessonSections, setLessonSections] = useState([]);
   const [lessonExercises, setLessonExercises] = useState([]);
   const [loadingLesson, setLoadingLesson] = useState(false);
+  const [lessonPassed, setLessonPassed] = useState(false);
 
   // Data
   const [timetable, setTimetable] = useState([]);
@@ -201,19 +202,14 @@ export default function Dashboard({ teacher, onLogout }) {
   const openLesson = async (lessonId) => {
     setLoadingLesson(true);
     const { data: lesson } = await supabase.from("lessons").select("*").eq("id", lessonId).single();
+    const { data: sections } = await supabase.from("lesson_sections").select("*").eq("lesson_id", lessonId).order("section_order");
+    const { data: exercises } = await supabase.from("exercises").select("*").eq("lesson_id", lessonId).order("exercise_order");
+    const { data: readiness } = await supabase.from("teacher_readiness").select("*").eq("teacher_id", teacher?.id).eq("lesson_id", lessonId).eq("passed", true).maybeSingle();
     setCurrentLesson(lesson);
-    setLoadingLesson(false);
-    setScreen("readiness");
-  };
-
-  const enterLesson = async () => {
-    if (!currentLesson) return;
-    setLoadingLesson(true);
-    const { data: sections } = await supabase.from("lesson_sections").select("*").eq("lesson_id", currentLesson.id).order("section_order");
-    const { data: exercises } = await supabase.from("exercises").select("*").eq("lesson_id", currentLesson.id).order("exercise_order");
     setLessonSections(sections || []);
     setLessonExercises(exercises || []);
     setExpandedSection(0);
+    setLessonPassed(!!readiness);
     setScreen("lesson");
     setLoadingLesson(false);
   };
@@ -768,7 +764,40 @@ export default function Dashboard({ teacher, onLogout }) {
           })}
         </div>
 
-        <div style={{ marginTop: 24 }}>
+        {/* Readiness status + quiz */}
+        <div style={{
+          marginTop: 28, padding: "20px", borderRadius: 12,
+          background: lessonPassed ? "#F0FDF4" : "#F5F3FF",
+          border: `1px solid ${lessonPassed ? "#BBF7D0" : "#DDD6FE"}`
+        }}>
+          {lessonPassed ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ fontSize: 32 }}>✅</div>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: "#16A34A" }}>Préparation validée</div>
+                <div style={{ fontSize: 13, color: "#6B7280", marginTop: 2 }}>Vous avez réussi le quiz. Vous pouvez présenter cette leçon à vos élèves.</div>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                <div style={{ fontSize: 32 }}>📝</div>
+                <div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: "#5B21B6" }}>Quiz de préparation</div>
+                  <div style={{ fontSize: 13, color: "#6B7280", marginTop: 2 }}>
+                    Après avoir lu cette leçon, passez le quiz pour valider votre préparation avant la présentation aux élèves.
+                  </div>
+                </div>
+              </div>
+              <button onClick={() => setScreen("readiness")} style={{
+                padding: "12px 24px", background: "#7C3AED", color: "white",
+                border: "none", borderRadius: 8, fontSize: 14, fontWeight: 700, cursor: "pointer"
+              }}>Passer le quiz de préparation →</button>
+            </div>
+          )}
+        </div>
+
+        <div style={{ marginTop: 16 }}>
           <button onClick={() => setScreen(tab)} style={{
             padding: "12px 20px", background: "white", border: "1px solid #D1D5DB",
             borderRadius: 8, fontSize: 14, fontWeight: 600, color: "#374151", cursor: "pointer"
@@ -871,7 +900,7 @@ export default function Dashboard({ teacher, onLogout }) {
         )}
         {screen === "calendar" && <CalendarView />}
         {screen === "programme" && <ProgrammeView />}
-        {screen === "readiness" && currentLesson && <ReadinessQuiz lesson={currentLesson} teacherId={teacher?.id} onPass={enterLesson} onBack={() => setScreen(tab)} />}
+        {screen === "readiness" && currentLesson && <ReadinessQuiz lesson={currentLesson} teacherId={teacher?.id} onPass={() => { setLessonPassed(true); setScreen("lesson"); }} onBack={() => setScreen("lesson")} />}
         {screen === "lesson" && <LessonScreen />}
         {screen === "admin" && <Admin onBack={() => { setScreen(tab); }} />}
       </div>
