@@ -710,9 +710,27 @@ export default function Dashboard({ teacher, onLogout }) {
                 {isOpen && (
                   <div style={{ padding: "0 18px 18px", borderTop: `1px solid ${accent}15` }}>
                     {section.section_type === "video" ? (
-                      <div style={{ background: "#1F2937", borderRadius: 10, padding: "50px 20px", textAlign: "center", marginTop: 14 }}>
-                        <div style={{ width: 64, height: 64, borderRadius: "50%", background: "rgba(255,255,255,0.2)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 28 }}>▶</div>
-                        <div style={{ color: "white", fontSize: 15, fontWeight: 600, marginTop: 14 }}>Vidéo: {section.title}</div>
+                      <div style={{ marginTop: 14 }}>
+                        {section.video_url ? (
+                          <div style={{ position: "relative", paddingBottom: "56.25%", height: 0, borderRadius: 10, overflow: "hidden" }}>
+                            <iframe
+                              src={section.video_url.includes("youtube.com/watch") 
+                                ? section.video_url.replace("watch?v=", "embed/").split("&")[0]
+                                : section.video_url.includes("youtu.be/")
+                                ? "https://www.youtube.com/embed/" + section.video_url.split("youtu.be/")[1].split("?")[0]
+                                : section.video_url}
+                              style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: "none" }}
+                              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                              allowFullScreen
+                            />
+                          </div>
+                        ) : (
+                          <div style={{ background: "#1F2937", borderRadius: 10, padding: "50px 20px", textAlign: "center" }}>
+                            <div style={{ width: 64, height: 64, borderRadius: "50%", background: "rgba(255,255,255,0.2)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 28 }}>▶</div>
+                            <div style={{ color: "white", fontSize: 15, fontWeight: 600, marginTop: 14 }}>Vidéo à venir</div>
+                            <div style={{ color: "#9CA3AF", fontSize: 13, marginTop: 4 }}>La vidéo pour cette leçon sera bientôt disponible.</div>
+                          </div>
+                        )}
                       </div>
                     ) : section.section_type === "exercise" ? (
                       <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 12 }}>
