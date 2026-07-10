@@ -2,6 +2,7 @@
 import { useState, useEffect } from "react";
 import { supabase } from "../lib/supabase";
 import Admin from "./admin";
+import ReadinessQuiz from "./readiness";
 
 const LEVELS = [
   { id: "ce1", name: "CE1", full: "Cours Élémentaire 1", primary: "Primary 3" },
@@ -200,9 +201,16 @@ export default function Dashboard({ teacher, onLogout }) {
   const openLesson = async (lessonId) => {
     setLoadingLesson(true);
     const { data: lesson } = await supabase.from("lessons").select("*").eq("id", lessonId).single();
-    const { data: sections } = await supabase.from("lesson_sections").select("*").eq("lesson_id", lessonId).order("section_order");
-    const { data: exercises } = await supabase.from("exercises").select("*").eq("lesson_id", lessonId).order("exercise_order");
     setCurrentLesson(lesson);
+    setLoadingLesson(false);
+    setScreen("readiness");
+  };
+
+  const enterLesson = async () => {
+    if (!currentLesson) return;
+    setLoadingLesson(true);
+    const { data: sections } = await supabase.from("lesson_sections").select("*").eq("lesson_id", currentLesson.id).order("section_order");
+    const { data: exercises } = await supabase.from("exercises").select("*").eq("lesson_id", currentLesson.id).order("exercise_order");
     setLessonSections(sections || []);
     setLessonExercises(exercises || []);
     setExpandedSection(0);
@@ -863,6 +871,7 @@ export default function Dashboard({ teacher, onLogout }) {
         )}
         {screen === "calendar" && <CalendarView />}
         {screen === "programme" && <ProgrammeView />}
+        {screen === "readiness" && currentLesson && <ReadinessQuiz lesson={currentLesson} teacherId={teacher?.id} onPass={enterLesson} onBack={() => setScreen(tab)} />}
         {screen === "lesson" && <LessonScreen />}
         {screen === "admin" && <Admin onBack={() => { setScreen(tab); }} />}
       </div>
