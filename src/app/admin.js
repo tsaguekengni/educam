@@ -155,6 +155,11 @@ export default function Admin({ onBack }) {
     { question: "", type: "open", options: ["", "", "", ""], answer: "" },
   ]);
 
+  // Readiness quiz
+  const [quizQuestions, setQuizQuestions] = useState([
+    { question: "", option_a: "", option_b: "", option_c: "", option_d: "", correct_answer: "A" },
+  ]);
+
   const selectedSubject = SUBJECTS.find(s => s.id === subjectId);
   const components = selectedSubject?.components || [];
 
@@ -186,6 +191,7 @@ export default function Admin({ onBack }) {
     setDuration("45 minutes");
     setSections([{ type: "intro", title: "Introduction", icon: "💡", content: "", videoUrl: "" }]);
     setExercises([{ question: "", type: "open", options: ["", "", "", ""], answer: "" }]);
+    setQuizQuestions([{ question: "", option_a: "", option_b: "", option_c: "", option_d: "", correct_answer: "A" }]);
   };
 
   const startCreate = () => {
@@ -241,9 +247,30 @@ export default function Admin({ onBack }) {
     } else {
       setExercises([{ question: "", type: "open", options: ["", "", "", ""], answer: "" }]);
     }
+    
+    // Load quiz questions
+    const { data: quizData } = await supabase
+      .from("readiness_questions")
+      .select("*")
+      .eq("lesson_id", lesson.id)
+      .order("question_order");
+
+    if (quizData && quizData.length > 0) {
+      setQuizQuestions(quizData.map(q => ({
+        question: q.question,
+        option_a: q.option_a,
+        option_b: q.option_b,
+        option_c: q.option_c,
+        option_d: q.option_d,
+        correct_answer: q.correct_answer,
+      })));
+    } else {
+      setQuizQuestions([{ question: "", option_a: "", option_b: "", option_c: "", option_d: "", correct_answer: "A" }]);
+    }
 
     setView("edit");
   };
+    
 
   const handleDelete = async (lessonId) => {
     // Sections and exercises cascade delete thanks to our DB setup
@@ -311,6 +338,28 @@ export default function Admin({ onBack }) {
           const { error: exercisesError } = await supabase.from("exercises").insert(exercisesToInsert);
           if (exercisesError) throw exercisesError;
         }
+
+        // 4. Delete old quiz questions and re-insert
+      const lessonId = editingId || lessonData.id;
+      await supabase.from("readiness_questions").delete().eq("lesson_id", lessonId);
+
+      const quizToInsert = quizQuestions
+        .filter(q => q.question.trim())
+        .map((q, i) => ({
+          lesson_id: lessonId,
+          question_order: i + 1,
+          question: q.question,
+          option_a: q.option_a,
+          option_b: q.option_b,
+          option_c: q.option_c,
+          option_d: q.option_d,
+          correct_answer: q.correct_answer,
+        }));
+
+      if (quizToInsert.length > 0) {
+        const { error: quizError } = await supabase.from("readiness_questions").insert(quizToInsert);
+        if (quizError) throw quizError;
+      }
 
       } else {
         // CREATE new lesson
@@ -556,12 +605,12 @@ export default function Admin({ onBack }) {
           {editingId ? "Modifier la leçon" : "Créer une nouvelle leçon"}
         </h1>
         <p style={{ color: "#6B7280", fontSize: 14, marginBottom: 28 }}>
-          Étape {step} sur 3 — {step === 1 ? "Informations de base" : step === 2 ? "Contenu de la leçon" : "Exercices"}
+          Étape {step} sur 4 — {step === 1 ? "Informations de base" : step === 2 ? "Contenu de la leçon" : step === 3 ? "Exercices" : "Quiz de préparation"}
         </p>
 
         {/* Progress bar */}
         <div style={{ display: "flex", gap: 6, marginBottom: 32 }}>
-          {[1, 2, 3].map(s => (
+          {[1, 2, 3, 4].map(s => (
             <div key={s} style={{
               flex: 1, height: 4, borderRadius: 4,
               background: s <= step ? "#0F4C35" : "#E5E7EB"
@@ -771,6 +820,115 @@ export default function Admin({ onBack }) {
             }}>+ Ajouter un exercice</button>
             <div style={{ display: "flex", justifyContent: "space-between", marginTop: 24 }}>
               <button onClick={() => setStep(2)} style={{
+                padding: "12px 24px", background: "white", border: "1px solid #D1D5DB",
+                borderRadius: 8, fontSize: 14, fontWeight: 600, color: "#374151", cursor: "pointer"
+              }}>← Précédent</button>
+              <button onClick={() => setStep(4)} style={{
+                padding: "12px 28px", background: "#0F4C35", color: "white",
+                border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer"
+              }}>Suivant →</button>
+            </div>
+          </div>
+        )}
+
+        {/* STEP 4 - QUIZ */}
+        {step === 4 && (
+          <div>
+            <div style={{
+              background: "#F5F3FF", border: "1px solid #DDD6FE", borderRadius: 10,
+              padding: "14px 16px", marginBottom: 20
+            }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "#5B21B6", marginBottom: 4 }}>
+                Quiz de préparation pour l'enseignant
+              </div>
+              <div style={{ fontSize: 13, color: "#6D28D9", lineHeight: 1.5 }}>
+                Ces questions vérifient que l'enseignant a bien compris la leçon avant de la présenter.
+                Créez au moins 5 questions à choix multiple. L'enseignant doit obtenir 80% pour valider.
+              </div>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              {quizQuestions.map((q, i) => (
+                <div key={i} style={{
+                  background: "white", borderRadius: 10, border: "1px solid #E5E7EB", padding: "18px"
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                    <span style={{ fontSize: 15, fontWeight: 700, color: "#1F2937" }}>Question {i + 1}</span>
+                    {quizQuestions.length > 1 && (
+                      <button onClick={() => setQuizQuestions(quizQuestions.filter((_, j) => j !== i))} style={{
+                        background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 6,
+                        padding: "4px 10px", fontSize: 12, color: "#DC2626", cursor: "pointer"
+                      }}>Supprimer</button>
+                    )}
+                  </div>
+
+                  <div style={{ marginBottom: 12 }}>
+                    <label style={labelStyle}>Question</label>
+                    <textarea
+                      placeholder="Ex: Combien d'états de la matière les élèves doivent-ils identifier?"
+                      value={q.question}
+                      onChange={(e) => {
+                        const updated = [...quizQuestions];
+                        updated[i].question = e.target.value;
+                        setQuizQuestions(updated);
+                      }}
+                      rows={2}
+                      style={{ ...inputStyle, resize: "vertical" }}
+                    />
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+                    {["a", "b", "c", "d"].map((letter, j) => (
+                      <div key={letter}>
+                        <label style={labelStyle}>Option {letter.toUpperCase()}</label>
+                        <input
+                          type="text"
+                          placeholder={`Option ${letter.toUpperCase()}`}
+                          value={q[`option_${letter}`]}
+                          onChange={(e) => {
+                            const updated = [...quizQuestions];
+                            updated[i][`option_${letter}`] = e.target.value;
+                            setQuizQuestions(updated);
+                          }}
+                          style={inputStyle}
+                        />
+                      </div>
+                    ))}
+                  </div>
+
+                  <div>
+                    <label style={labelStyle}>Bonne réponse</label>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      {["A", "B", "C", "D"].map(letter => (
+                        <button key={letter}
+                          onClick={() => {
+                            const updated = [...quizQuestions];
+                            updated[i].correct_answer = letter;
+                            setQuizQuestions(updated);
+                          }}
+                          style={{
+                            width: 44, height: 44, borderRadius: 8,
+                            border: `2px solid ${q.correct_answer === letter ? "#7C3AED" : "#D1D5DB"}`,
+                            background: q.correct_answer === letter ? "#7C3AED" : "white",
+                            color: q.correct_answer === letter ? "white" : "#374151",
+                            fontSize: 16, fontWeight: 700, cursor: "pointer"
+                          }}
+                        >{letter}</button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <button onClick={() => setQuizQuestions([...quizQuestions, { question: "", option_a: "", option_b: "", option_c: "", option_d: "", correct_answer: "A" }])} style={{
+              width: "100%", padding: "12px", marginTop: 14,
+              background: "white", border: "2px dashed #D1D5DB", borderRadius: 10,
+              fontSize: 14, fontWeight: 600, color: "#6B7280", cursor: "pointer"
+            }}>+ Ajouter une question</button>
+
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 24 }}>
+              <button onClick={() => setStep(3)} style={{
                 padding: "12px 24px", background: "white", border: "1px solid #D1D5DB",
                 borderRadius: 8, fontSize: 14, fontWeight: 600, color: "#374151", cursor: "pointer"
               }}>← Précédent</button>
