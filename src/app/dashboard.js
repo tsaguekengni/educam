@@ -135,7 +135,15 @@ function getEmbedUrl(url) {
   if (!url) return "";
   if (url.includes("youtube.com/watch")) return url.replace("watch?v=", "embed/").split("&")[0];
   if (url.includes("youtu.be/")) return "https://www.youtube.com/embed/" + url.split("youtu.be/")[1].split("?")[0];
+  if (url.includes("youtube.com/shorts/")) return url.replace("shorts/", "embed/").split("?")[0];
   return url;
+}
+
+// Returns true for YouTube/Vimeo/Dailymotion embeddable URLs, false for
+// direct video files (.mp4, .webm …) that need a <video> tag instead.
+function isEmbeddable(url) {
+  if (!url) return false;
+  return /youtube\.com|youtu\.be|vimeo\.com|dailymotion\.com/i.test(url);
 }
 
 export default function Dashboard({ teacher, onLogout }) {
@@ -163,6 +171,7 @@ export default function Dashboard({ teacher, onLogout }) {
   const [lessonExercises, setLessonExercises] = useState([]);
   const [loadingLesson, setLoadingLesson] = useState(false);
   const [lessonPassed, setLessonPassed] = useState(false);
+  const [projectorMode, setProjectorMode] = useState(false);
 
   // Data
   const [timetable, setTimetable] = useState([]);
@@ -711,9 +720,22 @@ export default function Dashboard({ teacher, onLogout }) {
           </div>
           <h1 style={{ fontSize: 22, fontWeight: 800, color: "#111827", margin: "0 0 8px" }}>{currentLesson.title}</h1>
           <p style={{ fontSize: 14, color: "#4B5563", margin: "0 0 12px", lineHeight: 1.6 }}>{currentLesson.objective}</p>
-          <div style={{ display: "flex", gap: 16, fontSize: 13, color: "#6B7280" }}>
-            <span>⏱ {currentLesson.duration}</span>
-            <span>📚 {selectedLevel.name}</span>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 12 }}>
+            <div style={{ display: "flex", gap: 16, fontSize: 13, color: "#6B7280" }}>
+              <span>⏱ {currentLesson.duration}</span>
+              <span>📚 {selectedLevel.name}</span>
+            </div>
+            <button onClick={enterProjector} style={{
+              display: "flex", alignItems: "center", gap: 8,
+              background: "#0F4C35", color: "white", border: "none",
+              borderRadius: 10, padding: "10px 20px", fontSize: 14, fontWeight: 700,
+              cursor: "pointer", transition: "all 0.2s"
+            }}
+              onMouseEnter={e => { e.currentTarget.style.background = "#1A7A56"; e.currentTarget.style.transform = "translateY(-1px)"; }}
+              onMouseLeave={e => { e.currentTarget.style.background = "#0F4C35"; e.currentTarget.style.transform = "none"; }}
+            >
+              <span style={{ fontSize: 18 }}>📽</span> Mode Projecteur
+            </button>
           </div>
         </div>
 
@@ -778,11 +800,16 @@ export default function Dashboard({ teacher, onLogout }) {
                             }
                             if (block.block_type === "image" && block.media_url) {
                               return (
-                                <figure key={k} style={{ margin: 0 }}>
+                                <figure key={k} style={{ margin: "8px 0" }}>
                                   <img
                                     src={block.media_url}
                                     alt={block.alt_text || ""}
-                                    style={{ maxWidth: "100%", borderRadius: 10, display: "block" }}
+                                    style={{
+                                      maxWidth: "100%", borderRadius: 10, display: "block",
+                                      cursor: "pointer", transition: "transform 0.2s",
+                                      boxShadow: "0 2px 12px rgba(0,0,0,0.08)"
+                                    }}
+                                    onClick={e => { e.currentTarget.style.transform = e.currentTarget.style.transform === "scale(1.5)" ? "none" : "scale(1.5)"; }}
                                   />
                                   {block.caption && (
                                     <figcaption style={{ fontSize: 13, color: "#6B7280", marginTop: 6, textAlign: "center" }}>
@@ -795,14 +822,23 @@ export default function Dashboard({ teacher, onLogout }) {
                             if (block.block_type === "video" && block.media_url) {
                               return (
                                 <div key={k}>
-                                  <div style={{ position: "relative", paddingBottom: "56.25%", height: 0, borderRadius: 10, overflow: "hidden" }}>
-                                    <iframe
-                                      src={getEmbedUrl(block.media_url)}
-                                      style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: "none" }}
-                                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                                      allowFullScreen
+                                  {isEmbeddable(block.media_url) ? (
+                                    <div style={{ position: "relative", paddingBottom: "56.25%", height: 0, borderRadius: 10, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.08)" }}>
+                                      <iframe
+                                        src={getEmbedUrl(block.media_url)}
+                                        style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: "none" }}
+                                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                                        allowFullScreen
+                                      />
+                                    </div>
+                                  ) : (
+                                    <video
+                                      src={block.media_url}
+                                      controls
+                                      playsInline
+                                      style={{ width: "100%", borderRadius: 10, display: "block", boxShadow: "0 2px 12px rgba(0,0,0,0.08)" }}
                                     />
-                                  </div>
+                                  )}
                                   {block.caption && (
                                     <div style={{ fontSize: 13, color: "#6B7280", marginTop: 6, textAlign: "center" }}>
                                       {block.caption}
@@ -866,9 +902,218 @@ export default function Dashboard({ teacher, onLogout }) {
     );
   };
 
+  // ============ PROJECTOR VIEW ============
+  const enterProjector = () => {
+    setProjectorMode(true);
+    try { document.documentElement.requestFullscreen?.(); } catch (_) {}
+  };
+  const exitProjector = () => {
+    setProjectorMode(false);
+    try { if (document.fullscreenElement) document.exitFullscreen?.(); } catch (_) {}
+  };
+
+  // Close projector on ESC or when browser exits fullscreen
+  useEffect(() => {
+    if (!projectorMode) return;
+    const onKey = (e) => { if (e.key === "Escape") exitProjector(); };
+    const onFsChange = () => { if (!document.fullscreenElement) setProjectorMode(false); };
+    window.addEventListener("keydown", onKey);
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("fullscreenchange", onFsChange);
+    };
+  }, [projectorMode]);
+
+  const ProjectorView = () => {
+    if (!currentLesson) return null;
+    const color = getSubjectColor(currentLesson.subject_id);
+
+    // Auto-scale: measure total text and pick font size
+    const allText = lessonSections.flatMap(s =>
+      (sectionBlocks[s.id] || []).filter(b => b.block_type === "text").map(b => b.text_content || "")
+    ).join("");
+    const len = allText.length;
+    const baseFontVw = len < 500 ? 2.8 : len < 1500 ? 2.2 : len < 4000 ? 1.7 : 1.4;
+    const basePx = `max(18px, ${baseFontVw}vw)`;
+
+    return (
+      <div style={{
+        position: "fixed", inset: 0, zIndex: 9999, background: "white",
+        overflow: "auto", fontFamily: "'Segoe UI', system-ui, sans-serif"
+      }}>
+        {/* Floating controls */}
+        <div style={{
+          position: "fixed", top: 20, right: 24, zIndex: 10000,
+          display: "flex", gap: 10
+        }}>
+          <button onClick={exitProjector} style={{
+            background: "rgba(0,0,0,0.7)", color: "white", border: "none",
+            borderRadius: 10, padding: "10px 20px", fontSize: 15, fontWeight: 700,
+            cursor: "pointer", backdropFilter: "blur(8px)",
+            boxShadow: "0 4px 20px rgba(0,0,0,0.2)"
+          }}>✕ Quitter le projecteur</button>
+        </div>
+
+        {/* Content */}
+        <div style={{ maxWidth: 1200, margin: "0 auto", padding: "60px 48px 80px" }}>
+          {/* Lesson header */}
+          <div style={{
+            background: `linear-gradient(135deg, ${color}18, ${color}08)`,
+            borderRadius: 20, padding: "48px 56px", marginBottom: 48,
+            border: `2px solid ${color}30`
+          }}>
+            <div style={{
+              fontSize: `max(14px, ${baseFontVw * 0.6}vw)`, color: color,
+              fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, marginBottom: 12
+            }}>
+              Unité {currentLesson.unit_number} · {currentLesson.theme} · {selectedLevel.name}
+            </div>
+            <h1 style={{
+              fontSize: `max(28px, ${baseFontVw * 1.6}vw)`, fontWeight: 800,
+              color: "#111827", margin: "0 0 16px", lineHeight: 1.2
+            }}>{currentLesson.title}</h1>
+            <p style={{
+              fontSize: `max(16px, ${baseFontVw * 0.85}vw)`, color: "#4B5563",
+              margin: 0, lineHeight: 1.7
+            }}>{currentLesson.objective}</p>
+          </div>
+
+          {/* All sections — expanded, no collapse */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 40 }}>
+            {lessonSections.filter(s => s.section_type !== "exercise").map((section, i) => {
+              const accentColors = { intro: "#3B82F6", content: "#0F4C35", video: "#EF4444", activity: "#8B5CF6" };
+              const accent = accentColors[section.section_type] || "#6B7280";
+              const blocks = sectionBlocks[section.id] || [];
+
+              return (
+                <div key={i}>
+                  {/* Section header */}
+                  <div style={{
+                    display: "flex", alignItems: "center", gap: 16,
+                    marginBottom: 24, paddingBottom: 16,
+                    borderBottom: `3px solid ${accent}30`
+                  }}>
+                    <span style={{ fontSize: `max(28px, ${baseFontVw * 1.3}vw)` }}>{section.icon}</span>
+                    <span style={{
+                      fontSize: `max(22px, ${baseFontVw * 1.2}vw)`, fontWeight: 800, color: "#111827"
+                    }}>{section.title}</span>
+                  </div>
+
+                  {/* Blocks */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 32 }}>
+                    {blocks.length === 0 ? (
+                      <div style={{
+                        background: "#F9FAFB", borderRadius: 16, padding: "40px",
+                        textAlign: "center", color: "#9CA3AF",
+                        fontSize: `max(16px, ${baseFontVw * 0.8}vw)`
+                      }}>
+                        Contenu à venir pour cette section.
+                      </div>
+                    ) : (
+                      blocks.map((block, k) => {
+                        if (block.block_type === "text") {
+                          return (
+                            <div key={k} style={{
+                              fontSize: basePx, color: "#1F2937",
+                              lineHeight: 1.9, whiteSpace: "pre-wrap",
+                              maxWidth: 1000
+                            }}>
+                              {block.text_content}
+                            </div>
+                          );
+                        }
+                        if (block.block_type === "image" && block.media_url) {
+                          return (
+                            <figure key={k} style={{
+                              margin: "16px auto", textAlign: "center", maxWidth: "90%"
+                            }}>
+                              <img
+                                src={block.media_url}
+                                alt={block.alt_text || ""}
+                                style={{
+                                  maxWidth: "100%", maxHeight: "75vh",
+                                  borderRadius: 16, display: "block", margin: "0 auto",
+                                  boxShadow: "0 4px 24px rgba(0,0,0,0.1)",
+                                  cursor: "pointer", transition: "transform 0.3s"
+                                }}
+                                onClick={e => { e.currentTarget.style.transform = e.currentTarget.style.transform === "scale(1.4)" ? "none" : "scale(1.4)"; }}
+                              />
+                              {block.caption && (
+                                <figcaption style={{
+                                  fontSize: `max(14px, ${baseFontVw * 0.7}vw)`,
+                                  color: "#6B7280", marginTop: 12
+                                }}>
+                                  {block.caption}
+                                </figcaption>
+                              )}
+                            </figure>
+                          );
+                        }
+                        if (block.block_type === "video" && block.media_url) {
+                          return (
+                            <div key={k} style={{ width: "100%", maxWidth: 1000, margin: "0 auto" }}>
+                              {isEmbeddable(block.media_url) ? (
+                                <div style={{
+                                  position: "relative", paddingBottom: "56.25%", height: 0,
+                                  borderRadius: 16, overflow: "hidden",
+                                  boxShadow: "0 4px 24px rgba(0,0,0,0.1)"
+                                }}>
+                                  <iframe
+                                    src={getEmbedUrl(block.media_url)}
+                                    style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: "none" }}
+                                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                                    allowFullScreen
+                                  />
+                                </div>
+                              ) : (
+                                <video
+                                  src={block.media_url}
+                                  controls
+                                  playsInline
+                                  style={{
+                                    width: "100%", borderRadius: 16, display: "block",
+                                    boxShadow: "0 4px 24px rgba(0,0,0,0.1)"
+                                  }}
+                                />
+                              )}
+                              {block.caption && (
+                                <div style={{
+                                  fontSize: `max(14px, ${baseFontVw * 0.7}vw)`,
+                                  color: "#6B7280", marginTop: 12, textAlign: "center"
+                                }}>
+                                  {block.caption}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        }
+                        return null;
+                      })
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Footer */}
+          <div style={{
+            marginTop: 64, paddingTop: 32, borderTop: "2px solid #E5E7EB",
+            textAlign: "center", color: "#9CA3AF",
+            fontSize: `max(14px, ${baseFontVw * 0.6}vw)`
+          }}>
+            EduCam · {currentLesson.title} · {selectedLevel.name}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   // ============ MAIN RENDER ============
   return (
     <div style={{ minHeight: "100vh", background: "#F9FAFB", fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
+      {projectorMode && <ProjectorView />}
       <Header />
       <div style={{ maxWidth: 800, margin: "0 auto", padding: "32px 20px 80px" }}>
         {screen === "home" && (
