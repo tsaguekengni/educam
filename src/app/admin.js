@@ -1,14 +1,14 @@
 "use client";
 import { useState, useEffect } from "react";
 import { supabase } from "../lib/supabase";
-
+ 
 const LEVELS = [
   { id: "ce1", name: "CE1 — Primary 3" },
   { id: "ce2", name: "CE2 — Primary 4" },
   { id: "cm1", name: "CM1 — Primary 5" },
   { id: "cm2", name: "CM2 — Primary 6" },
 ];
-
+ 
 const SUBJECTS = [
   {
     id: "francais", name: "Français et Littérature",
@@ -103,12 +103,12 @@ const SUBJECTS = [
     ]
   },
 ];
-
+ 
 const THEMES = [
   "La nature", "Le village, la ville", "L'école", "Les métiers",
   "Les voyages", "La santé", "Sports et loisirs", "Dans l'espace"
 ];
-
+ 
 const SECTION_TYPES = [
   { id: "intro", name: "Introduction", icon: "💡" },
   { id: "content", name: "Contenu de la leçon", icon: "📖" },
@@ -116,29 +116,40 @@ const SECTION_TYPES = [
   { id: "activity", name: "Activité pratique", icon: "🧪" },
   { id: "exercise", name: "Exercices", icon: "✏️" },
 ];
-
+ 
+const BLOCK_TYPES = [
+  { id: "text", name: "Texte", icon: "📝" },
+  { id: "image", name: "Image", icon: "🖼️" },
+  { id: "video", name: "Vidéo", icon: "🎬" },
+];
+ 
+const emptyBlock = (type = "text") => ({
+  block_type: type, text_content: "", media_url: "", caption: "", alt_text: "",
+});
+ 
 const inputStyle = {
   width: "100%", padding: "10px 12px", border: "1.5px solid #D1D5DB",
   borderRadius: 8, fontSize: 14, outline: "none", boxSizing: "border-box",
   background: "white"
 };
-
+ 
 const labelStyle = {
   fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6
 };
-
+ 
 export default function Admin({ onBack }) {
   const [view, setView] = useState("list"); // list, create, edit
   const [allLessons, setAllLessons] = useState([]);
   const [loadingLessons, setLoadingLessons] = useState(true);
   const [editingId, setEditingId] = useState(null);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
-
+ 
   // Form state
   const [step, setStep] = useState(1);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-
+  const [uploadingKey, setUploadingKey] = useState(null); // `${sectionIndex}-${blockIndex}` currently uploading
+ 
   const [subjectId, setSubjectId] = useState("francais");
   const [componentId, setComponentId] = useState("expression-orale");
   const [levelId, setLevelId] = useState("cm1");
@@ -146,28 +157,28 @@ export default function Admin({ onBack }) {
   const [title, setTitle] = useState("");
   const [objective, setObjective] = useState("");
   const [duration, setDuration] = useState("45 minutes");
-
+ 
   const [sections, setSections] = useState([
-    { type: "intro", title: "Introduction", icon: "💡", content: "", videoUrl: "" },
+    { type: "intro", title: "Introduction", icon: "💡", blocks: [emptyBlock("text")] },
   ]);
-
+ 
   const [exercises, setExercises] = useState([
     { question: "", type: "open", options: ["", "", "", ""], answer: "" },
   ]);
-
+ 
   // Readiness quiz
   const [quizQuestions, setQuizQuestions] = useState([
     { question: "", option_a: "", option_b: "", option_c: "", option_d: "", correct_answer: "A" },
   ]);
-
+ 
   const selectedSubject = SUBJECTS.find(s => s.id === subjectId);
   const components = selectedSubject?.components || [];
-
+ 
   // Load all lessons
   useEffect(() => {
     fetchAllLessons();
   }, []);
-
+ 
   const fetchAllLessons = async () => {
     setLoadingLessons(true);
     const { data } = await supabase
@@ -177,7 +188,7 @@ export default function Admin({ onBack }) {
     setAllLessons(data || []);
     setLoadingLessons(false);
   };
-
+ 
   const resetForm = () => {
     setStep(1);
     setError("");
@@ -189,16 +200,16 @@ export default function Admin({ onBack }) {
     setTitle("");
     setObjective("");
     setDuration("45 minutes");
-    setSections([{ type: "intro", title: "Introduction", icon: "💡", content: "", videoUrl: "" }]);
+    setSections([{ type: "intro", title: "Introduction", icon: "💡", blocks: [emptyBlock("text")] }]);
     setExercises([{ question: "", type: "open", options: ["", "", "", ""], answer: "" }]);
     setQuizQuestions([{ question: "", option_a: "", option_b: "", option_c: "", option_d: "", correct_answer: "A" }]);
   };
-
+ 
   const startCreate = () => {
     resetForm();
     setView("create");
   };
-
+ 
   const startEdit = async (lesson) => {
     setEditingId(lesson.id);
     setSubjectId(lesson.subject_id);
@@ -210,33 +221,51 @@ export default function Admin({ onBack }) {
     setDuration(lesson.duration || "45 minutes");
     setStep(1);
     setError("");
-
+ 
     // Load sections
     const { data: sectionData } = await supabase
       .from("lesson_sections")
       .select("*")
       .eq("lesson_id", lesson.id)
       .order("section_order");
-
+ 
     if (sectionData && sectionData.length > 0) {
-      setSections(sectionData.map(s => ({
-        type: s.section_type,
-        title: s.title,
-        icon: s.icon,
-        content: s.content || "",
-        videoUrl: s.video_url || "",
-      })));
+      // Load every block for every section of this lesson in one query
+      const sectionIds = sectionData.map(s => s.id);
+      const { data: blockData } = await supabase
+        .from("section_blocks")
+        .select("*")
+        .in("section_id", sectionIds)
+        .order("block_order");
+ 
+      setSections(sectionData.map(s => {
+        const ownBlocks = (blockData || [])
+          .filter(b => b.section_id === s.id)
+          .map(b => ({
+            block_type: b.block_type,
+            text_content: b.text_content || "",
+            media_url: b.media_url || "",
+            caption: b.caption || "",
+            alt_text: b.alt_text || "",
+          }));
+        return {
+          type: s.section_type,
+          title: s.title,
+          icon: s.icon,
+          blocks: ownBlocks.length > 0 ? ownBlocks : [emptyBlock("text")],
+        };
+      }));
     } else {
-      setSections([{ type: "intro", title: "Introduction", icon: "💡", content: "", videoUrl: "" }]);
+      setSections([{ type: "intro", title: "Introduction", icon: "💡", blocks: [emptyBlock("text")] }]);
     }
-
+ 
     // Load exercises
     const { data: exerciseData } = await supabase
       .from("exercises")
       .select("*")
       .eq("lesson_id", lesson.id)
       .order("exercise_order");
-
+ 
     if (exerciseData && exerciseData.length > 0) {
       setExercises(exerciseData.map(ex => ({
         question: ex.question,
@@ -247,14 +276,14 @@ export default function Admin({ onBack }) {
     } else {
       setExercises([{ question: "", type: "open", options: ["", "", "", ""], answer: "" }]);
     }
-    
+ 
     // Load quiz questions
     const { data: quizData } = await supabase
       .from("readiness_questions")
       .select("*")
       .eq("lesson_id", lesson.id)
       .order("question_order");
-
+ 
     if (quizData && quizData.length > 0) {
       setQuizQuestions(quizData.map(q => ({
         question: q.question,
@@ -267,25 +296,27 @@ export default function Admin({ onBack }) {
     } else {
       setQuizQuestions([{ question: "", option_a: "", option_b: "", option_c: "", option_d: "", correct_answer: "A" }]);
     }
-
+ 
     setView("edit");
   };
-    
-
+ 
+ 
   const handleDelete = async (lessonId) => {
-    // Sections and exercises cascade delete thanks to our DB setup
+    // Sections, blocks, exercises and readiness cascade delete thanks to our DB setup
     const { error } = await supabase.from("lessons").delete().eq("id", lessonId);
     if (!error) {
       setAllLessons(allLessons.filter(l => l.id !== lessonId));
       setDeleteConfirm(null);
     }
   };
-
+ 
   const handleSave = async () => {
     setSaving(true);
     setError("");
-
+ 
     try {
+      let lessonId;
+ 
       if (editingId) {
         // UPDATE existing lesson
         const { error: updateError } = await supabase
@@ -301,66 +332,15 @@ export default function Admin({ onBack }) {
             duration: duration,
           })
           .eq("id", editingId);
-
+ 
         if (updateError) throw updateError;
-
-        // Delete old sections and exercises, then re-insert
-        await supabase.from("lesson_sections").delete().eq("lesson_id", editingId);
-        await supabase.from("exercises").delete().eq("lesson_id", editingId);
-
-        // Re-insert sections
-        const sectionsToInsert = sections.map((s, i) => ({
-          lesson_id: editingId,
-          section_order: i + 1,
-          section_type: s.type,
-          title: s.title,
-          icon: s.icon,
-          content: s.type === "video" ? null : s.content,
-          video_url: s.type === "video" ? s.videoUrl : null,
-        }));
-
-        const { error: sectionsError } = await supabase.from("lesson_sections").insert(sectionsToInsert);
-        if (sectionsError) throw sectionsError;
-
-        // Re-insert exercises
-        const exercisesToInsert = exercises
-          .filter(ex => ex.question.trim())
-          .map((ex, i) => ({
-            lesson_id: editingId,
-            exercise_order: i + 1,
-            question: ex.question,
-            exercise_type: ex.type,
-            options: ex.type === "choice" ? JSON.stringify(ex.options.filter(o => o.trim())) : null,
-            answer: ex.answer || null,
-          }));
-
-        if (exercisesToInsert.length > 0) {
-          const { error: exercisesError } = await supabase.from("exercises").insert(exercisesToInsert);
-          if (exercisesError) throw exercisesError;
-        }
-
-        // 4. Delete old quiz questions and re-insert
-      const lessonId = editingId || lessonData.id;
-      await supabase.from("readiness_questions").delete().eq("lesson_id", lessonId);
-
-      const quizToInsert = quizQuestions
-        .filter(q => q.question.trim())
-        .map((q, i) => ({
-          lesson_id: lessonId,
-          question_order: i + 1,
-          question: q.question,
-          option_a: q.option_a,
-          option_b: q.option_b,
-          option_c: q.option_c,
-          option_d: q.option_d,
-          correct_answer: q.correct_answer,
-        }));
-
-      if (quizToInsert.length > 0) {
-        const { error: quizError } = await supabase.from("readiness_questions").insert(quizToInsert);
-        if (quizError) throw quizError;
-      }
-
+        lessonId = editingId;
+ 
+        // Wipe old children before re-inserting. Deleting lesson_sections
+        // cascade-deletes their section_blocks automatically.
+        await supabase.from("lesson_sections").delete().eq("lesson_id", lessonId);
+        await supabase.from("exercises").delete().eq("lesson_id", lessonId);
+        await supabase.from("readiness_questions").delete().eq("lesson_id", lessonId);
       } else {
         // CREATE new lesson
         const { data: lessonData, error: lessonError } = await supabase
@@ -377,49 +357,101 @@ export default function Admin({ onBack }) {
           })
           .select()
           .single();
-
+ 
         if (lessonError) throw lessonError;
-
-        const sectionsToInsert = sections.map((s, i) => ({
-          lesson_id: lessonData.id,
-          section_order: i + 1,
-          section_type: s.type,
-          title: s.title,
-          icon: s.icon,
-          content: s.type === "video" ? null : s.content,
-          video_url: s.type === "video" ? s.videoUrl : null,
-        }));
-
-        const { error: sectionsError } = await supabase.from("lesson_sections").insert(sectionsToInsert);
-        if (sectionsError) throw sectionsError;
-
-        const exercisesToInsert = exercises
-          .filter(ex => ex.question.trim())
-          .map((ex, i) => ({
-            lesson_id: lessonData.id,
-            exercise_order: i + 1,
-            question: ex.question,
-            exercise_type: ex.type,
-            options: ex.type === "choice" ? JSON.stringify(ex.options.filter(o => o.trim())) : null,
-            answer: ex.answer || null,
-          }));
-
-        if (exercisesToInsert.length > 0) {
-          const { error: exercisesError } = await supabase.from("exercises").insert(exercisesToInsert);
-          if (exercisesError) throw exercisesError;
-        }
+        lessonId = lessonData.id;
       }
-
+ 
+      // Insert sections (base fields only — content now lives in section_blocks)
+      const sectionsToInsert = sections.map((s, i) => ({
+        lesson_id: lessonId,
+        section_order: i + 1,
+        section_type: s.type,
+        title: s.title,
+        icon: s.icon,
+      }));
+ 
+      const { data: insertedSections, error: sectionsError } = await supabase
+        .from("lesson_sections")
+        .insert(sectionsToInsert)
+        .select();
+      if (sectionsError) throw sectionsError;
+ 
+      // Build blocks against the freshly-created section ids.
+      // Supabase preserves insertion order in the returned rows, so
+      // insertedSections[i] corresponds to sections[i].
+      const blocksToInsert = [];
+      sections.forEach((s, i) => {
+        const sectionId = insertedSections[i]?.id;
+        if (!sectionId) return;
+        (s.blocks || []).forEach((b, j) => {
+          const hasContent =
+            (b.block_type === "text" && b.text_content && b.text_content.trim()) ||
+            ((b.block_type === "image" || b.block_type === "video") && b.media_url && b.media_url.trim());
+          if (!hasContent) return;
+          blocksToInsert.push({
+            section_id: sectionId,
+            block_order: j + 1,
+            block_type: b.block_type,
+            text_content: b.block_type === "text" ? b.text_content : null,
+            media_url: b.block_type !== "text" ? b.media_url : null,
+            caption: b.caption && b.caption.trim() ? b.caption : null,
+            alt_text: b.alt_text && b.alt_text.trim() ? b.alt_text : null,
+          });
+        });
+      });
+ 
+      if (blocksToInsert.length > 0) {
+        const { error: blocksError } = await supabase.from("section_blocks").insert(blocksToInsert);
+        if (blocksError) throw blocksError;
+      }
+ 
+      // Exercises
+      const exercisesToInsert = exercises
+        .filter(ex => ex.question.trim())
+        .map((ex, i) => ({
+          lesson_id: lessonId,
+          exercise_order: i + 1,
+          question: ex.question,
+          exercise_type: ex.type,
+          options: ex.type === "choice" ? JSON.stringify(ex.options.filter(o => o.trim())) : null,
+          answer: ex.answer || null,
+        }));
+ 
+      if (exercisesToInsert.length > 0) {
+        const { error: exercisesError } = await supabase.from("exercises").insert(exercisesToInsert);
+        if (exercisesError) throw exercisesError;
+      }
+ 
+      // Readiness quiz (teacher prep quiz)
+      const quizToInsert = quizQuestions
+        .filter(q => q.question.trim())
+        .map((q, i) => ({
+          lesson_id: lessonId,
+          question_order: i + 1,
+          question: q.question,
+          option_a: q.option_a,
+          option_b: q.option_b,
+          option_c: q.option_c,
+          option_d: q.option_d,
+          correct_answer: q.correct_answer,
+        }));
+ 
+      if (quizToInsert.length > 0) {
+        const { error: quizError } = await supabase.from("readiness_questions").insert(quizToInsert);
+        if (quizError) throw quizError;
+      }
+ 
       await fetchAllLessons();
       setView("list");
       resetForm();
     } catch (err) {
       setError("Erreur: " + err.message);
     }
-
+ 
     setSaving(false);
   };
-
+ 
   // ============ HELPERS ============
   const getSubjectName = (id) => SUBJECTS.find(s => s.id === id)?.name || id;
   const getComponentName = (subId, compId) => {
@@ -427,9 +459,9 @@ export default function Admin({ onBack }) {
     return sub?.components.find(c => c.id === compId)?.name || compId;
   };
   const getLevelName = (id) => LEVELS.find(l => l.id === id)?.name || id;
-
+ 
   const addSection = () => {
-    setSections([...sections, { type: "content", title: "", icon: "📖", content: "", videoUrl: "" }]);
+    setSections([...sections, { type: "content", title: "", icon: "📖", blocks: [emptyBlock("text")] }]);
   };
   const updateSection = (index, field, value) => {
     const updated = [...sections];
@@ -441,7 +473,55 @@ export default function Admin({ onBack }) {
     setSections(updated);
   };
   const removeSection = (index) => { if (sections.length > 1) setSections(sections.filter((_, i) => i !== index)); };
-
+ 
+  // ---- Block helpers (text / image / video within a section) ----
+  const addBlock = (sIndex, type = "text") => {
+    const updated = [...sections];
+    updated[sIndex] = { ...updated[sIndex], blocks: [...updated[sIndex].blocks, emptyBlock(type)] };
+    setSections(updated);
+  };
+  const updateBlock = (sIndex, bIndex, field, value) => {
+    const updated = [...sections];
+    const blocks = [...updated[sIndex].blocks];
+    blocks[bIndex] = { ...blocks[bIndex], [field]: value };
+    updated[sIndex] = { ...updated[sIndex], blocks };
+    setSections(updated);
+  };
+  const removeBlock = (sIndex, bIndex) => {
+    const updated = [...sections];
+    if (updated[sIndex].blocks.length > 1) {
+      updated[sIndex] = { ...updated[sIndex], blocks: updated[sIndex].blocks.filter((_, i) => i !== bIndex) };
+      setSections(updated);
+    }
+  };
+  const moveBlock = (sIndex, bIndex, direction) => {
+    const updated = [...sections];
+    const blocks = [...updated[sIndex].blocks];
+    const newIndex = bIndex + direction;
+    if (newIndex < 0 || newIndex >= blocks.length) return;
+    [blocks[bIndex], blocks[newIndex]] = [blocks[newIndex], blocks[bIndex]];
+    updated[sIndex] = { ...updated[sIndex], blocks };
+    setSections(updated);
+  };
+ 
+  const handleImageUpload = async (sIndex, bIndex, file) => {
+    if (!file) return;
+    const key = `${sIndex}-${bIndex}`;
+    setUploadingKey(key);
+    setError("");
+    try {
+      const ext = file.name.split(".").pop();
+      const fileName = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+      const { error: uploadError } = await supabase.storage.from("lesson-images").upload(fileName, file);
+      if (uploadError) throw uploadError;
+      const { data: urlData } = supabase.storage.from("lesson-images").getPublicUrl(fileName);
+      updateBlock(sIndex, bIndex, "media_url", urlData.publicUrl);
+    } catch (err) {
+      setError("Erreur upload image: " + err.message);
+    }
+    setUploadingKey(null);
+  };
+ 
   const addExercise = () => {
     setExercises([...exercises, { question: "", type: "open", options: ["", "", "", ""], answer: "" }]);
   };
@@ -456,7 +536,7 @@ export default function Admin({ onBack }) {
     setExercises(updated);
   };
   const removeExercise = (index) => { if (exercises.length > 1) setExercises(exercises.filter((_, i) => i !== index)); };
-
+ 
   // ============ HEADER ============
   const AdminHeader = () => (
     <div style={{ background: "#0F4C35", padding: "14px 24px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -473,7 +553,7 @@ export default function Admin({ onBack }) {
       </button>
     </div>
   );
-
+ 
   // ============ LESSON LIST ============
   if (view === "list") {
     return (
@@ -496,7 +576,7 @@ export default function Admin({ onBack }) {
               + Nouvelle leçon
             </button>
           </div>
-
+ 
           {loadingLessons ? (
             <p style={{ textAlign: "center", color: "#6B7280", padding: "40px 0" }}>Chargement...</p>
           ) : allLessons.length === 0 ? (
@@ -554,7 +634,7 @@ export default function Admin({ onBack }) {
                         </span>
                       </div>
                     </div>
-
+ 
                     <div style={{ display: "flex", gap: 6, marginLeft: 12 }}>
                       <button onClick={() => startEdit(lesson)} style={{
                         padding: "6px 14px", background: "#EFF6FF", border: "1px solid #BFDBFE",
@@ -595,7 +675,7 @@ export default function Admin({ onBack }) {
       </div>
     );
   }
-
+ 
   // ============ CREATE / EDIT FORM ============
   return (
     <div style={{ minHeight: "100vh", background: "#F9FAFB", fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
@@ -607,7 +687,7 @@ export default function Admin({ onBack }) {
         <p style={{ color: "#6B7280", fontSize: 14, marginBottom: 28 }}>
           Étape {step} sur 4 — {step === 1 ? "Informations de base" : step === 2 ? "Contenu de la leçon" : step === 3 ? "Exercices" : "Quiz de préparation"}
         </p>
-
+ 
         {/* Progress bar */}
         <div style={{ display: "flex", gap: 6, marginBottom: 32 }}>
           {[1, 2, 3, 4].map(s => (
@@ -617,7 +697,7 @@ export default function Admin({ onBack }) {
             }} />
           ))}
         </div>
-
+ 
         {error && (
           <div style={{
             background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8,
@@ -626,7 +706,7 @@ export default function Admin({ onBack }) {
             {error}
           </div>
         )}
-
+ 
         {/* STEP 1 */}
         {step === 1 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -698,7 +778,7 @@ export default function Admin({ onBack }) {
             </div>
           </div>
         )}
-
+ 
         {/* STEP 2 */}
         {step === 2 && (
           <div>
@@ -713,7 +793,7 @@ export default function Admin({ onBack }) {
                       <button onClick={() => removeSection(i)} style={{
                         background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 6,
                         padding: "4px 10px", fontSize: 12, color: "#DC2626", cursor: "pointer"
-                      }}>Supprimer</button>
+                      }}>Supprimer la section</button>
                     )}
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
@@ -728,18 +808,126 @@ export default function Admin({ onBack }) {
                       <input type="text" placeholder="Titre de la section" value={section.title} onChange={(e) => updateSection(i, "title", e.target.value)} style={inputStyle} />
                     </div>
                   </div>
-                  {section.type === "video" ? (
-                    <div>
-                      <label style={labelStyle}>URL de la vidéo</label>
-                      <input type="text" placeholder="https://www.youtube.com/watch?v=..." value={section.videoUrl} onChange={(e) => updateSection(i, "videoUrl", e.target.value)} style={inputStyle} />
-                    </div>
-                  ) : section.type !== "exercise" ? (
-                    <div>
-                      <label style={labelStyle}>Contenu</label>
-                      <textarea placeholder="Contenu de cette section..." value={section.content} onChange={(e) => updateSection(i, "content", e.target.value)} rows={6} style={{ ...inputStyle, resize: "vertical" }} />
-                    </div>
-                  ) : (
+ 
+                  {section.type === "exercise" ? (
                     <p style={{ fontSize: 13, color: "#6B7280", fontStyle: "italic" }}>Les exercices seront ajoutés à l'étape suivante.</p>
+                  ) : (
+                    <div>
+                      <label style={labelStyle}>Contenu (texte, images et vidéos, dans l'ordre)</label>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                        {section.blocks.map((block, j) => {
+                          const uploadKey = `${i}-${j}`;
+                          const isUploading = uploadingKey === uploadKey;
+                          return (
+                            <div key={j} style={{
+                              background: "#FAFAFA", border: "1px solid #E5E7EB", borderRadius: 8, padding: "12px"
+                            }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                                  <select
+                                    value={block.block_type}
+                                    onChange={(e) => updateBlock(i, j, "block_type", e.target.value)}
+                                    style={{ ...inputStyle, width: "auto", padding: "6px 10px", fontSize: 13 }}
+                                  >
+                                    {BLOCK_TYPES.map(bt => <option key={bt.id} value={bt.id}>{bt.icon} {bt.name}</option>)}
+                                  </select>
+                                </div>
+                                <div style={{ display: "flex", gap: 4 }}>
+                                  <button onClick={() => moveBlock(i, j, -1)} disabled={j === 0} style={{
+                                    background: "white", border: "1px solid #D1D5DB", borderRadius: 6,
+                                    padding: "4px 8px", fontSize: 12, cursor: j === 0 ? "default" : "pointer",
+                                    opacity: j === 0 ? 0.4 : 1
+                                  }}>↑</button>
+                                  <button onClick={() => moveBlock(i, j, 1)} disabled={j === section.blocks.length - 1} style={{
+                                    background: "white", border: "1px solid #D1D5DB", borderRadius: 6,
+                                    padding: "4px 8px", fontSize: 12, cursor: j === section.blocks.length - 1 ? "default" : "pointer",
+                                    opacity: j === section.blocks.length - 1 ? 0.4 : 1
+                                  }}>↓</button>
+                                  {section.blocks.length > 1 && (
+                                    <button onClick={() => removeBlock(i, j)} style={{
+                                      background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 6,
+                                      padding: "4px 8px", fontSize: 12, color: "#DC2626", cursor: "pointer"
+                                    }}>✕</button>
+                                  )}
+                                </div>
+                              </div>
+ 
+                              {block.block_type === "text" && (
+                                <textarea
+                                  placeholder="Texte de ce bloc..."
+                                  value={block.text_content}
+                                  onChange={(e) => updateBlock(i, j, "text_content", e.target.value)}
+                                  rows={5}
+                                  style={{ ...inputStyle, resize: "vertical" }}
+                                />
+                              )}
+ 
+                              {block.block_type === "image" && (
+                                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                                  <input
+                                    type="file"
+                                    accept="image/*"
+                                    onChange={(e) => handleImageUpload(i, j, e.target.files?.[0])}
+                                    disabled={isUploading}
+                                  />
+                                  {isUploading && <span style={{ fontSize: 12, color: "#6B7280" }}>Téléchargement en cours...</span>}
+                                  {block.media_url && !isUploading && (
+                                    <img src={block.media_url} alt={block.alt_text || ""} style={{ maxWidth: 240, borderRadius: 6, border: "1px solid #E5E7EB" }} />
+                                  )}
+                                  <input
+                                    type="text"
+                                    placeholder="Légende (optionnel)"
+                                    value={block.caption}
+                                    onChange={(e) => updateBlock(i, j, "caption", e.target.value)}
+                                    style={inputStyle}
+                                  />
+                                  <input
+                                    type="text"
+                                    placeholder="Texte alternatif (accessibilité)"
+                                    value={block.alt_text}
+                                    onChange={(e) => updateBlock(i, j, "alt_text", e.target.value)}
+                                    style={inputStyle}
+                                  />
+                                </div>
+                              )}
+ 
+                              {block.block_type === "video" && (
+                                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                                  <input
+                                    type="text"
+                                    placeholder="https://www.youtube.com/watch?v=..."
+                                    value={block.media_url}
+                                    onChange={(e) => updateBlock(i, j, "media_url", e.target.value)}
+                                    style={inputStyle}
+                                  />
+                                  <input
+                                    type="text"
+                                    placeholder="Légende (optionnel)"
+                                    value={block.caption}
+                                    onChange={(e) => updateBlock(i, j, "caption", e.target.value)}
+                                    style={inputStyle}
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                        <button onClick={() => addBlock(i, "text")} style={{
+                          padding: "8px 12px", background: "white", border: "1px dashed #D1D5DB",
+                          borderRadius: 6, fontSize: 12, fontWeight: 600, color: "#6B7280", cursor: "pointer"
+                        }}>+ Texte</button>
+                        <button onClick={() => addBlock(i, "image")} style={{
+                          padding: "8px 12px", background: "white", border: "1px dashed #D1D5DB",
+                          borderRadius: 6, fontSize: 12, fontWeight: 600, color: "#6B7280", cursor: "pointer"
+                        }}>+ Image</button>
+                        <button onClick={() => addBlock(i, "video")} style={{
+                          padding: "8px 12px", background: "white", border: "1px dashed #D1D5DB",
+                          borderRadius: 6, fontSize: 12, fontWeight: 600, color: "#6B7280", cursor: "pointer"
+                        }}>+ Vidéo</button>
+                      </div>
+                    </div>
                   )}
                 </div>
               ))}
@@ -761,7 +949,7 @@ export default function Admin({ onBack }) {
             </div>
           </div>
         )}
-
+ 
         {/* STEP 3 */}
         {step === 3 && (
           <div>
@@ -830,7 +1018,7 @@ export default function Admin({ onBack }) {
             </div>
           </div>
         )}
-
+ 
         {/* STEP 4 - QUIZ */}
         {step === 4 && (
           <div>
@@ -846,7 +1034,7 @@ export default function Admin({ onBack }) {
                 Créez au moins 5 questions à choix multiple. L'enseignant doit obtenir 80% pour valider.
               </div>
             </div>
-
+ 
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
               {quizQuestions.map((q, i) => (
                 <div key={i} style={{
@@ -861,7 +1049,7 @@ export default function Admin({ onBack }) {
                       }}>Supprimer</button>
                     )}
                   </div>
-
+ 
                   <div style={{ marginBottom: 12 }}>
                     <label style={labelStyle}>Question</label>
                     <textarea
@@ -876,7 +1064,7 @@ export default function Admin({ onBack }) {
                       style={{ ...inputStyle, resize: "vertical" }}
                     />
                   </div>
-
+ 
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
                     {["a", "b", "c", "d"].map((letter, j) => (
                       <div key={letter}>
@@ -895,7 +1083,7 @@ export default function Admin({ onBack }) {
                       </div>
                     ))}
                   </div>
-
+ 
                   <div>
                     <label style={labelStyle}>Bonne réponse</label>
                     <div style={{ display: "flex", gap: 8 }}>
@@ -920,13 +1108,13 @@ export default function Admin({ onBack }) {
                 </div>
               ))}
             </div>
-
+ 
             <button onClick={() => setQuizQuestions([...quizQuestions, { question: "", option_a: "", option_b: "", option_c: "", option_d: "", correct_answer: "A" }])} style={{
               width: "100%", padding: "12px", marginTop: 14,
               background: "white", border: "2px dashed #D1D5DB", borderRadius: 10,
               fontSize: 14, fontWeight: 600, color: "#6B7280", cursor: "pointer"
             }}>+ Ajouter une question</button>
-
+ 
             <div style={{ display: "flex", justifyContent: "space-between", marginTop: 24 }}>
               <button onClick={() => setStep(3)} style={{
                 padding: "12px 24px", background: "white", border: "1px solid #D1D5DB",
