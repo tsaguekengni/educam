@@ -129,6 +129,15 @@ function getSubjectIcon(subjectId) {
   return SUBJECTS.find(s => s.id === subjectId)?.icon || "📚";
 }
 
+// Turns a YouTube watch/short URL into an embeddable one. Non-YouTube URLs
+// (or already-embeddable ones) pass through unchanged.
+function getEmbedUrl(url) {
+  if (!url) return "";
+  if (url.includes("youtube.com/watch")) return url.replace("watch?v=", "embed/").split("&")[0];
+  if (url.includes("youtu.be/")) return "https://www.youtube.com/embed/" + url.split("youtu.be/")[1].split("?")[0];
+  return url;
+}
+
 export default function Dashboard({ teacher, onLogout }) {
   const [selectedLevel, setSelectedLevel] = useState(
     LEVELS.find(l => l.id === teacher?.level) || LEVELS[2]
@@ -150,6 +159,7 @@ export default function Dashboard({ teacher, onLogout }) {
   const [expandedSection, setExpandedSection] = useState(0);
   const [currentLesson, setCurrentLesson] = useState(null);
   const [lessonSections, setLessonSections] = useState([]);
+  const [sectionBlocks, setSectionBlocks] = useState({}); // { [section_id]: [block, ...] in order }
   const [lessonExercises, setLessonExercises] = useState([]);
   const [loadingLesson, setLoadingLesson] = useState(false);
   const [lessonPassed, setLessonPassed] = useState(false);
@@ -205,8 +215,27 @@ export default function Dashboard({ teacher, onLogout }) {
     const { data: sections } = await supabase.from("lesson_sections").select("*").eq("lesson_id", lessonId).order("section_order");
     const { data: exercises } = await supabase.from("exercises").select("*").eq("lesson_id", lessonId).order("exercise_order");
     const { data: readiness } = await supabase.from("teacher_readiness").select("*").eq("teacher_id", teacher?.id).eq("lesson_id", lessonId).eq("passed", true).maybeSingle();
+
+    // Fetch every block for every section of this lesson in one query, then
+    // group them by section so the lesson screen can render text/image/video
+    // in the order the content team laid them out.
+    const sectionIds = (sections || []).map(s => s.id);
+    let blocksBySection = {};
+    if (sectionIds.length > 0) {
+      const { data: blocks } = await supabase
+        .from("section_blocks")
+        .select("*")
+        .in("section_id", sectionIds)
+        .order("block_order");
+      (blocks || []).forEach(b => {
+        if (!blocksBySection[b.section_id]) blocksBySection[b.section_id] = [];
+        blocksBySection[b.section_id].push(b);
+      });
+    }
+
     setCurrentLesson(lesson);
     setLessonSections(sections || []);
+    setSectionBlocks(blocksBySection);
     setLessonExercises(exercises || []);
     setExpandedSection(0);
     setLessonPassed(!!readiness);
@@ -693,6 +722,7 @@ export default function Dashboard({ teacher, onLogout }) {
             const isOpen = expandedSection === i;
             const accentColors = { intro: "#3B82F6", content: "#0F4C35", video: "#EF4444", activity: "#8B5CF6", exercise: "#F59E0B" };
             const accent = accentColors[section.section_type] || "#6B7280";
+            const blocks = sectionBlocks[section.id] || [];
 
             return (
               <div key={i} style={{
@@ -713,30 +743,7 @@ export default function Dashboard({ teacher, onLogout }) {
                 </div>
                 {isOpen && (
                   <div style={{ padding: "0 18px 18px", borderTop: `1px solid ${accent}15` }}>
-                    {section.section_type === "video" ? (
-                      <div style={{ marginTop: 14 }}>
-                        {section.video_url ? (
-                          <div style={{ position: "relative", paddingBottom: "56.25%", height: 0, borderRadius: 10, overflow: "hidden" }}>
-                            <iframe
-                              src={section.video_url.includes("youtube.com/watch") 
-                                ? section.video_url.replace("watch?v=", "embed/").split("&")[0]
-                                : section.video_url.includes("youtu.be/")
-                                ? "https://www.youtube.com/embed/" + section.video_url.split("youtu.be/")[1].split("?")[0]
-                                : section.video_url}
-                              style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: "none" }}
-                              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                              allowFullScreen
-                            />
-                          </div>
-                        ) : (
-                          <div style={{ background: "#1F2937", borderRadius: 10, padding: "50px 20px", textAlign: "center" }}>
-                            <div style={{ width: 64, height: 64, borderRadius: "50%", background: "rgba(255,255,255,0.2)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 28 }}>▶</div>
-                            <div style={{ color: "white", fontSize: 15, fontWeight: 600, marginTop: 14 }}>Vidéo à venir</div>
-                            <div style={{ color: "#9CA3AF", fontSize: 13, marginTop: 4 }}>La vidéo pour cette leçon sera bientôt disponible.</div>
-                          </div>
-                        )}
-                      </div>
-                    ) : section.section_type === "exercise" ? (
+                    {section.section_type === "exercise" ? (
                       <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 12 }}>
                         {lessonExercises.map((ex, j) => (
                           <div key={j} style={{ background: "#FFFBEB", borderRadius: 10, padding: "14px 16px", border: "1px solid #FDE68A" }}>
@@ -755,7 +762,59 @@ export default function Dashboard({ teacher, onLogout }) {
                         ))}
                       </div>
                     ) : (
-                      <div style={{ marginTop: 14, fontSize: 15, color: "#374151", lineHeight: 1.8, whiteSpace: "pre-wrap" }}>{section.content}</div>
+                      <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 18 }}>
+                        {blocks.length === 0 ? (
+                          <div style={{ background: "#F9FAFB", borderRadius: 10, padding: "20px", textAlign: "center", color: "#9CA3AF", fontSize: 14 }}>
+                            Contenu à venir pour cette section.
+                          </div>
+                        ) : (
+                          blocks.map((block, k) => {
+                            if (block.block_type === "text") {
+                              return (
+                                <div key={k} style={{ fontSize: 15, color: "#374151", lineHeight: 1.8, whiteSpace: "pre-wrap" }}>
+                                  {block.text_content}
+                                </div>
+                              );
+                            }
+                            if (block.block_type === "image" && block.media_url) {
+                              return (
+                                <figure key={k} style={{ margin: 0 }}>
+                                  <img
+                                    src={block.media_url}
+                                    alt={block.alt_text || ""}
+                                    style={{ maxWidth: "100%", borderRadius: 10, display: "block" }}
+                                  />
+                                  {block.caption && (
+                                    <figcaption style={{ fontSize: 13, color: "#6B7280", marginTop: 6, textAlign: "center" }}>
+                                      {block.caption}
+                                    </figcaption>
+                                  )}
+                                </figure>
+                              );
+                            }
+                            if (block.block_type === "video" && block.media_url) {
+                              return (
+                                <div key={k}>
+                                  <div style={{ position: "relative", paddingBottom: "56.25%", height: 0, borderRadius: 10, overflow: "hidden" }}>
+                                    <iframe
+                                      src={getEmbedUrl(block.media_url)}
+                                      style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: "none" }}
+                                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                                      allowFullScreen
+                                    />
+                                  </div>
+                                  {block.caption && (
+                                    <div style={{ fontSize: 13, color: "#6B7280", marginTop: 6, textAlign: "center" }}>
+                                      {block.caption}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            }
+                            return null;
+                          })
+                        )}
+                      </div>
                     )}
                   </div>
                 )}
