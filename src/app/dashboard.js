@@ -109,6 +109,34 @@ const THEMES = [
   "Les voyages", "La santé", "Sports et loisirs", "Dans l'espace"
 ];
 
+const SECTION_TYPES = [
+  { id: "intro", name: "Introduction", icon: "💡" },
+  { id: "content", name: "Contenu de la leçon", icon: "📖" },
+  { id: "video", name: "Vidéo", icon: "🎬" },
+  { id: "activity", name: "Activité pratique", icon: "🧪" },
+  { id: "exercise", name: "Exercices", icon: "✏️" },
+];
+
+const BLOCK_TYPES = [
+  { id: "text", name: "Texte", icon: "📝" },
+  { id: "image", name: "Image", icon: "🖼️" },
+  { id: "video", name: "Vidéo", icon: "🎬" },
+];
+
+const emptyBlock = (type = "text") => ({
+  block_type: type, text_content: "", media_url: "", caption: "", alt_text: "",
+});
+
+const editInputStyle = {
+  width: "100%", padding: "10px 12px", border: "1.5px solid #D1D5DB",
+  borderRadius: 8, fontSize: 14, outline: "none", boxSizing: "border-box",
+  background: "white"
+};
+
+const editLabelStyle = {
+  fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6
+};
+
 const DAY_NAMES = ["", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi"];
 
 const MONTH_UNIT_MAP = [
@@ -173,6 +201,18 @@ export default function Dashboard({ teacher, onLogout }) {
   const [lessonPassed, setLessonPassed] = useState(false);
   const [projectorMode, setProjectorMode] = useState(false);
 
+  // Inline edit state
+  const [editMode, setEditMode] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [editObjective, setEditObjective] = useState("");
+  const [editDuration, setEditDuration] = useState("");
+  const [editSections, setEditSections] = useState([]);
+  const [editExercises, setEditExercises] = useState([]);
+  const [editQuizQuestions, setEditQuizQuestions] = useState([]);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState("");
+  const [editUploadingKey, setEditUploadingKey] = useState(null);
+
   // Data
   const [timetable, setTimetable] = useState([]);
   const [topics, setTopics] = useState([]);
@@ -217,6 +257,286 @@ export default function Dashboard({ teacher, onLogout }) {
   };
 
   const getDaySlots = (dayNum) => timetable.filter(s => s.day_of_week === dayNum);
+
+  // ============ INLINE EDIT FUNCTIONS ============
+  const startInlineEdit = async () => {
+    if (!currentLesson) return;
+    setEditTitle(currentLesson.title);
+    setEditObjective(currentLesson.objective || "");
+    setEditDuration(currentLesson.duration || "45 minutes");
+    setEditError("");
+
+    // Convert lessonSections + sectionBlocks into edit-friendly format
+    if (lessonSections.length > 0) {
+      setEditSections(lessonSections.map(s => {
+        const blocks = (sectionBlocks[s.id] || []).map(b => ({
+          block_type: b.block_type,
+          text_content: b.text_content || "",
+          media_url: b.media_url || "",
+          caption: b.caption || "",
+          alt_text: b.alt_text || "",
+        }));
+        return {
+          type: s.section_type,
+          title: s.title,
+          icon: s.icon,
+          blocks: blocks.length > 0 ? blocks : [emptyBlock("text")],
+        };
+      }));
+    } else {
+      setEditSections([{ type: "intro", title: "Introduction", icon: "💡", blocks: [emptyBlock("text")] }]);
+    }
+
+    // Convert exercises
+    if (lessonExercises.length > 0) {
+      setEditExercises(lessonExercises.map(ex => ({
+        question: ex.question,
+        type: ex.exercise_type,
+        options: ex.options
+          ? (typeof ex.options === "string" ? JSON.parse(ex.options) : ex.options).concat(["", "", "", ""]).slice(0, 4)
+          : ["", "", "", ""],
+        answer: ex.answer || "",
+      })));
+    } else {
+      setEditExercises([{ question: "", type: "open", options: ["", "", "", ""], answer: "" }]);
+    }
+
+    // Load quiz questions
+    const { data: quizData } = await supabase
+      .from("readiness_questions")
+      .select("*")
+      .eq("lesson_id", currentLesson.id)
+      .order("question_order");
+
+    if (quizData && quizData.length > 0) {
+      setEditQuizQuestions(quizData.map(q => ({
+        question: q.question,
+        option_a: q.option_a,
+        option_b: q.option_b,
+        option_c: q.option_c,
+        option_d: q.option_d,
+        correct_answer: q.correct_answer,
+      })));
+    } else {
+      setEditQuizQuestions([{ question: "", option_a: "", option_b: "", option_c: "", option_d: "", correct_answer: "A" }]);
+    }
+
+    setEditMode(true);
+  };
+
+  const cancelEdit = () => {
+    setEditMode(false);
+    setEditError("");
+  };
+
+  const handleInlineSave = async () => {
+    setEditSaving(true);
+    setEditError("");
+
+    try {
+      const lessonId = currentLesson.id;
+
+      // Update lesson metadata
+      const { error: updateError } = await supabase
+        .from("lessons")
+        .update({
+          title: editTitle,
+          objective: editObjective,
+          duration: editDuration,
+        })
+        .eq("id", lessonId);
+      if (updateError) throw updateError;
+
+      // Wipe old children before re-inserting
+      await supabase.from("lesson_sections").delete().eq("lesson_id", lessonId);
+      await supabase.from("exercises").delete().eq("lesson_id", lessonId);
+      await supabase.from("readiness_questions").delete().eq("lesson_id", lessonId);
+
+      // Insert sections
+      const sectionsToInsert = editSections.map((s, i) => ({
+        lesson_id: lessonId,
+        section_order: i + 1,
+        section_type: s.type,
+        title: s.title,
+        icon: s.icon,
+      }));
+
+      const { data: insertedSections, error: sectionsError } = await supabase
+        .from("lesson_sections")
+        .insert(sectionsToInsert)
+        .select();
+      if (sectionsError) throw sectionsError;
+
+      // Build and insert blocks
+      const blocksToInsert = [];
+      editSections.forEach((s, i) => {
+        const sectionId = insertedSections[i]?.id;
+        if (!sectionId) return;
+        (s.blocks || []).forEach((b, j) => {
+          const hasContent =
+            (b.block_type === "text" && b.text_content && b.text_content.trim()) ||
+            ((b.block_type === "image" || b.block_type === "video") && b.media_url && b.media_url.trim());
+          if (!hasContent) return;
+          blocksToInsert.push({
+            section_id: sectionId,
+            block_order: j + 1,
+            block_type: b.block_type,
+            text_content: b.block_type === "text" ? b.text_content : null,
+            media_url: b.block_type !== "text" ? b.media_url : null,
+            caption: b.caption && b.caption.trim() ? b.caption : null,
+            alt_text: b.alt_text && b.alt_text.trim() ? b.alt_text : null,
+          });
+        });
+      });
+
+      if (blocksToInsert.length > 0) {
+        const { error: blocksError } = await supabase.from("section_blocks").insert(blocksToInsert);
+        if (blocksError) throw blocksError;
+      }
+
+      // Insert exercises
+      const exercisesToInsert = editExercises
+        .filter(ex => ex.question.trim())
+        .map((ex, i) => ({
+          lesson_id: lessonId,
+          exercise_order: i + 1,
+          question: ex.question,
+          exercise_type: ex.type,
+          options: ex.type === "choice" ? JSON.stringify(ex.options.filter(o => o.trim())) : null,
+          answer: ex.answer || null,
+        }));
+
+      if (exercisesToInsert.length > 0) {
+        const { error: exercisesError } = await supabase.from("exercises").insert(exercisesToInsert);
+        if (exercisesError) throw exercisesError;
+      }
+
+      // Insert quiz questions
+      const quizToInsert = editQuizQuestions
+        .filter(q => q.question.trim())
+        .map((q, i) => ({
+          lesson_id: lessonId,
+          question_order: i + 1,
+          question: q.question,
+          option_a: q.option_a,
+          option_b: q.option_b,
+          option_c: q.option_c,
+          option_d: q.option_d,
+          correct_answer: q.correct_answer,
+        }));
+
+      if (quizToInsert.length > 0) {
+        const { error: quizError } = await supabase.from("readiness_questions").insert(quizToInsert);
+        if (quizError) throw quizError;
+      }
+
+      // Reload lesson data and exit edit mode
+      setEditMode(false);
+      await openLesson(lessonId);
+      await fetchAllLessons();
+    } catch (err) {
+      setEditError("Erreur: " + err.message);
+    }
+
+    setEditSaving(false);
+  };
+
+  // Section helpers (inline edit)
+  const eAddSection = () => {
+    setEditSections([...editSections, { type: "content", title: "", icon: "📖", blocks: [emptyBlock("text")] }]);
+  };
+  const eUpdateSection = (index, field, value) => {
+    const updated = [...editSections];
+    updated[index] = { ...updated[index], [field]: value };
+    if (field === "type") {
+      const typeInfo = SECTION_TYPES.find(t => t.id === value);
+      updated[index].icon = typeInfo?.icon || "📖";
+    }
+    setEditSections(updated);
+  };
+  const eRemoveSection = (index) => {
+    if (editSections.length > 1) setEditSections(editSections.filter((_, i) => i !== index));
+  };
+
+  // Block helpers (inline edit)
+  const eAddBlock = (sIndex, type = "text") => {
+    const updated = [...editSections];
+    updated[sIndex] = { ...updated[sIndex], blocks: [...updated[sIndex].blocks, emptyBlock(type)] };
+    setEditSections(updated);
+  };
+  const eUpdateBlock = (sIndex, bIndex, field, value) => {
+    const updated = [...editSections];
+    const blocks = [...updated[sIndex].blocks];
+    blocks[bIndex] = { ...blocks[bIndex], [field]: value };
+    updated[sIndex] = { ...updated[sIndex], blocks };
+    setEditSections(updated);
+  };
+  const eRemoveBlock = (sIndex, bIndex) => {
+    const updated = [...editSections];
+    if (updated[sIndex].blocks.length > 1) {
+      updated[sIndex] = { ...updated[sIndex], blocks: updated[sIndex].blocks.filter((_, i) => i !== bIndex) };
+      setEditSections(updated);
+    }
+  };
+  const eMoveBlock = (sIndex, bIndex, direction) => {
+    const updated = [...editSections];
+    const blocks = [...updated[sIndex].blocks];
+    const newIndex = bIndex + direction;
+    if (newIndex < 0 || newIndex >= blocks.length) return;
+    [blocks[bIndex], blocks[newIndex]] = [blocks[newIndex], blocks[bIndex]];
+    updated[sIndex] = { ...updated[sIndex], blocks };
+    setEditSections(updated);
+  };
+  const eHandleImageUpload = async (sIndex, bIndex, file) => {
+    if (!file) return;
+    const key = `${sIndex}-${bIndex}`;
+    setEditUploadingKey(key);
+    setEditError("");
+    try {
+      const ext = file.name.split(".").pop();
+      const fileName = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+      const { error: uploadError } = await supabase.storage.from("lesson-images").upload(fileName, file);
+      if (uploadError) throw uploadError;
+      const { data: urlData } = supabase.storage.from("lesson-images").getPublicUrl(fileName);
+      eUpdateBlock(sIndex, bIndex, "media_url", urlData.publicUrl);
+    } catch (err) {
+      setEditError("Erreur upload image: " + err.message);
+    }
+    setEditUploadingKey(null);
+  };
+
+  // Exercise helpers (inline edit)
+  const eAddExercise = () => {
+    setEditExercises([...editExercises, { question: "", type: "open", options: ["", "", "", ""], answer: "" }]);
+  };
+  const eUpdateExercise = (index, field, value) => {
+    const updated = [...editExercises];
+    updated[index] = { ...updated[index], [field]: value };
+    setEditExercises(updated);
+  };
+  const eUpdateOption = (exIndex, optIndex, value) => {
+    const updated = [...editExercises];
+    const opts = [...updated[exIndex].options];
+    opts[optIndex] = value;
+    updated[exIndex] = { ...updated[exIndex], options: opts };
+    setEditExercises(updated);
+  };
+  const eRemoveExercise = (index) => {
+    if (editExercises.length > 1) setEditExercises(editExercises.filter((_, i) => i !== index));
+  };
+
+  // Quiz helpers (inline edit)
+  const eAddQuiz = () => {
+    setEditQuizQuestions([...editQuizQuestions, { question: "", option_a: "", option_b: "", option_c: "", option_d: "", correct_answer: "A" }]);
+  };
+  const eUpdateQuiz = (index, field, value) => {
+    const updated = [...editQuizQuestions];
+    updated[index] = { ...updated[index], [field]: value };
+    setEditQuizQuestions(updated);
+  };
+  const eRemoveQuiz = (index) => {
+    if (editQuizQuestions.length > 1) setEditQuizQuestions(editQuizQuestions.filter((_, i) => i !== index));
+  };
 
   const openLesson = async (lessonId) => {
     setLoadingLesson(true);
@@ -704,9 +1024,302 @@ export default function Dashboard({ teacher, onLogout }) {
     if (!currentLesson) return null;
     const color = getSubjectColor(currentLesson.subject_id);
 
+    // ---- INLINE EDITOR ----
+    if (editMode) {
+      return (
+        <div>
+          <button onClick={cancelEdit} style={{
+            display: "flex", alignItems: "center", gap: 6, background: "none", border: "none",
+            color: "#6B7280", fontSize: 13, fontWeight: 600, cursor: "pointer", marginBottom: 20, padding: 0
+          }}>← Annuler les modifications</button>
+
+          {/* Edit mode banner */}
+          <div style={{
+            background: "linear-gradient(135deg, #F59E0B15, #F59E0B05)",
+            borderRadius: 12, padding: "20px 24px", marginBottom: 24,
+            border: "1px solid #F59E0B40", display: "flex", alignItems: "center", gap: 14
+          }}>
+            <span style={{ fontSize: 28 }}>✏️</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: "#92400E" }}>Mode modification</div>
+              <div style={{ fontSize: 13, color: "#B45309", marginTop: 2 }}>
+                Modifiez le contenu de la leçon ci-dessous, puis enregistrez vos changements.
+              </div>
+            </div>
+          </div>
+
+          {editError && (
+            <div style={{ background: "#FEF2F2", border: "1px solid #FCA5A5", borderRadius: 8, padding: "12px 16px", marginBottom: 16, color: "#DC2626", fontSize: 14 }}>
+              {editError}
+            </div>
+          )}
+
+          {/* Lesson metadata */}
+          <div style={{ background: "white", borderRadius: 12, border: "1px solid #E5E7EB", padding: "20px", marginBottom: 20 }}>
+            <h3 style={{ fontSize: 16, fontWeight: 700, color: "#111827", margin: "0 0 16px" }}>Informations de la leçon</h3>
+            <div style={{ marginBottom: 14 }}>
+              <label style={editLabelStyle}>Titre</label>
+              <input value={editTitle} onChange={e => setEditTitle(e.target.value)} style={editInputStyle} placeholder="Titre de la leçon" />
+            </div>
+            <div style={{ marginBottom: 14 }}>
+              <label style={editLabelStyle}>Objectif pédagogique</label>
+              <textarea value={editObjective} onChange={e => setEditObjective(e.target.value)}
+                style={{ ...editInputStyle, minHeight: 80, resize: "vertical" }} placeholder="L'élève sera capable de..." />
+            </div>
+            <div>
+              <label style={editLabelStyle}>Durée</label>
+              <input value={editDuration} onChange={e => setEditDuration(e.target.value)} style={{ ...editInputStyle, maxWidth: 200 }} />
+            </div>
+          </div>
+
+          {/* Sections editor */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <h3 style={{ fontSize: 16, fontWeight: 700, color: "#111827", margin: 0 }}>Sections de la leçon</h3>
+              <button onClick={eAddSection} style={{
+                background: "#0F4C35", color: "white", border: "none", borderRadius: 8,
+                padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer"
+              }}>+ Ajouter une section</button>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {editSections.map((section, sIdx) => (
+                <div key={sIdx} style={{
+                  background: "white", borderRadius: 12, border: "1px solid #E5E7EB",
+                  overflow: "hidden"
+                }}>
+                  {/* Section header */}
+                  <div style={{
+                    padding: "14px 18px", background: "#F9FAFB",
+                    borderBottom: "1px solid #E5E7EB",
+                    display: "flex", alignItems: "center", gap: 12
+                  }}>
+                    <span style={{ fontSize: 20 }}>{section.icon}</span>
+                    <div style={{ flex: 1, display: "flex", gap: 10 }}>
+                      <select value={section.type}
+                        onChange={e => eUpdateSection(sIdx, "type", e.target.value)}
+                        style={{ ...editInputStyle, maxWidth: 200 }}>
+                        {SECTION_TYPES.map(t => <option key={t.id} value={t.id}>{t.icon} {t.name}</option>)}
+                      </select>
+                      <input value={section.title}
+                        onChange={e => eUpdateSection(sIdx, "title", e.target.value)}
+                        style={{ ...editInputStyle, flex: 1 }}
+                        placeholder="Titre de la section" />
+                    </div>
+                    <button onClick={() => eRemoveSection(sIdx)} style={{
+                      background: "none", border: "none", color: "#EF4444",
+                      fontSize: 18, cursor: "pointer", padding: "4px 8px"
+                    }} title="Supprimer la section">✕</button>
+                  </div>
+
+                  {/* Blocks */}
+                  <div style={{ padding: "16px 18px" }}>
+                    {section.blocks.map((block, bIdx) => (
+                      <div key={bIdx} style={{
+                        background: "#F9FAFB", borderRadius: 8, padding: "14px",
+                        marginBottom: 10, border: "1px solid #E5E7EB"
+                      }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            {BLOCK_TYPES.map(bt => (
+                              <button key={bt.id}
+                                onClick={() => eUpdateBlock(sIdx, bIdx, "block_type", bt.id)}
+                                style={{
+                                  padding: "4px 10px", borderRadius: 6, fontSize: 12, fontWeight: 600,
+                                  cursor: "pointer", border: "none",
+                                  background: block.block_type === bt.id ? "#0F4C35" : "#E5E7EB",
+                                  color: block.block_type === bt.id ? "white" : "#374151"
+                                }}>{bt.icon} {bt.name}</button>
+                            ))}
+                          </div>
+                          <div style={{ display: "flex", gap: 4 }}>
+                            <button onClick={() => eMoveBlock(sIdx, bIdx, -1)} disabled={bIdx === 0}
+                              style={{ background: "none", border: "1px solid #D1D5DB", borderRadius: 4, padding: "2px 8px", cursor: "pointer", fontSize: 12, color: bIdx === 0 ? "#D1D5DB" : "#374151" }}>▲</button>
+                            <button onClick={() => eMoveBlock(sIdx, bIdx, 1)} disabled={bIdx === section.blocks.length - 1}
+                              style={{ background: "none", border: "1px solid #D1D5DB", borderRadius: 4, padding: "2px 8px", cursor: "pointer", fontSize: 12, color: bIdx === section.blocks.length - 1 ? "#D1D5DB" : "#374151" }}>▼</button>
+                            <button onClick={() => eRemoveBlock(sIdx, bIdx)}
+                              style={{ background: "none", border: "1px solid #FCA5A5", borderRadius: 4, padding: "2px 8px", cursor: "pointer", fontSize: 12, color: "#EF4444" }}>✕</button>
+                          </div>
+                        </div>
+
+                        {block.block_type === "text" && (
+                          <textarea value={block.text_content}
+                            onChange={e => eUpdateBlock(sIdx, bIdx, "text_content", e.target.value)}
+                            style={{ ...editInputStyle, minHeight: 120, resize: "vertical" }}
+                            placeholder="Contenu texte..." />
+                        )}
+
+                        {block.block_type === "image" && (
+                          <div>
+                            {block.media_url && (
+                              <img src={block.media_url} alt="" style={{ maxWidth: "100%", maxHeight: 200, borderRadius: 8, marginBottom: 10, display: "block" }} />
+                            )}
+                            <input type="file" accept="image/*"
+                              onChange={e => eHandleImageUpload(sIdx, bIdx, e.target.files[0])}
+                              style={{ marginBottom: 8 }} />
+                            {editUploadingKey === `${sIdx}-${bIdx}` && (
+                              <span style={{ fontSize: 12, color: "#6B7280" }}>Envoi en cours...</span>
+                            )}
+                            <input value={block.caption} onChange={e => eUpdateBlock(sIdx, bIdx, "caption", e.target.value)}
+                              style={{ ...editInputStyle, marginTop: 6 }} placeholder="Légende (optionnel)" />
+                            <input value={block.alt_text} onChange={e => eUpdateBlock(sIdx, bIdx, "alt_text", e.target.value)}
+                              style={{ ...editInputStyle, marginTop: 6 }} placeholder="Texte alternatif (optionnel)" />
+                          </div>
+                        )}
+
+                        {block.block_type === "video" && (
+                          <div>
+                            <input value={block.media_url} onChange={e => eUpdateBlock(sIdx, bIdx, "media_url", e.target.value)}
+                              style={editInputStyle} placeholder="URL de la vidéo (YouTube, Vimeo, fichier .mp4...)" />
+                            {block.media_url && isEmbeddable(block.media_url) && (
+                              <div style={{ marginTop: 10, position: "relative", paddingBottom: "56.25%", height: 0, borderRadius: 8, overflow: "hidden" }}>
+                                <iframe src={getEmbedUrl(block.media_url)}
+                                  style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: "none" }}
+                                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen />
+                              </div>
+                            )}
+                            <input value={block.caption} onChange={e => eUpdateBlock(sIdx, bIdx, "caption", e.target.value)}
+                              style={{ ...editInputStyle, marginTop: 6 }} placeholder="Légende (optionnel)" />
+                          </div>
+                        )}
+                      </div>
+                    ))}
+
+                    <div style={{ display: "flex", gap: 8 }}>
+                      {BLOCK_TYPES.map(bt => (
+                        <button key={bt.id} onClick={() => eAddBlock(sIdx, bt.id)}
+                          style={{
+                            padding: "6px 12px", borderRadius: 6, fontSize: 12, fontWeight: 600,
+                            cursor: "pointer", border: "1px dashed #D1D5DB",
+                            background: "white", color: "#6B7280"
+                          }}>+ {bt.icon} {bt.name}</button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Exercises editor */}
+          <div style={{ background: "white", borderRadius: 12, border: "1px solid #E5E7EB", padding: "20px", marginBottom: 20 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <h3 style={{ fontSize: 16, fontWeight: 700, color: "#111827", margin: 0 }}>Exercices</h3>
+              <button onClick={eAddExercise} style={{
+                background: "#F59E0B", color: "white", border: "none", borderRadius: 8,
+                padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer"
+              }}>+ Exercice</button>
+            </div>
+
+            {editExercises.map((ex, eIdx) => (
+              <div key={eIdx} style={{
+                background: "#FFFBEB", borderRadius: 10, padding: "14px 16px",
+                border: "1px solid #FDE68A", marginBottom: 10
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: "#D97706" }}>Exercice {eIdx + 1}</span>
+                  <button onClick={() => eRemoveExercise(eIdx)} style={{
+                    background: "none", border: "none", color: "#EF4444", fontSize: 16, cursor: "pointer"
+                  }}>✕</button>
+                </div>
+                <textarea value={ex.question} onChange={e => eUpdateExercise(eIdx, "question", e.target.value)}
+                  style={{ ...editInputStyle, minHeight: 60, marginBottom: 8 }} placeholder="Question de l'exercice" />
+                <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
+                  <select value={ex.type} onChange={e => eUpdateExercise(eIdx, "type", e.target.value)}
+                    style={{ ...editInputStyle, maxWidth: 180 }}>
+                    <option value="open">Réponse libre</option>
+                    <option value="choice">Choix multiples</option>
+                  </select>
+                  <input value={ex.answer} onChange={e => eUpdateExercise(eIdx, "answer", e.target.value)}
+                    style={{ ...editInputStyle, flex: 1 }} placeholder="Réponse attendue" />
+                </div>
+                {ex.type === "choice" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {ex.options.map((opt, oIdx) => (
+                      <div key={oIdx} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: "#92400E", minWidth: 20 }}>
+                          {String.fromCharCode(65 + oIdx)}.
+                        </span>
+                        <input value={opt} onChange={e => eUpdateOption(eIdx, oIdx, e.target.value)}
+                          style={{ ...editInputStyle, flex: 1 }} placeholder={`Option ${String.fromCharCode(65 + oIdx)}`} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Quiz editor */}
+          <div style={{ background: "white", borderRadius: 12, border: "1px solid #E5E7EB", padding: "20px", marginBottom: 20 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <h3 style={{ fontSize: 16, fontWeight: 700, color: "#111827", margin: 0 }}>Quiz de préparation (enseignant)</h3>
+              <button onClick={eAddQuiz} style={{
+                background: "#7C3AED", color: "white", border: "none", borderRadius: 8,
+                padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer"
+              }}>+ Question</button>
+            </div>
+
+            {editQuizQuestions.map((q, qIdx) => (
+              <div key={qIdx} style={{
+                background: "#F5F3FF", borderRadius: 10, padding: "14px 16px",
+                border: "1px solid #DDD6FE", marginBottom: 10
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: "#5B21B6" }}>Question {qIdx + 1}</span>
+                  <button onClick={() => eRemoveQuiz(qIdx)} style={{
+                    background: "none", border: "none", color: "#EF4444", fontSize: 16, cursor: "pointer"
+                  }}>✕</button>
+                </div>
+                <textarea value={q.question} onChange={e => eUpdateQuiz(qIdx, "question", e.target.value)}
+                  style={{ ...editInputStyle, minHeight: 60, marginBottom: 8 }} placeholder="Question du quiz" />
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                  <input value={q.option_a} onChange={e => eUpdateQuiz(qIdx, "option_a", e.target.value)}
+                    style={editInputStyle} placeholder="Option A" />
+                  <input value={q.option_b} onChange={e => eUpdateQuiz(qIdx, "option_b", e.target.value)}
+                    style={editInputStyle} placeholder="Option B" />
+                  <input value={q.option_c} onChange={e => eUpdateQuiz(qIdx, "option_c", e.target.value)}
+                    style={editInputStyle} placeholder="Option C" />
+                  <input value={q.option_d} onChange={e => eUpdateQuiz(qIdx, "option_d", e.target.value)}
+                    style={editInputStyle} placeholder="Option D" />
+                </div>
+                <div>
+                  <label style={editLabelStyle}>Bonne réponse</label>
+                  <select value={q.correct_answer} onChange={e => eUpdateQuiz(qIdx, "correct_answer", e.target.value)}
+                    style={{ ...editInputStyle, maxWidth: 120 }}>
+                    <option value="A">A</option>
+                    <option value="B">B</option>
+                    <option value="C">C</option>
+                    <option value="D">D</option>
+                  </select>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Save / Cancel bar */}
+          <div style={{
+            display: "flex", gap: 12, justifyContent: "flex-end",
+            padding: "20px 0", borderTop: "1px solid #E5E7EB", marginTop: 8
+          }}>
+            <button onClick={cancelEdit} disabled={editSaving} style={{
+              padding: "12px 24px", background: "white", border: "1px solid #D1D5DB",
+              borderRadius: 8, fontSize: 14, fontWeight: 600, color: "#374151", cursor: "pointer"
+            }}>Annuler</button>
+            <button onClick={handleInlineSave} disabled={editSaving} style={{
+              padding: "12px 28px", background: editSaving ? "#9CA3AF" : "#0F4C35",
+              color: "white", border: "none", borderRadius: 8, fontSize: 14,
+              fontWeight: 700, cursor: editSaving ? "not-allowed" : "pointer"
+            }}>{editSaving ? "Enregistrement..." : "Enregistrer les modifications"}</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ---- READ-ONLY VIEW ----
     return (
       <div>
-        <button onClick={() => setScreen(tab)} style={{
+        <button onClick={() => { setScreen(tab); setEditMode(false); }} style={{
           display: "flex", alignItems: "center", gap: 6, background: "none", border: "none",
           color: "#6B7280", fontSize: 13, fontWeight: 600, cursor: "pointer", marginBottom: 20, padding: 0
         }}>← Retour</button>
@@ -720,22 +1333,35 @@ export default function Dashboard({ teacher, onLogout }) {
           </div>
           <h1 style={{ fontSize: 22, fontWeight: 800, color: "#111827", margin: "0 0 8px" }}>{currentLesson.title}</h1>
           <p style={{ fontSize: 14, color: "#4B5563", margin: "0 0 12px", lineHeight: 1.6 }}>{currentLesson.objective}</p>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 12, flexWrap: "wrap", gap: 10 }}>
             <div style={{ display: "flex", gap: 16, fontSize: 13, color: "#6B7280" }}>
               <span>⏱ {currentLesson.duration}</span>
               <span>📚 {selectedLevel.name}</span>
             </div>
-            <button onClick={enterProjector} style={{
-              display: "flex", alignItems: "center", gap: 8,
-              background: "#0F4C35", color: "white", border: "none",
-              borderRadius: 10, padding: "10px 20px", fontSize: 14, fontWeight: 700,
-              cursor: "pointer", transition: "all 0.2s"
-            }}
-              onMouseEnter={e => { e.currentTarget.style.background = "#1A7A56"; e.currentTarget.style.transform = "translateY(-1px)"; }}
-              onMouseLeave={e => { e.currentTarget.style.background = "#0F4C35"; e.currentTarget.style.transform = "none"; }}
-            >
-              <span style={{ fontSize: 18 }}>📽</span> Mode Projecteur
-            </button>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={startInlineEdit} style={{
+                display: "flex", alignItems: "center", gap: 8,
+                background: "white", color: "#D97706", border: "1.5px solid #F59E0B",
+                borderRadius: 10, padding: "10px 20px", fontSize: 14, fontWeight: 700,
+                cursor: "pointer", transition: "all 0.2s"
+              }}
+                onMouseEnter={e => { e.currentTarget.style.background = "#FFFBEB"; e.currentTarget.style.transform = "translateY(-1px)"; }}
+                onMouseLeave={e => { e.currentTarget.style.background = "white"; e.currentTarget.style.transform = "none"; }}
+              >
+                <span style={{ fontSize: 16 }}>✏️</span> Modifier
+              </button>
+              <button onClick={enterProjector} style={{
+                display: "flex", alignItems: "center", gap: 8,
+                background: "#0F4C35", color: "white", border: "none",
+                borderRadius: 10, padding: "10px 20px", fontSize: 14, fontWeight: 700,
+                cursor: "pointer", transition: "all 0.2s"
+              }}
+                onMouseEnter={e => { e.currentTarget.style.background = "#1A7A56"; e.currentTarget.style.transform = "translateY(-1px)"; }}
+                onMouseLeave={e => { e.currentTarget.style.background = "#0F4C35"; e.currentTarget.style.transform = "none"; }}
+              >
+                <span style={{ fontSize: 18 }}>📽</span> Mode Projecteur
+              </button>
+            </div>
           </div>
         </div>
 
