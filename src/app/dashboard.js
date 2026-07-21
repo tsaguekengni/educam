@@ -115,6 +115,7 @@ const SECTION_TYPES = [
   { id: "video", name: "Vidéo", icon: "🎬" },
   { id: "activity", name: "Activité pratique", icon: "🧪" },
   { id: "exercise", name: "Exercices", icon: "✏️" },
+  { id: "bilan", name: "Bilan — À recopier", icon: "📋" },
 ];
 
 const BLOCK_TYPES = [
@@ -172,6 +173,16 @@ function getEmbedUrl(url) {
 function isEmbeddable(url) {
   if (!url) return false;
   return /youtube\.com|youtu\.be|vimeo\.com|dailymotion\.com/i.test(url);
+}
+
+// Renders **bold** segments (markdown-style) inside otherwise plain text.
+// Headings like "**MON DEVOIR**" or "**À RECOPIER DANS TON CAHIER**" become bold.
+function renderRichText(text) {
+  if (!text) return null;
+  return text.split(/(\*\*[^*]+\*\*)/g).map((part, i) => {
+    const m = part.match(/^\*\*([^*]+)\*\*$/);
+    return m ? <strong key={i}>{m[1]}</strong> : part;
+  });
 }
 
 export default function Dashboard({ teacher, onLogout }) {
@@ -1368,7 +1379,7 @@ export default function Dashboard({ teacher, onLogout }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {lessonSections.map((section, i) => {
             const isOpen = expandedSection === i;
-            const accentColors = { intro: "#3B82F6", content: "#0F4C35", video: "#EF4444", activity: "#8B5CF6", exercise: "#F59E0B" };
+            const accentColors = { intro: "#3B82F6", content: "#0F4C35", video: "#EF4444", activity: "#8B5CF6", exercise: "#F59E0B", bilan: "#D97706" };
             const accent = accentColors[section.section_type] || "#6B7280";
             const blocks = sectionBlocks[section.id] || [];
 
@@ -1420,7 +1431,7 @@ export default function Dashboard({ teacher, onLogout }) {
                             if (block.block_type === "text") {
                               return (
                                 <div key={k} style={{ fontSize: 15, color: "#374151", lineHeight: 1.8, whiteSpace: "pre-wrap" }}>
-                                  {block.text_content}
+                                  {renderRichText(block.text_content)}
                                 </div>
                               );
                             }
@@ -1608,7 +1619,7 @@ export default function Dashboard({ teacher, onLogout }) {
           {/* All sections — expanded, no collapse */}
           <div style={{ display: "flex", flexDirection: "column", gap: 40 }}>
             {lessonSections.filter(s => s.section_type !== "exercise").map((section, i) => {
-              const accentColors = { intro: "#3B82F6", content: "#0F4C35", video: "#EF4444", activity: "#8B5CF6" };
+              const accentColors = { intro: "#3B82F6", content: "#0F4C35", video: "#EF4444", activity: "#8B5CF6", bilan: "#D97706" };
               const accent = accentColors[section.section_type] || "#6B7280";
               const blocks = sectionBlocks[section.id] || [];
 
@@ -1645,7 +1656,7 @@ export default function Dashboard({ teacher, onLogout }) {
                               lineHeight: 1.9, whiteSpace: "pre-wrap",
                               maxWidth: 1000
                             }}>
-                              {block.text_content}
+                              {renderRichText(block.text_content)}
                             </div>
                           );
                         }
