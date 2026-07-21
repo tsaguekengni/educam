@@ -154,6 +154,7 @@ export default function Admin({ onBack }) {
   const [componentId, setComponentId] = useState("expression-orale");
   const [levelId, setLevelId] = useState("cm1");
   const [unitNumber, setUnitNumber] = useState(1);
+  const [weekNumber, setWeekNumber] = useState(1);
   const [title, setTitle] = useState("");
   const [objective, setObjective] = useState("");
   const [duration, setDuration] = useState("45 minutes");
@@ -197,6 +198,7 @@ export default function Admin({ onBack }) {
     setComponentId("expression-orale");
     setLevelId("cm1");
     setUnitNumber(1);
+    setWeekNumber(1);
     setTitle("");
     setObjective("");
     setDuration("45 minutes");
@@ -216,6 +218,7 @@ export default function Admin({ onBack }) {
     setComponentId(lesson.component_id);
     setLevelId(lesson.level);
     setUnitNumber(lesson.unit_number);
+    setWeekNumber(lesson.week_number || 1);
     setTitle(lesson.title);
     setObjective(lesson.objective || "");
     setDuration(lesson.duration || "45 minutes");
@@ -326,6 +329,7 @@ export default function Admin({ onBack }) {
             component_id: componentId,
             level: levelId,
             unit_number: unitNumber,
+            week_number: weekNumber,
             theme: THEMES[unitNumber - 1],
             title: title,
             objective: objective,
@@ -350,6 +354,7 @@ export default function Admin({ onBack }) {
             component_id: componentId,
             level: levelId,
             unit_number: unitNumber,
+            week_number: weekNumber,
             theme: THEMES[unitNumber - 1],
             title: title,
             objective: objective,
@@ -628,6 +633,12 @@ export default function Admin({ onBack }) {
                         </span>
                         <span style={{
                           fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 20,
+                          background: "#FEF3C7", color: "#D97706"
+                        }}>
+                          Semaine {lesson.week_number || 1}
+                        </span>
+                        <span style={{
+                          fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 20,
                           background: "#F5F3FF", color: "#7C3AED"
                         }}>
                           {lesson.duration}
@@ -740,6 +751,17 @@ export default function Admin({ onBack }) {
                 <select value={unitNumber} onChange={(e) => setUnitNumber(parseInt(e.target.value))} style={inputStyle}>
                   {THEMES.map((t, i) => <option key={i} value={i + 1}>Unité {i + 1}: {t}</option>)}
                 </select>
+              </div>
+            </div>
+            <div>
+              <label style={labelStyle}>Semaine *</label>
+              <select value={weekNumber} onChange={(e) => setWeekNumber(parseInt(e.target.value))} style={inputStyle}>
+                <option value={1}>Semaine 1</option>
+                <option value={2}>Semaine 2</option>
+                <option value={3}>Semaine 3</option>
+              </select>
+              <div style={{ fontSize: 12, color: "#9CA3AF", marginTop: 6 }}>
+                Chaque semaine (1 à 3) est une leçon indépendante. La semaine 4 est réservée à l'intégration et l'évaluation.
               </div>
             </div>
             <div>
