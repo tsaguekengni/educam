@@ -248,7 +248,7 @@ export default function Dashboard({ teacher, onLogout }) {
   };
 
   const fetchAllLessons = async () => {
-    const { data } = await supabase.from("lessons").select("id, subject_id, component_id, level, unit_number, title")
+    const { data } = await supabase.from("lessons").select("id, subject_id, component_id, level, unit_number, week_number, title")
       .eq("level", selectedLevel.id);
     setAvailableLessons(data || []);
   };
@@ -263,8 +263,16 @@ export default function Dashboard({ teacher, onLogout }) {
       .sort((a, b) => a.unit_number - b.unit_number || a.week_number - b.week_number);
   };
 
-  const getLessonForTopic = (subjectId, componentId, unitNumber) => {
-    return availableLessons.find(l => l.subject_id === subjectId && l.component_id === componentId && l.unit_number === unitNumber);
+  // Finds the lesson for a given subject/component/unit and (optionally) week.
+  // A lesson row with no week_number is treated as week 1 so pre-migration
+  // content keeps showing. Omitting weekNumber matches any lesson in the unit.
+  const getLessonForTopic = (subjectId, componentId, unitNumber, weekNumber) => {
+    return availableLessons.find(l =>
+      l.subject_id === subjectId &&
+      l.component_id === componentId &&
+      l.unit_number === unitNumber &&
+      (weekNumber == null || (l.week_number || 1) === weekNumber)
+    );
   };
 
   const getDaySlots = (dayNum) => timetable.filter(s => s.day_of_week === dayNum);
@@ -758,7 +766,7 @@ export default function Dashboard({ teacher, onLogout }) {
                   const topic = getTopic(selectedUnit, selectedWeek, slot.subject_id, slot.component_id);
                   const color = getSubjectColor(slot.subject_id);
                   const icon = getSubjectIcon(slot.subject_id);
-                  const lesson = topic ? getLessonForTopic(slot.subject_id, slot.component_id, selectedUnit) : null;
+                  const lesson = topic ? getLessonForTopic(slot.subject_id, slot.component_id, selectedUnit, selectedWeek) : null;
                   const hasBreak = i === 2;
 
                   return (
@@ -929,7 +937,6 @@ export default function Dashboard({ teacher, onLogout }) {
           {THEMES.map((theme, unitIdx) => {
             const unitNum = unitIdx + 1;
             const unitTopics = compTopics.filter(t => t.unit_number === unitNum);
-            const lesson = getLessonForTopic(selectedSubject.id, selectedComponent.id, unitNum);
             const monthInfo = MONTH_UNIT_MAP[unitIdx];
 
             return (
@@ -954,13 +961,14 @@ export default function Dashboard({ teacher, onLogout }) {
 
                 {unitTopics.length > 0 ? (
                   <div style={{ marginLeft: 18, borderLeft: `2px solid ${color}30`, paddingLeft: 20 }}>
-                    {/* Weekly topics */}
+                    {/* Weekly topics — each week is an independent lesson */}
                     {[1, 2, 3].map(week => {
                       const weekTopics = unitTopics.filter(t => t.week_number === week);
-                      if (weekTopics.length === 0) return null;
+                      const weekLesson = getLessonForTopic(selectedSubject.id, selectedComponent.id, unitNum, week);
+                      if (weekTopics.length === 0 && !weekLesson) return null;
                       return (
-                        <div key={week} style={{ marginBottom: 10 }}>
-                          <div style={{ fontSize: 12, fontWeight: 600, color: "#9CA3AF", marginBottom: 6 }}>
+                        <div key={week} style={{ marginBottom: 14 }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: color, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 }}>
                             Semaine {week}
                           </div>
                           {weekTopics.map((topic, ti) => (
@@ -977,30 +985,30 @@ export default function Dashboard({ teacher, onLogout }) {
                               )}
                             </div>
                           ))}
+
+                          {/* This week's lesson */}
+                          {weekLesson ? (
+                            <div onClick={() => openLesson(weekLesson.id)}
+                              style={{
+                                background: `${color}08`, borderRadius: 8, padding: "10px 14px",
+                                border: `1px solid ${color}30`, marginTop: 6, cursor: "pointer"
+                              }}
+                              onMouseEnter={e => { e.currentTarget.style.background = `${color}15`; }}
+                              onMouseLeave={e => { e.currentTarget.style.background = `${color}08`; }}
+                            >
+                              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                <span style={{ fontSize: 11, fontWeight: 600, color: "#10B981", background: "#10B98115", padding: "2px 8px", borderRadius: 20 }}>Leçon disponible</span>
+                                <span style={{ fontSize: 13, fontWeight: 600, color: color }}>{weekLesson.title}</span>
+                              </div>
+                            </div>
+                          ) : (
+                            <div style={{ fontSize: 12, color: "#9CA3AF", fontStyle: "italic", marginTop: 6, paddingLeft: 4 }}>
+                              Leçon à créer pour cette semaine
+                            </div>
+                          )}
                         </div>
                       );
                     })}
-
-                    {/* Lesson link */}
-                    {lesson ? (
-                      <div onClick={() => openLesson(lesson.id)}
-                        style={{
-                          background: `${color}08`, borderRadius: 8, padding: "10px 14px",
-                          border: `1px solid ${color}30`, marginBottom: 10, cursor: "pointer"
-                        }}
-                        onMouseEnter={e => { e.currentTarget.style.background = `${color}15`; }}
-                        onMouseLeave={e => { e.currentTarget.style.background = `${color}08`; }}
-                      >
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <span style={{ fontSize: 11, fontWeight: 600, color: "#10B981", background: "#10B98115", padding: "2px 8px", borderRadius: 20 }}>Leçon disponible</span>
-                          <span style={{ fontSize: 13, fontWeight: 600, color: color }}>{lesson.title}</span>
-                        </div>
-                      </div>
-                    ) : (
-                      <div style={{ fontSize: 12, color: "#9CA3AF", fontStyle: "italic", marginBottom: 10, paddingLeft: 4 }}>
-                        Leçon à créer pour cette unité
-                      </div>
-                    )}
 
                     {/* Week 4 */}
                     <div style={{ fontSize: 12, color: "#D97706", background: "#FFFBEB", borderRadius: 6, padding: "6px 10px", marginBottom: 10 }}>
