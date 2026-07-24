@@ -1,0 +1,35 @@
+<svg viewBox="0 0 1200 675" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI', Arial, sans-serif">
+  <rect width="1200" height="675" rx="24" fill="#F8FAFC"/>
+  <text x="600" y="72" text-anchor="middle" font-size="40" font-weight="700" fill="#1E293B">Le nombre décimal 23,457</text>
+
+  <!-- part brackets -->
+  <text x="360" y="150" text-anchor="middle" font-size="24" font-weight="700" fill="#2563EB">partie entière</text>
+  <text x="770" y="150" text-anchor="middle" font-size="24" font-weight="700" fill="#059669">partie décimale</text>
+
+  <!-- header row (rang names) -->
+  <g font-size="21" font-weight="600" fill="#334155" text-anchor="middle">
+    <rect x="220" y="175" width="140" height="60" fill="#EFF6FF" stroke="#CBD5E1"/><text x="290" y="212">Dizaines</text>
+    <rect x="360" y="175" width="140" height="60" fill="#EFF6FF" stroke="#CBD5E1"/><text x="430" y="212">Unités</text>
+    <rect x="500" y="175" width="60"  height="60" fill="#FFFFFF" stroke="#CBD5E1"/>
+    <rect x="560" y="175" width="140" height="60" fill="#ECFDF5" stroke="#CBD5E1"/><text x="630" y="212">Dixièmes</text>
+    <rect x="700" y="175" width="140" height="60" fill="#ECFDF5" stroke="#CBD5E1"/><text x="770" y="212">Centièmes</text>
+    <rect x="840" y="175" width="140" height="60" fill="#ECFDF5" stroke="#CBD5E1"/><text x="910" y="212">Millièmes</text>
+  </g>
+
+  <!-- digit row -->
+  <g font-size="60" font-weight="700" fill="#0F172A" text-anchor="middle">
+    <rect x="220" y="235" width="140" height="110" fill="#F5F9FF" stroke="#CBD5E1"/><text x="290" y="312">2</text>
+    <rect x="360" y="235" width="140" height="110" fill="#F5F9FF" stroke="#CBD5E1"/><text x="430" y="312">3</text>
+    <rect x="500" y="235" width="60"  height="110" fill="#FFFFFF" stroke="#CBD5E1"/><text x="530" y="322" font-size="52" fill="#DC2626">,</text>
+    <rect x="560" y="235" width="140" height="110" fill="#F3FDF8" stroke="#CBD5E1"/><text x="630" y="312">4</text>
+    <rect x="700" y="235" width="140" height="110" fill="#F3FDF8" stroke="#CBD5E1"/><text x="770" y="312">5</text>
+    <rect x="840" y="235" width="140" height="110" fill="#F3FDF8" stroke="#CBD5E1"/><text x="910" y="312">7</text>
+  </g>
+
+  <!-- equivalences -->
+  <text x="600" y="430" text-anchor="middle" font-size="28" fill="#065F46" font-weight="600">4 dixièmes = 4/10   ·   5 centièmes = 5/100   ·   7 millièmes = 7/1000</text>
+
+  <!-- encadrer / arrondir -->
+  <text x="600" y="510" text-anchor="middle" font-size="25" fill="#334155">Encadrer au dixième : 23,4 &lt; 23,457 &lt; 23,5</text>
+  <text x="600" y="552" text-anchor="middle" font-size="25" fill="#334155">Arrondir au dixième : 23,457 → 23,5 (le centième 5 fait monter)</text>
+</svg>

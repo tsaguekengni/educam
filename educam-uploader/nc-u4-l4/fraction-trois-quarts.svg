@@ -1,0 +1,24 @@
+<svg viewBox="0 0 1200 675" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI', Arial, sans-serif">
+  <rect width="1200" height="675" rx="24" fill="#F8FAFC"/>
+  <text x="600" y="80" text-anchor="middle" font-size="40" font-weight="700" fill="#1E293B">Une fraction : 3/4</text>
+
+  <!-- Pie divided in 4, 3 shaded -->
+  <path d="M 350 360 L 520 360 A 170 170 0 0 1 350 530 Z" fill="#F59E0B" stroke="#FFFFFF" stroke-width="4"/>
+  <path d="M 350 360 L 350 530 A 170 170 0 0 1 180 360 Z" fill="#F59E0B" stroke="#FFFFFF" stroke-width="4"/>
+  <path d="M 350 360 L 180 360 A 170 170 0 0 1 350 190 Z" fill="#F59E0B" stroke="#FFFFFF" stroke-width="4"/>
+  <path d="M 350 360 L 350 190 A 170 170 0 0 1 520 360 Z" fill="#FFFFFF" stroke="#F59E0B" stroke-width="4"/>
+  <circle cx="350" cy="360" r="170" fill="none" stroke="#B45309" stroke-width="3"/>
+  <text x="350" y="580" text-anchor="middle" font-size="24" fill="#475569">3 parts coloriées sur 4</text>
+
+  <!-- Fraction with labels -->
+  <text x="820" y="345" text-anchor="middle" font-size="110" font-weight="700" fill="#B45309">3</text>
+  <line x1="740" y1="370" x2="900" y2="370" stroke="#1E293B" stroke-width="6"/>
+  <text x="820" y="480" text-anchor="middle" font-size="110" font-weight="700" fill="#334155">4</text>
+
+  <text x="980" y="320" font-size="24" font-weight="700" fill="#B45309">← numérateur</text>
+  <text x="980" y="345" font-size="20" fill="#64748B">parts prises</text>
+  <text x="980" y="455" font-size="24" font-weight="700" fill="#334155">← dénominateur</text>
+  <text x="980" y="480" font-size="20" fill="#64748B">parts en tout</text>
+
+  <text x="820" y="580" text-anchor="middle" font-size="26" fill="#475569">se lit : « trois quarts »</text>
+</svg>
