@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# lesson uploader tooling & scratch (local utility, not part of the app)
+/lesson-uploader

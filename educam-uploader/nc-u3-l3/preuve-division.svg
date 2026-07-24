@@ -1,0 +1,18 @@
+<svg viewBox="0 0 1200 675" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI', Arial, sans-serif">
+  <rect width="1200" height="675" rx="24" fill="#F8FAFC"/>
+  <text x="600" y="86" text-anchor="middle" font-size="40" font-weight="700" fill="#1E293B">La preuve de la division</text>
+  <text x="600" y="132" text-anchor="middle" font-size="26" fill="#64748B">Pour vérifier, on refait le chemin à l'envers.</text>
+
+  <!-- Formula -->
+  <rect x="150" y="190" width="900" height="90" rx="16" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="2"/>
+  <text x="600" y="248" text-anchor="middle" font-size="34" font-weight="700" fill="#1E3A8A">(diviseur × quotient) + reste = dividende</text>
+
+  <!-- Worked -->
+  <text x="600" y="360" text-anchor="middle" font-size="46" font-weight="700" fill="#0F172A">(25 × 6) + 6</text>
+  <text x="600" y="440" text-anchor="middle" font-size="46" font-weight="700" fill="#0F172A">= 150 + 6</text>
+
+  <!-- Result -->
+  <rect x="380" y="480" width="440" height="110" rx="18" fill="#ECFDF5" stroke="#A7F3D0" stroke-width="2"/>
+  <text x="600" y="552" text-anchor="middle" font-size="52" font-weight="700" fill="#065F46">= 156  ✓</text>
+  <text x="600" y="630" text-anchor="middle" font-size="25" fill="#475569">On retrouve le dividende 156 : la division est correcte !</text>
+</svg>
