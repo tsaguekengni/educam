@@ -58,10 +58,13 @@ const SUBJECTS = [
     components: [
       { id: "morale", name: "Éducation morale" },
       { id: "droits", name: "Droits et devoirs de l'enfant" },
-      { id: "paix", name: "Éducation à la paix" },
+      { id: "paix", name: "Éducation à la paix et à la sécurité" },
       { id: "citoyennete", name: "Éducation à la citoyenneté" },
+      { id: "regles-reglements", name: "Règles et règlements" },
       { id: "histoire", name: "Histoire" },
-      { id: "geographie", name: "Géographie" },
+      { id: "geographie-physique", name: "Géographie physique" },
+      { id: "geographie-humaine", name: "Géographie humaine" },
+      { id: "geographie-economique", name: "Géographie économique" },
     ]
   },
   {
@@ -70,6 +73,7 @@ const SUBJECTS = [
       { id: "env-info", name: "Environnements informatiques" },
       { id: "production-tic", name: "Production avec les outils TIC" },
       { id: "internet", name: "Internet et communication" },
+      { id: "sante-securite-ethique", name: "Santé, sécurité et éthique" },
       { id: "programmation", name: "Notions de programmation" },
     ]
   },
@@ -147,8 +151,8 @@ const MONTH_UNIT_MAP = [
   { month: "Déc/Janvier", unit: 4 },
   { month: "Février", unit: 5 },
   { month: "Mars", unit: 6 },
-  { month: "Avril/Mai", unit: 7 },
-  { month: "Juin", unit: 8 },
+  { month: "Avril", unit: 7 },
+  { month: "Mai", unit: 8 },
 ];
 
 function getSubjectColor(subjectId) {
