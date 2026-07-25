@@ -190,11 +190,22 @@ function renderRichText(text) {
 }
 
 export default function Dashboard({ teacher, onLogout }) {
+  // Only admins may edit base content; everyone else is a read-only reviewer
+  // who can leave feedback. Defaults to reviewer if role is missing.
+  const isAdmin = teacher?.role === "admin";
+
   const [selectedLevel, setSelectedLevel] = useState(
     LEVELS.find(l => l.id === teacher?.level) || LEVELS[2]
   );
   const [screen, setScreen] = useState("home");
   const [tab, setTab] = useState("calendar");
+
+  // Review feedback state
+  const [lessonFeedback, setLessonFeedback] = useState([]); // this teacher's feedback for the open lesson
+  const [feedbackOpenFor, setFeedbackOpenFor] = useState(null); // section id, or "lesson", or null
+  const [fbRating, setFbRating] = useState(0);
+  const [fbComment, setFbComment] = useState("");
+  const [fbSaving, setFbSaving] = useState(false);
 
   // Calendar state
   const [selectedUnit, setSelectedUnit] = useState(1);
@@ -585,14 +596,134 @@ export default function Dashboard({ teacher, onLogout }) {
       });
     }
 
+    // Load this teacher's own feedback for the lesson (for showing/editing).
+    const { data: fb } = await supabase
+      .from("lesson_feedback")
+      .select("*")
+      .eq("teacher_id", teacher?.id)
+      .eq("lesson_id", lessonId);
+
     setCurrentLesson(lesson);
     setLessonSections(sections || []);
     setSectionBlocks(blocksBySection);
     setLessonExercises(exercises || []);
     setExpandedSection(0);
     setLessonPassed(!!readiness);
+    setLessonFeedback(fb || []);
+    setFeedbackOpenFor(null);
     setScreen("lesson");
     setLoadingLesson(false);
+  };
+
+  // ---- Review feedback helpers ----
+  const openFeedback = (target) => {
+    const existing = (lessonFeedback || []).find(f =>
+      target === "lesson" ? f.section_id == null : f.section_id === target
+    );
+    setFbRating(existing?.rating || 0);
+    setFbComment(existing?.comment || "");
+    setFeedbackOpenFor(target);
+  };
+
+  const submitFeedback = async (sectionId, sectionTitle) => {
+    if (!fbComment.trim() && !fbRating) { setFeedbackOpenFor(null); return; }
+    setFbSaving(true);
+    const row = {
+      teacher_id: teacher?.id,
+      lesson_id: currentLesson.id,
+      section_id: sectionId,          // null for whole-lesson
+      section_title: sectionTitle || null,
+      rating: fbRating || null,
+      comment: fbComment.trim() || null,
+      updated_at: new Date().toISOString(),
+    };
+    const existing = (lessonFeedback || []).find(f =>
+      sectionId == null ? f.section_id == null : f.section_id === sectionId
+    );
+    if (existing) {
+      await supabase.from("lesson_feedback").update(row).eq("id", existing.id);
+    } else {
+      await supabase.from("lesson_feedback").insert(row);
+    }
+    // Refresh this teacher's feedback for the lesson
+    const { data: fb } = await supabase
+      .from("lesson_feedback")
+      .select("*")
+      .eq("teacher_id", teacher?.id)
+      .eq("lesson_id", currentLesson.id);
+    setLessonFeedback(fb || []);
+    setFbSaving(false);
+    setFeedbackOpenFor(null);
+    setFbRating(0);
+    setFbComment("");
+  };
+
+  const feedbackFor = (sectionId) =>
+    (lessonFeedback || []).find(f =>
+      sectionId == null ? f.section_id == null : f.section_id === sectionId
+    );
+
+  // Renders the reviewer comment + rating control for a section (or the whole
+  // lesson when sectionId is null). Admins don't see it — they edit instead.
+  const renderFeedback = (sectionId, sectionTitle) => {
+    if (isAdmin) return null;
+    const target = sectionId == null ? "lesson" : sectionId;
+    const isOpen = feedbackOpenFor === target;
+    const existing = feedbackFor(sectionId);
+    const Stars = ({ value, onPick }) => (
+      <div style={{ display: "flex", gap: 4 }}>
+        {[1, 2, 3, 4, 5].map(n => (
+          <span key={n} onClick={onPick ? () => onPick(n) : undefined}
+            style={{ fontSize: 20, cursor: onPick ? "pointer" : "default", color: n <= value ? "#F59E0B" : "#D1D5DB", lineHeight: 1 }}>★</span>
+        ))}
+      </div>
+    );
+
+    if (isOpen) {
+      return (
+        <div style={{ marginTop: 12, background: "#F5F3FF", border: "1px solid #DDD6FE", borderRadius: 10, padding: "14px 16px" }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#5B21B6", marginBottom: 8 }}>Votre retour</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+            <span style={{ fontSize: 13, color: "#6B7280" }}>Note :</span>
+            <Stars value={fbRating} onPick={setFbRating} />
+          </div>
+          <textarea value={fbComment} onChange={e => setFbComment(e.target.value)}
+            placeholder="Votre commentaire sur cette section…" rows={3}
+            style={{ width: "100%", padding: "10px 12px", border: "1.5px solid #D1D5DB", borderRadius: 8, fontSize: 14, outline: "none", boxSizing: "border-box", resize: "vertical" }} />
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 10 }}>
+            <button onClick={() => setFeedbackOpenFor(null)} disabled={fbSaving}
+              style={{ padding: "8px 16px", background: "white", border: "1px solid #D1D5DB", borderRadius: 8, fontSize: 13, fontWeight: 600, color: "#374151", cursor: "pointer" }}>Annuler</button>
+            <button onClick={() => submitFeedback(sectionId, sectionTitle)} disabled={fbSaving}
+              style={{ padding: "8px 18px", background: fbSaving ? "#9CA3AF" : "#7C3AED", color: "white", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: fbSaving ? "default" : "pointer" }}>
+              {fbSaving ? "Envoi…" : "Enregistrer"}
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div style={{ marginTop: 12 }}>
+        {existing ? (
+          <div style={{ background: "#F9FAFB", border: "1px solid #E5E7EB", borderRadius: 10, padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Stars value={existing.rating || 0} />
+                <span style={{ fontSize: 12, color: "#16A34A", fontWeight: 600 }}>Retour enregistré</span>
+              </div>
+              {existing.comment && <div style={{ fontSize: 13, color: "#4B5563", marginTop: 4 }}>{existing.comment}</div>}
+            </div>
+            <button onClick={() => openFeedback(target)}
+              style={{ padding: "6px 12px", background: "white", border: "1px solid #DDD6FE", borderRadius: 6, fontSize: 12, fontWeight: 600, color: "#7C3AED", cursor: "pointer", whiteSpace: "nowrap" }}>Modifier</button>
+          </div>
+        ) : (
+          <button onClick={() => openFeedback(target)}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: "white", border: "1px dashed #C4B5FD", borderRadius: 8, fontSize: 13, fontWeight: 600, color: "#7C3AED", cursor: "pointer" }}>
+            💬 Commenter cette section
+          </button>
+        )}
+      </div>
+    );
   };
 
   const openLessonBySubject = async (subjectId, componentId, unitNumber) => {
@@ -664,13 +795,15 @@ export default function Dashboard({ teacher, onLogout }) {
         <div style={{ fontSize: 22 }}>📚</div>
         <div style={{ fontSize: 11, fontWeight: 600, marginTop: 2 }}>Programme</div>
       </button>
-      <button onClick={() => { setScreen("admin"); }} style={{
-        background: "none", border: "none", cursor: "pointer", textAlign: "center",
-        color: screen === "admin" ? "#0F4C35" : "#9CA3AF"
-      }}>
-        <div style={{ fontSize: 22 }}>⚙️</div>
-        <div style={{ fontSize: 11, fontWeight: 600, marginTop: 2 }}>Gestion</div>
-      </button>
+      {isAdmin && (
+        <button onClick={() => { setScreen("admin"); }} style={{
+          background: "none", border: "none", cursor: "pointer", textAlign: "center",
+          color: screen === "admin" ? "#0F4C35" : "#9CA3AF"
+        }}>
+          <div style={{ fontSize: 22 }}>⚙️</div>
+          <div style={{ fontSize: 11, fontWeight: 600, marginTop: 2 }}>Gestion</div>
+        </button>
+      )}
     </div>
   );
 
@@ -1362,17 +1495,19 @@ export default function Dashboard({ teacher, onLogout }) {
               <span>📚 {selectedLevel.name}</span>
             </div>
             <div style={{ display: "flex", gap: 10 }}>
-              <button onClick={startInlineEdit} style={{
-                display: "flex", alignItems: "center", gap: 8,
-                background: "white", color: "#D97706", border: "1.5px solid #F59E0B",
-                borderRadius: 10, padding: "10px 20px", fontSize: 14, fontWeight: 700,
-                cursor: "pointer", transition: "all 0.2s"
-              }}
-                onMouseEnter={e => { e.currentTarget.style.background = "#FFFBEB"; e.currentTarget.style.transform = "translateY(-1px)"; }}
-                onMouseLeave={e => { e.currentTarget.style.background = "white"; e.currentTarget.style.transform = "none"; }}
-              >
-                <span style={{ fontSize: 16 }}>✏️</span> Modifier
-              </button>
+              {isAdmin && (
+                <button onClick={startInlineEdit} style={{
+                  display: "flex", alignItems: "center", gap: 8,
+                  background: "white", color: "#D97706", border: "1.5px solid #F59E0B",
+                  borderRadius: 10, padding: "10px 20px", fontSize: 14, fontWeight: 700,
+                  cursor: "pointer", transition: "all 0.2s"
+                }}
+                  onMouseEnter={e => { e.currentTarget.style.background = "#FFFBEB"; e.currentTarget.style.transform = "translateY(-1px)"; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = "white"; e.currentTarget.style.transform = "none"; }}
+                >
+                  <span style={{ fontSize: 16 }}>✏️</span> Modifier
+                </button>
+              )}
               <button onClick={enterProjector} style={{
                 display: "flex", alignItems: "center", gap: 8,
                 background: "#0F4C35", color: "white", border: "none",
@@ -1501,12 +1636,22 @@ export default function Dashboard({ teacher, onLogout }) {
                         )}
                       </div>
                     )}
+                    {renderFeedback(section.id, section.title)}
                   </div>
                 )}
               </div>
             );
           })}
         </div>
+
+        {/* Whole-lesson feedback (reviewers only) */}
+        {!isAdmin && currentLesson && (
+          <div style={{ marginTop: 20, padding: "18px 20px", borderRadius: 12, background: "white", border: "1px solid #E5E7EB" }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: "#111827", marginBottom: 4 }}>Votre avis sur l'ensemble de la leçon</div>
+            <div style={{ fontSize: 13, color: "#6B7280" }}>Une note et un commentaire général nous aident à améliorer cette leçon.</div>
+            {renderFeedback(null, currentLesson.title)}
+          </div>
+        )}
 
         {/* Readiness status + quiz */}
         <div style={{
@@ -1825,29 +1970,31 @@ export default function Dashboard({ teacher, onLogout }) {
                 </div>
               </div>
 
-              <div onClick={() => { setScreen("admin"); }}
-                style={{
-                  background: "white", borderRadius: 14, padding: "28px 24px",
-                  border: "1px solid #E5E7EB", cursor: "pointer", transition: "all 0.2s"
-                }}
-                onMouseEnter={e => { e.currentTarget.style.borderColor = "#F59E0B"; e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 8px 20px rgba(0,0,0,0.08)"; }}
-                onMouseLeave={e => { e.currentTarget.style.borderColor = "#E5E7EB"; e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-                  <div style={{
-                    width: 56, height: 56, borderRadius: 14,
-                    background: "linear-gradient(135deg, #D97706, #F59E0B)",
-                    display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28
-                  }}>⚙️</div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 18, fontWeight: 700, color: "#111827" }}>Gestion des leçons</div>
-                    <div style={{ fontSize: 14, color: "#6B7280", marginTop: 4, lineHeight: 1.5 }}>
-                      Créez, modifiez et supprimez le contenu pédagogique de la plateforme.
+              {isAdmin && (
+                <div onClick={() => { setScreen("admin"); }}
+                  style={{
+                    background: "white", borderRadius: 14, padding: "28px 24px",
+                    border: "1px solid #E5E7EB", cursor: "pointer", transition: "all 0.2s"
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.borderColor = "#F59E0B"; e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 8px 20px rgba(0,0,0,0.08)"; }}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor = "#E5E7EB"; e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+                    <div style={{
+                      width: 56, height: 56, borderRadius: 14,
+                      background: "linear-gradient(135deg, #D97706, #F59E0B)",
+                      display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28
+                    }}>⚙️</div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 18, fontWeight: 700, color: "#111827" }}>Gestion des leçons</div>
+                      <div style={{ fontSize: 14, color: "#6B7280", marginTop: 4, lineHeight: 1.5 }}>
+                        Créez, modifiez et supprimez le contenu pédagogique de la plateforme.
+                      </div>
                     </div>
+                    <span style={{ color: "#9CA3AF", fontSize: 22 }}>›</span>
                   </div>
-                  <span style={{ color: "#9CA3AF", fontSize: 22 }}>›</span>
                 </div>
-              </div>
+              )}
             </div>
           </div>
         )}
@@ -1855,7 +2002,7 @@ export default function Dashboard({ teacher, onLogout }) {
         {screen === "programme" && <ProgrammeView />}
         {screen === "readiness" && currentLesson && <ReadinessQuiz lesson={currentLesson} teacherId={teacher?.id} onPass={() => { setLessonPassed(true); setScreen("lesson"); }} onBack={() => setScreen("lesson")} />}
         {screen === "lesson" && <LessonScreen />}
-        {screen === "admin" && <Admin onBack={() => { setScreen(tab); }} />}
+        {screen === "admin" && isAdmin && <Admin onBack={() => { setScreen(tab); }} />}
       </div>
       {screen !== "lesson" && screen !== "home" && <BottomNav />}
     </div>
