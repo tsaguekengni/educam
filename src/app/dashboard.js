@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { supabase } from "../lib/supabase";
 import Admin from "./admin";
 import ReadinessQuiz from "./readiness";
@@ -205,6 +205,28 @@ export default function Dashboard({ teacher, onLogout }) {
   );
   const [screen, setScreen] = useState("home");
   const [tab, setTab] = useState("calendar");
+
+  // Scroll restoration: remember where the reader was in the list when they
+  // open a lesson, so "Retour" brings them back to that exact spot.
+  const listScrollY = useRef(0);
+  const pendingRestore = useRef(false);
+
+  useEffect(() => {
+    if (screen === "lesson") {
+      // Start a freshly-opened lesson at the top.
+      window.scrollTo(0, 0);
+    } else if (pendingRestore.current && (screen === "programme" || screen === "calendar" || screen === "home")) {
+      pendingRestore.current = false;
+      const y = listScrollY.current;
+      requestAnimationFrame(() => requestAnimationFrame(() => window.scrollTo(0, y)));
+    }
+  }, [screen]);
+
+  const backFromLesson = () => {
+    pendingRestore.current = true;
+    setEditMode(false);
+    setScreen(tab);
+  };
 
   // Review feedback state
   const [lessonFeedback, setLessonFeedback] = useState([]); // this teacher's feedback for the open lesson
@@ -579,6 +601,7 @@ export default function Dashboard({ teacher, onLogout }) {
   };
 
   const openLesson = async (lessonId) => {
+    listScrollY.current = window.scrollY; // remember list position for "Retour"
     setLoadingLesson(true);
     const { data: lesson } = await supabase.from("lessons").select("*").eq("id", lessonId).single();
     const { data: sections } = await supabase.from("lesson_sections").select("*").eq("lesson_id", lessonId).order("section_order");
@@ -1481,7 +1504,7 @@ export default function Dashboard({ teacher, onLogout }) {
     // ---- READ-ONLY VIEW ----
     return (
       <div>
-        <button onClick={() => { setScreen(tab); setEditMode(false); }} style={{
+        <button onClick={backFromLesson} style={{
           display: "flex", alignItems: "center", gap: 6, background: "none", border: "none",
           color: "#6B7280", fontSize: 13, fontWeight: 600, cursor: "pointer", marginBottom: 20, padding: 0
         }}>← Retour</button>
@@ -1694,7 +1717,7 @@ export default function Dashboard({ teacher, onLogout }) {
         </div>
 
         <div style={{ marginTop: 16 }}>
-          <button onClick={() => setScreen(tab)} style={{
+          <button onClick={backFromLesson} style={{
             padding: "12px 20px", background: "white", border: "1px solid #D1D5DB",
             borderRadius: 8, fontSize: 14, fontWeight: 600, color: "#374151", cursor: "pointer"
           }}>← Retour</button>
