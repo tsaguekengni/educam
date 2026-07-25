@@ -179,6 +179,12 @@ function isEmbeddable(url) {
   return /youtube\.com|youtu\.be|vimeo\.com|dailymotion\.com/i.test(url);
 }
 
+// SVG diagrams are vector: safe to scale up to fill the reading column.
+// Raster photos (png/jpg) are NOT upscaled, to avoid blur.
+function isSvg(url) {
+  return !!url && /\.svg(\?|#|$)/i.test(url);
+}
+
 // Renders **bold** segments (markdown-style) inside otherwise plain text.
 // Headings like "**MON DEVOIR**" or "**À RECOPIER DANS TON CAHIER**" become bold.
 function renderRichText(text) {
@@ -1589,6 +1595,7 @@ export default function Dashboard({ teacher, onLogout }) {
                                     src={block.media_url}
                                     alt={block.alt_text || ""}
                                     style={{
+                                      width: isSvg(block.media_url) ? "100%" : undefined,
                                       maxWidth: "100%", borderRadius: 10, display: "block",
                                       cursor: "pointer", transition: "transform 0.2s",
                                       boxShadow: "0 2px 12px rgba(0,0,0,0.08)"
@@ -1820,13 +1827,14 @@ export default function Dashboard({ teacher, onLogout }) {
                         if (block.block_type === "image" && block.media_url) {
                           return (
                             <figure key={k} style={{
-                              margin: "16px auto", textAlign: "center", maxWidth: "90%"
+                              margin: "16px 0", textAlign: "center", width: "100%", maxWidth: "100%"
                             }}>
                               <img
                                 src={block.media_url}
                                 alt={block.alt_text || ""}
                                 style={{
-                                  maxWidth: "100%", maxHeight: "75vh",
+                                  width: "100%",
+                                  maxWidth: "100%", maxHeight: "80vh", objectFit: "contain",
                                   borderRadius: 16, display: "block", margin: "0 auto",
                                   boxShadow: "0 4px 24px rgba(0,0,0,0.1)",
                                   cursor: "pointer", transition: "transform 0.3s"
