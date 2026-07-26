@@ -246,7 +246,7 @@ export default function Dashboard({ teacher, onLogout }) {
   const [programmeView, setProgrammeView] = useState("subjects"); // subjects, components, topics
 
   // Lesson state
-  const [expandedSection, setExpandedSection] = useState(0);
+  const [collapsedSections, setCollapsedSections] = useState({}); // {} = every section expanded
   const [currentLesson, setCurrentLesson] = useState(null);
   const [lessonSections, setLessonSections] = useState([]);
   const [sectionBlocks, setSectionBlocks] = useState({}); // { [section_id]: [block, ...] in order }
@@ -638,7 +638,7 @@ export default function Dashboard({ teacher, onLogout }) {
     setLessonSections(sections || []);
     setSectionBlocks(blocksBySection);
     setLessonExercises(exercises || []);
-    setExpandedSection(0);
+    setCollapsedSections({}); // enter a lesson with every section expanded
     setLessonPassed(!!readiness);
     setLessonFeedback(fb || []);
     setFeedbackOpenFor(null);
@@ -1618,7 +1618,7 @@ export default function Dashboard({ teacher, onLogout }) {
 
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {lessonSections.map((section, i) => {
-            const isOpen = expandedSection === i;
+            const isOpen = !collapsedSections[i];
             const accentColors = { intro: "#3B82F6", content: "#0F4C35", video: "#EF4444", activity: "#8B5CF6", exercise: "#F59E0B", bilan: "#D97706" };
             const accent = accentColors[section.section_type] || "#6B7280";
             const blocks = sectionBlocks[section.id] || [];
@@ -1628,7 +1628,7 @@ export default function Dashboard({ teacher, onLogout }) {
                 background: "white", borderRadius: 10,
                 border: `1px solid ${isOpen ? accent + "40" : "#E5E7EB"}`, overflow: "hidden"
               }}>
-                <div onClick={() => setExpandedSection(isOpen ? -1 : i)}
+                <div onClick={() => setCollapsedSections(prev => ({ ...prev, [i]: !prev[i] }))}
                   style={{
                     padding: "14px 18px", cursor: "pointer",
                     display: "flex", justifyContent: "space-between", alignItems: "center",
