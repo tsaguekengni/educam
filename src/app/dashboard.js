@@ -600,8 +600,10 @@ export default function Dashboard({ teacher, onLogout }) {
     if (editQuizQuestions.length > 1) setEditQuizQuestions(editQuizQuestions.filter((_, i) => i !== index));
   };
 
-  const openLesson = async (lessonId) => {
-    listScrollY.current = window.scrollY; // remember list position for "Retour"
+  const openLesson = async (lessonId, opts = {}) => {
+    // When stepping between lessons (Précédent/Suivant) we keep the originally
+    // saved list position so "Retour" still lands where the review started.
+    if (!opts.keepListScroll) listScrollY.current = window.scrollY;
     setLoadingLesson(true);
     const { data: lesson } = await supabase.from("lessons").select("*").eq("id", lessonId).single();
     const { data: sections } = await supabase.from("lesson_sections").select("*").eq("lesson_id", lessonId).order("section_order");
@@ -642,6 +644,30 @@ export default function Dashboard({ teacher, onLogout }) {
     setFeedbackOpenFor(null);
     setScreen("lesson");
     setLoadingLesson(false);
+  };
+
+  // Ordered list of the EXISTING lessons in the current lesson's component
+  // (across all its units) so Précédent/Suivant can step through them without
+  // returning to the list. Empty weeks are skipped because availableLessons
+  // only holds lessons that actually exist.
+  const getAdjacentLessons = () => {
+    if (!currentLesson) return { prev: null, next: null };
+    const siblings = (availableLessons || [])
+      .filter(l => l.subject_id === currentLesson.subject_id && l.component_id === currentLesson.component_id)
+      .sort((a, b) => (a.unit_number - b.unit_number) || ((a.week_number || 1) - (b.week_number || 1)));
+    const idx = siblings.findIndex(l => l.id === currentLesson.id);
+    if (idx === -1) return { prev: null, next: null };
+    return {
+      prev: idx > 0 ? siblings[idx - 1] : null,
+      next: idx < siblings.length - 1 ? siblings[idx + 1] : null,
+    };
+  };
+
+  const goToLesson = async (lesson) => {
+    if (!lesson) return;
+    setEditMode(false);
+    await openLesson(lesson.id, { keepListScroll: true });
+    window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   // ---- Review feedback helpers ----
@@ -1502,12 +1528,50 @@ export default function Dashboard({ teacher, onLogout }) {
     }
 
     // ---- READ-ONLY VIEW ----
+    const { prev: prevLesson, next: nextLesson } = getAdjacentLessons();
+    const navBtnStyle = (active, align) => ({
+      flex: 1, minWidth: 0, display: "flex", flexDirection: "column",
+      alignItems: align === "right" ? "flex-end" : "flex-start", gap: 2,
+      padding: "10px 16px", borderRadius: 10, textAlign: align === "right" ? "right" : "left",
+      border: `1.5px solid ${active ? color + "40" : "#E5E7EB"}`,
+      background: active ? "white" : "#F9FAFB",
+      color: active ? color : "#9CA3AF",
+      cursor: active ? "pointer" : "not-allowed", transition: "all 0.2s",
+    });
+    const lessonNav = (
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, margin: "16px 0" }}>
+        <button onClick={() => goToLesson(prevLesson)} disabled={!prevLesson}
+          title={prevLesson ? prevLesson.title : "Première leçon"}
+          style={navBtnStyle(!!prevLesson, "left")}
+          onMouseEnter={e => { if (prevLesson) e.currentTarget.style.background = color + "10"; }}
+          onMouseLeave={e => { if (prevLesson) e.currentTarget.style.background = "white"; }}
+        >
+          <span style={{ fontSize: 11, fontWeight: 600, opacity: 0.8 }}>← Précédent</span>
+          <span style={{ fontSize: 13, fontWeight: 700, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {prevLesson ? prevLesson.title : "Début du programme"}
+          </span>
+        </button>
+        <button onClick={() => goToLesson(nextLesson)} disabled={!nextLesson}
+          title={nextLesson ? nextLesson.title : "Dernière leçon"}
+          style={navBtnStyle(!!nextLesson, "right")}
+          onMouseEnter={e => { if (nextLesson) e.currentTarget.style.background = color + "10"; }}
+          onMouseLeave={e => { if (nextLesson) e.currentTarget.style.background = "white"; }}
+        >
+          <span style={{ fontSize: 11, fontWeight: 600, opacity: 0.8 }}>Suivant →</span>
+          <span style={{ fontSize: 13, fontWeight: 700, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {nextLesson ? nextLesson.title : "Fin du programme"}
+          </span>
+        </button>
+      </div>
+    );
     return (
       <div>
         <button onClick={backFromLesson} style={{
           display: "flex", alignItems: "center", gap: 6, background: "none", border: "none",
           color: "#6B7280", fontSize: 13, fontWeight: 600, cursor: "pointer", marginBottom: 20, padding: 0
         }}>← Retour</button>
+
+        {lessonNav}
 
         <div style={{
           background: `linear-gradient(135deg, ${color}15, ${color}05)`,
@@ -1715,6 +1779,8 @@ export default function Dashboard({ teacher, onLogout }) {
             </div>
           )}
         </div>
+
+        {lessonNav}
 
         <div style={{ marginTop: 16 }}>
           <button onClick={backFromLesson} style={{

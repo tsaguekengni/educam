@@ -820,6 +820,28 @@ export default function Admin({ onBack }) {
   };
   const cardTitleStyle = { fontSize: 16, fontWeight: 700, color: "#111827", margin: "0 0 16px" };
 
+  // Adjacent existing lessons (across units) of the lesson being edited, so the
+  // editor can step to the previous/next lesson without going back to the list.
+  const getAdjacentAdminLessons = () => {
+    if (!editingId) return { prev: null, next: null };
+    const siblings = (allLessons || [])
+      .filter(l => l.subject_id === subjectId && l.component_id === componentId)
+      .sort((a, b) => (a.unit_number - b.unit_number) || ((a.week_number || 1) - (b.week_number || 1)));
+    const idx = siblings.findIndex(l => l.id === editingId);
+    if (idx === -1) return { prev: null, next: null };
+    return {
+      prev: idx > 0 ? siblings[idx - 1] : null,
+      next: idx < siblings.length - 1 ? siblings[idx + 1] : null,
+    };
+  };
+
+  const goToAdminLesson = (lesson) => {
+    if (!lesson) return;
+    if (!window.confirm("Passer à une autre leçon ? Les modifications non enregistrées seront perdues.")) return;
+    startEdit(lesson);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
   return (
     <div style={{ minHeight: "100vh", background: "#F9FAFB", fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
       <AdminHeader />
@@ -828,6 +850,37 @@ export default function Admin({ onBack }) {
           display: "flex", alignItems: "center", gap: 6, background: "none", border: "none",
           color: "#6B7280", fontSize: 13, fontWeight: 600, cursor: "pointer", marginBottom: 16, padding: 0
         }}>← Retour à la gestion</button>
+
+        {editingId && (() => {
+          const { prev: prevLesson, next: nextLesson } = getAdjacentAdminLessons();
+          const navBtn = (active, align) => ({
+            flex: 1, minWidth: 0, display: "flex", flexDirection: "column",
+            alignItems: align === "right" ? "flex-end" : "flex-start", gap: 2,
+            padding: "10px 16px", borderRadius: 10, textAlign: align === "right" ? "right" : "left",
+            border: `1.5px solid ${active ? "#0F4C3540" : "#E5E7EB"}`,
+            background: active ? "white" : "#F9FAFB",
+            color: active ? "#0F4C35" : "#9CA3AF",
+            cursor: active ? "pointer" : "not-allowed",
+          });
+          return (
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 20 }}>
+              <button onClick={() => goToAdminLesson(prevLesson)} disabled={!prevLesson}
+                title={prevLesson ? prevLesson.title : "Première leçon"} style={navBtn(!!prevLesson, "left")}>
+                <span style={{ fontSize: 11, fontWeight: 600, opacity: 0.8 }}>← Leçon précédente</span>
+                <span style={{ fontSize: 13, fontWeight: 700, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {prevLesson ? prevLesson.title : "Début du programme"}
+                </span>
+              </button>
+              <button onClick={() => goToAdminLesson(nextLesson)} disabled={!nextLesson}
+                title={nextLesson ? nextLesson.title : "Dernière leçon"} style={navBtn(!!nextLesson, "right")}>
+                <span style={{ fontSize: 11, fontWeight: 600, opacity: 0.8 }}>Leçon suivante →</span>
+                <span style={{ fontSize: 13, fontWeight: 700, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {nextLesson ? nextLesson.title : "Fin du programme"}
+                </span>
+              </button>
+            </div>
+          );
+        })()}
 
         <h1 style={{ fontSize: 24, fontWeight: 800, color: "#111827", marginBottom: 24 }}>
           {editingId ? "Modifier la leçon" : "Créer une nouvelle leçon"}
