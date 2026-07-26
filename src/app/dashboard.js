@@ -143,6 +143,7 @@ const editLabelStyle = {
 };
 
 const DAY_NAMES = ["", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi"];
+const DAY_NAMES_SHORT = ["", "Lun", "Mar", "Mer", "Jeu", "Ven"];
 
 const MONTH_UNIT_MAP = [
   { month: "Septembre", unit: 1 },
@@ -205,6 +206,15 @@ export default function Dashboard({ teacher, onLogout }) {
   );
   const [screen, setScreen] = useState("home");
   const [tab, setTab] = useState("calendar");
+
+  // Responsive breakpoint: phones/small screens (≤640px) get tuned layouts.
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth <= 640);
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, []);
 
   // Scroll restoration: remember where the reader was in the list when they
   // open a lesson, so "Retour" brings them back to that exact spot.
@@ -795,29 +805,32 @@ export default function Dashboard({ teacher, onLogout }) {
   // ============ HEADER ============
   const Header = () => (
     <div style={{
-      background: "#0F4C35", padding: "14px 24px",
+      background: "#0F4C35", padding: isMobile ? "12px 14px" : "14px 24px",
       display: "flex", justifyContent: "space-between", alignItems: "center",
-      position: "sticky", top: 0, zIndex: 10
+      gap: 8, position: "sticky", top: 0, zIndex: 10
     }}>
       <div onClick={() => { setScreen(tab); setProgrammeView("subjects"); }}
-        style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
-        <span style={{ fontSize: 24 }}>📚</span>
-        <span style={{ color: "white", fontSize: 20, fontWeight: 800 }}>EduCam</span>
+        style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", flexShrink: 0 }}>
+        <span style={{ fontSize: isMobile ? 20 : 24 }}>📚</span>
+        <span style={{ color: "white", fontSize: isMobile ? 17 : 20, fontWeight: 800 }}>EduCam</span>
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: isMobile ? 8 : 12, minWidth: 0 }}>
         <select value={selectedLevel.id}
           onChange={(e) => setSelectedLevel(LEVELS.find(l => l.id === e.target.value))}
           style={{
             background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.2)",
-            color: "white", padding: "8px 12px", borderRadius: 8, fontSize: 14,
-            fontWeight: 600, cursor: "pointer", outline: "none"
+            color: "white", padding: "8px 12px", borderRadius: 8, fontSize: isMobile ? 13 : 14,
+            fontWeight: 600, cursor: "pointer", outline: "none",
+            maxWidth: isMobile ? 120 : "none", minWidth: 0,
+            textOverflow: "ellipsis", whiteSpace: "nowrap", overflow: "hidden"
           }}>
-          {LEVELS.map(l => <option key={l.id} value={l.id} style={{ color: "#1F2937" }}>{l.name} — {l.primary}</option>)}
+          {LEVELS.map(l => <option key={l.id} value={l.id} style={{ color: "#1F2937" }}>{isMobile ? l.name : `${l.name} — ${l.primary}`}</option>)}
         </select>
         <button onClick={async () => { await supabase.auth.signOut(); onLogout(); }} style={{
           background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.2)",
-          color: "white", padding: "8px 14px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer"
-        }}>Déconnexion</button>
+          color: "white", padding: "8px 14px", borderRadius: 8, fontSize: 13, fontWeight: 600,
+          cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap"
+        }}>{isMobile ? "Quitter" : "Déconnexion"}</button>
       </div>
     </div>
   );
@@ -827,7 +840,8 @@ export default function Dashboard({ teacher, onLogout }) {
     <div style={{
       position: "fixed", bottom: 0, left: 0, right: 0,
       background: "white", borderTop: "1px solid #E5E7EB",
-      display: "flex", justifyContent: "center", gap: 24, padding: "10px 0", zIndex: 10
+      display: "flex", justifyContent: isMobile ? "space-around" : "center",
+      gap: isMobile ? 4 : 24, padding: "10px 8px", zIndex: 10
     }}>
       <button onClick={() => setScreen("home")} style={{
         background: "none", border: "none", cursor: "pointer", textAlign: "center",
@@ -841,7 +855,7 @@ export default function Dashboard({ teacher, onLogout }) {
         color: screen === "calendar" ? "#0F4C35" : "#9CA3AF"
       }}>
         <div style={{ fontSize: 22 }}>📅</div>
-        <div style={{ fontSize: 11, fontWeight: 600, marginTop: 2 }}>Emploi du temps</div>
+        <div style={{ fontSize: 11, fontWeight: 600, marginTop: 2, whiteSpace: "nowrap" }}>{isMobile ? "Horaire" : "Emploi du temps"}</div>
       </button>
       <button onClick={() => { setTab("programme"); setScreen("programme"); setProgrammeView("subjects"); }} style={{
         background: "none", border: "none", cursor: "pointer", textAlign: "center",
@@ -906,16 +920,18 @@ export default function Dashboard({ teacher, onLogout }) {
         </div>
 
         {/* Week selector */}
-        <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+        <div style={{ display: "flex", gap: isMobile ? 6 : 8, marginBottom: 20 }}>
           {[1, 2, 3, 4].map(w => (
             <button key={w} onClick={() => setSelectedWeek(w)}
               style={{
-                flex: 1, padding: "10px", borderRadius: 8, fontSize: 13, fontWeight: 600,
-                cursor: "pointer", border: "none",
+                flex: 1, minWidth: 0, padding: isMobile ? "10px 4px" : "10px",
+                borderRadius: 8, fontSize: 13, fontWeight: 600,
+                cursor: "pointer", border: "none", whiteSpace: "nowrap",
+                overflow: "hidden", textOverflow: "ellipsis",
                 background: selectedWeek === w ? (w === 4 ? "#F59E0B" : "#0F4C35") : "white",
                 color: selectedWeek === w ? "white" : "#374151",
                 boxShadow: selectedWeek === w ? "none" : "0 1px 3px rgba(0,0,0,0.1)"
-              }}>{w === 4 ? "Sem. 4 (Évaluation)" : `Semaine ${w}`}</button>
+              }}>{w === 4 ? (isMobile ? "Sem. 4" : "Sem. 4 (Évaluation)") : (isMobile ? `Sem. ${w}` : `Semaine ${w}`)}</button>
           ))}
         </div>
 
@@ -931,16 +947,17 @@ export default function Dashboard({ teacher, onLogout }) {
         ) : (
           <>
             {/* Day selector */}
-            <div style={{ display: "flex", gap: 6, marginBottom: 20 }}>
+            <div style={{ display: "flex", gap: isMobile ? 4 : 6, marginBottom: 20 }}>
               {[1, 2, 3, 4, 5].map(d => (
                 <button key={d} onClick={() => setSelectedDay(d)}
                   style={{
-                    flex: 1, padding: "10px", borderRadius: 8, fontSize: 14, fontWeight: 600,
-                    cursor: "pointer", border: "none",
+                    flex: 1, minWidth: 0, padding: isMobile ? "10px 4px" : "10px",
+                    borderRadius: 8, fontSize: isMobile ? 13 : 14, fontWeight: 600,
+                    cursor: "pointer", border: "none", whiteSpace: "nowrap",
                     background: selectedDay === d ? "#3B82F6" : "white",
                     color: selectedDay === d ? "white" : "#374151",
                     boxShadow: selectedDay === d ? "none" : "0 1px 3px rgba(0,0,0,0.1)"
-                  }}>{DAY_NAMES[d]}</button>
+                  }}>{isMobile ? DAY_NAMES_SHORT[d] : DAY_NAMES[d]}</button>
               ))}
             </div>
 
@@ -1846,11 +1863,12 @@ export default function Dashboard({ teacher, onLogout }) {
         </div>
 
         {/* Content */}
-        <div style={{ maxWidth: 1200, margin: "0 auto", padding: "60px 48px 80px" }}>
+        <div style={{ maxWidth: 1200, margin: "0 auto", padding: isMobile ? "72px 16px 60px" : "60px 48px 80px" }}>
           {/* Lesson header */}
           <div style={{
             background: `linear-gradient(135deg, ${color}18, ${color}08)`,
-            borderRadius: 20, padding: "48px 56px", marginBottom: 48,
+            borderRadius: 20, padding: isMobile ? "28px 22px" : "48px 56px",
+            marginBottom: isMobile ? 32 : 48,
             border: `2px solid ${color}30`
           }}>
             <div style={{
@@ -2014,7 +2032,7 @@ export default function Dashboard({ teacher, onLogout }) {
     <div style={{ minHeight: "100vh", background: "#F9FAFB", fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
       {projectorMode && <ProjectorView />}
       <Header />
-      <div style={{ maxWidth: 800, margin: "0 auto", padding: "32px 20px 80px" }}>
+      <div style={{ maxWidth: 800, margin: "0 auto", padding: isMobile ? "20px 14px 90px" : "32px 20px 80px" }}>
         {screen === "home" && (
           <div>
             <div style={{ marginBottom: 32 }}>
