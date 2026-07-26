@@ -1829,7 +1829,7 @@ export default function Dashboard({ teacher, onLogout }) {
 
     return (
       <div style={{
-        position: "fixed", inset: 0, zIndex: 9999, background: "white",
+        position: "fixed", inset: 0, zIndex: 9999, background: "#FAF9F5",
         overflow: "auto", fontFamily: "'Segoe UI', system-ui, sans-serif"
       }}>
         {/* Floating controls */}
@@ -1903,10 +1903,18 @@ export default function Dashboard({ teacher, onLogout }) {
                     ) : (
                       blocks.map((block, k) => {
                         if (block.block_type === "text") {
+                          // The Bilan section is the trace écrite ("à recopier"):
+                          // heavier, larger and more open so it survives projector
+                          // blur when pupils copy it letter by letter. Inline **bold**
+                          // signposts stay at 700 and still stand out over the 600 base.
+                          const isCopyText = section.section_type === "bilan";
                           return (
                             <div key={k} style={{
-                              fontSize: basePx, color: "#1F2937",
-                              lineHeight: 1.9, whiteSpace: "pre-wrap",
+                              fontSize: isCopyText ? `max(21px, ${baseFontVw * 1.15}vw)` : basePx,
+                              color: "#1F2937",
+                              fontWeight: isCopyText ? 600 : 400,
+                              lineHeight: isCopyText ? 2.1 : 1.9,
+                              whiteSpace: "pre-wrap",
                               maxWidth: 1000
                             }}>
                               {renderRichText(block.text_content)}
