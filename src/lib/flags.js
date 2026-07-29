@@ -13,5 +13,9 @@ export const OFFLINE_ENABLED =
 export const DEVICE_AUTH_ENABLED =
   process.env.NEXT_PUBLIC_DEVICE_AUTH_ENABLED === "true";
 
+// Profiles & multi-tenancy (schools, teacher→school, parents, per-class timetable).
+export const PROFILES_ENABLED =
+  process.env.NEXT_PUBLIC_PROFILES_ENABLED === "true";
+
 // How many days a login stays valid offline before an online re-login is required.
 export const OFFLINE_UNLOCK_DAYS = 7;

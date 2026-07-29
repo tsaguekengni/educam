@@ -3,7 +3,7 @@ import { useState, useEffect, useRef } from "react";
 import { supabase } from "../lib/supabase";
 import Admin from "./admin";
 import ReadinessQuiz from "./readiness";
-import { OFFLINE_ENABLED } from "../lib/flags";
+import { OFFLINE_ENABLED, PROFILES_ENABLED } from "../lib/flags";
 import {
   cachedQuery, fetchLessonBundle, saveLessonBundle, loadLessonBundle,
   getCachedLessonIds, downloadWeek,
@@ -290,6 +290,17 @@ export default function Dashboard({ teacher, onLogout }) {
   const [topics, setTopics] = useState([]);
   const [availableLessons, setAvailableLessons] = useState([]);
 
+  // Profiles mode: the teacher's school (name/role), resolved on load.
+  const [schoolContext, setSchoolContext] = useState(null);
+
+  useEffect(() => {
+    if (!PROFILES_ENABLED || !teacher?.school_id) { setSchoolContext(null); return; }
+    let cancelled = false;
+    supabase.from("schools").select("id, name, staff_code").eq("id", teacher.school_id).maybeSingle()
+      .then(({ data }) => { if (!cancelled) setSchoolContext(data || null); });
+    return () => { cancelled = true; };
+  }, [teacher?.school_id]);
+
   // Offline mode: network status, which lessons are downloaded, and download progress.
   const [online, setOnline] = useState(true);
   const [cachedIds, setCachedIds] = useState([]);
@@ -320,9 +331,16 @@ export default function Dashboard({ teacher, onLogout }) {
   }, [selectedLevel]);
 
   const fetchTimetable = async () => {
-    const data = await cachedQuery("timetable_" + selectedLevel.id, () =>
-      supabase.from("timetable_slots").select("*")
-        .eq("level", selectedLevel.id).order("day_of_week").order("slot_order"));
+    // Profiles mode: a teacher reads their OWN class timetable; otherwise the
+    // shared level timetable (current behavior).
+    const usePerClass = PROFILES_ENABLED && teacher?.school_id && teacher?.id;
+    const key = usePerClass ? ("timetable_owner_" + teacher.id) : ("timetable_" + selectedLevel.id);
+    const data = await cachedQuery(key, () =>
+      usePerClass
+        ? supabase.from("timetable_slots").select("*")
+            .eq("owner_teacher_id", teacher.id).order("day_of_week").order("slot_order")
+        : supabase.from("timetable_slots").select("*")
+            .eq("level", selectedLevel.id).order("day_of_week").order("slot_order"));
     setTimetable(data || []);
   };
 
@@ -888,9 +906,16 @@ export default function Dashboard({ teacher, onLogout }) {
       gap: 8, position: "sticky", top: 0, zIndex: 10
     }}>
       <div onClick={() => { setScreen(tab); setProgrammeView("subjects"); }}
-        style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", flexShrink: 0 }}>
+        style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", flexShrink: 0, minWidth: 0 }}>
         <span style={{ fontSize: isMobile ? 20 : 24 }}>📚</span>
-        <span style={{ color: "white", fontSize: isMobile ? 17 : 20, fontWeight: 800 }}>EduCam</span>
+        <span style={{ display: "flex", flexDirection: "column", lineHeight: 1.1, minWidth: 0 }}>
+          <span style={{ color: "white", fontSize: isMobile ? 17 : 20, fontWeight: 800 }}>EduCam</span>
+          {PROFILES_ENABLED && schoolContext?.name && (
+            <span style={{ color: "rgba(255,255,255,0.8)", fontSize: 11, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: isMobile ? 120 : 240 }}>
+              {schoolContext.name}
+            </span>
+          )}
+        </span>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: isMobile ? 8 : 12, minWidth: 0 }}>
         {OFFLINE_ENABLED && (

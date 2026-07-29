@@ -2,7 +2,7 @@
 import { useState, useEffect } from "react";
 import { supabase } from "../lib/supabase";
 import Dashboard from "./dashboard";
-import { OFFLINE_ENABLED } from "../lib/flags";
+import { OFFLINE_ENABLED, PROFILES_ENABLED } from "../lib/flags";
 import { setGrant, getGrant, clearGrant } from "../lib/offline";
 
 export default function Home() {
@@ -21,6 +21,7 @@ export default function Home() {
   const [fullName, setFullName] = useState("");
   const [schoolName, setSchoolName] = useState("");
   const [level, setLevel] = useState("cm1");
+  const [schoolCode, setSchoolCode] = useState(""); // staff join-code (profiles mode)
 
   // Session restore (offline mode only). When the flag is off this never runs,
   // so behaviour is unchanged: the login form shows as before.
@@ -114,18 +115,50 @@ export default function Home() {
       return;
     }
 
+    // Profiles mode: resolve the school from the staff join-code (validated if entered).
+    let joinedSchool = null;
+    if (PROFILES_ENABLED && schoolCode.trim()) {
+      const { data: sch } = await supabase.from("schools").select("id, name")
+        .eq("staff_code", schoolCode.trim()).maybeSingle();
+      if (!sch) {
+        setError("Code école invalide");
+        setLoading(false);
+        return;
+      }
+      joinedSchool = sch;
+    }
+
     // Create teacher profile
     const { error: profileError } = await supabase.from("teachers").insert({
       id: data.user.id,
       full_name: fullName.trim(),
       school_name: schoolName.trim() || null,
       level: level,
+      ...(joinedSchool ? { school_id: joinedSchool.id } : {}),
     });
 
     if (profileError) {
       setError("Erreur lors de la création du profil");
       setLoading(false);
       return;
+    }
+
+    // Provision this class's timetable by copying the standard schedule for their level.
+    if (PROFILES_ENABLED && joinedSchool) {
+      try {
+        const { data: std } = await supabase.from("timetable_slots").select("*")
+          .eq("level", level).is("owner_teacher_id", null);
+        if (std && std.length) {
+          const rows = std.map((s) => ({
+            level: s.level, day_of_week: s.day_of_week, slot_order: s.slot_order,
+            start_time: s.start_time, end_time: s.end_time,
+            subject_id: s.subject_id, component_id: s.component_id,
+            subject_name: s.subject_name, component_name: s.component_name,
+            school_id: joinedSchool.id, owner_teacher_id: data.user.id,
+          }));
+          await supabase.from("timetable_slots").insert(rows);
+        }
+      } catch (_) {}
     }
 
     // Auto-login after registration
@@ -299,6 +332,24 @@ export default function Home() {
                 <option value="cm2">CM2 — Primary 6</option>
               </select>
             </div>
+
+            {PROFILES_ENABLED && (
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
+                  Code école
+                </label>
+                <input
+                  type="text"
+                  placeholder="Code fourni par votre école"
+                  value={schoolCode}
+                  onChange={(e) => setSchoolCode(e.target.value)}
+                  style={{
+                    width: "100%", padding: "12px 14px", border: "1.5px solid #D1D5DB",
+                    borderRadius: 8, fontSize: 14, outline: "none", boxSizing: "border-box"
+                  }}
+                />
+              </div>
+            )}
           </>
         )}
 
