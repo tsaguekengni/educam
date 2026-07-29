@@ -1,7 +1,9 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { supabase } from "../lib/supabase";
 import Dashboard from "./dashboard";
+import { OFFLINE_ENABLED } from "../lib/flags";
+import { setGrant, getGrant, clearGrant } from "../lib/offline";
 
 export default function Home() {
   const [session, setSession] = useState(null);
@@ -10,6 +12,8 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  // Only used when offline mode is on: brief boot while we try to restore a session.
+  const [booting, setBooting] = useState(OFFLINE_ENABLED);
 
   // Form fields
   const [email, setEmail] = useState("");
@@ -17,6 +21,40 @@ export default function Home() {
   const [fullName, setFullName] = useState("");
   const [schoolName, setSchoolName] = useState("");
   const [level, setLevel] = useState("cm1");
+
+  // Session restore (offline mode only). When the flag is off this never runs,
+  // so behaviour is unchanged: the login form shows as before.
+  useEffect(() => {
+    if (!OFFLINE_ENABLED) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const online = typeof navigator === "undefined" ? true : navigator.onLine;
+        if (online) {
+          const { data } = await supabase.auth.getSession();
+          const s = data?.session;
+          if (s) {
+            const { data: t } = await supabase.from("teachers").select("*").eq("id", s.user.id).single();
+            if (t && !cancelled) {
+              setGrant(t);
+              setSession(s);
+              setTeacher(t);
+              setBooting(false);
+              return;
+            }
+          }
+        }
+      } catch (_) { /* fall through to offline grant */ }
+      // Offline (or no live session): trust a still-valid 7-day grant.
+      const g = getGrant();
+      if (g && g.teacher && !cancelled) {
+        setSession({ offline: true });
+        setTeacher(g.teacher);
+      }
+      if (!cancelled) setBooting(false);
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const handleLogin = async () => {
     setLoading(true);
@@ -39,6 +77,7 @@ export default function Home() {
       .eq("id", data.user.id)
       .single();
 
+    setGrant(teacherData);
     setSession(data.session);
     setTeacher(teacherData);
     setLoading(false);
@@ -102,6 +141,7 @@ export default function Home() {
         .eq("id", loginData.user.id)
         .single();
 
+      setGrant(teacherData);
       setSession(loginData.session);
       setTeacher(teacherData);
     }
@@ -109,8 +149,24 @@ export default function Home() {
     setLoading(false);
   };
 
+  // Brief boot screen while restoring a session (offline mode only).
+  if (OFFLINE_ENABLED && booting) {
+    return (
+      <div style={{
+        minHeight: "100vh",
+        background: "linear-gradient(135deg, #0F4C35 0%, #1A7A56 50%, #0F4C35 100%)",
+        display: "flex", alignItems: "center", justifyContent: "center", color: "white"
+      }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 48, marginBottom: 8 }}>📚</div>
+          <p style={{ fontSize: 14, opacity: 0.85 }}>Chargement…</p>
+        </div>
+      </div>
+    );
+  }
+
   if (session && teacher) {
-    return <Dashboard teacher={teacher} onLogout={() => { setSession(null); setTeacher(null); }} />;
+    return <Dashboard teacher={teacher} onLogout={() => { clearGrant(); setSession(null); setTeacher(null); }} />;
   }
 
   return (

@@ -3,6 +3,11 @@ import { useState, useEffect, useRef } from "react";
 import { supabase } from "../lib/supabase";
 import Admin from "./admin";
 import ReadinessQuiz from "./readiness";
+import { OFFLINE_ENABLED } from "../lib/flags";
+import {
+  cachedQuery, fetchLessonBundle, saveLessonBundle, loadLessonBundle,
+  getCachedLessonIds, downloadWeek,
+} from "../lib/offline";
 
 const LEVELS = [
   { id: "ce1", name: "CE1", full: "Cours Élémentaire 1", primary: "Primary 3" },
@@ -282,28 +287,65 @@ export default function Dashboard({ teacher, onLogout }) {
   const [topics, setTopics] = useState([]);
   const [availableLessons, setAvailableLessons] = useState([]);
 
+  // Offline mode: network status, which lessons are downloaded, and download progress.
+  const [online, setOnline] = useState(true);
+  const [cachedIds, setCachedIds] = useState([]);
+  const [dl, setDl] = useState(null); // { done, total, bytes, finished } | null
+
   useEffect(() => {
     fetchTimetable();
     fetchTopics();
     fetchAllLessons();
   }, [selectedLevel]);
 
+  useEffect(() => {
+    if (!OFFLINE_ENABLED || typeof navigator === "undefined") return;
+    setOnline(navigator.onLine);
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    getCachedLessonIds().then(setCachedIds);
+    return () => {
+      window.removeEventListener("online", on);
+      window.removeEventListener("offline", off);
+    };
+  }, []);
+
   const fetchTimetable = async () => {
-    const { data } = await supabase.from("timetable_slots").select("*")
-      .eq("level", selectedLevel.id).order("day_of_week").order("slot_order");
+    const data = await cachedQuery("timetable_" + selectedLevel.id, () =>
+      supabase.from("timetable_slots").select("*")
+        .eq("level", selectedLevel.id).order("day_of_week").order("slot_order"));
     setTimetable(data || []);
   };
 
   const fetchTopics = async () => {
-    const { data } = await supabase.from("curriculum_topics").select("*")
-      .eq("level", selectedLevel.id);
+    const data = await cachedQuery("topics_" + selectedLevel.id, () =>
+      supabase.from("curriculum_topics").select("*").eq("level", selectedLevel.id));
     setTopics(data || []);
   };
 
   const fetchAllLessons = async () => {
-    const { data } = await supabase.from("lessons").select("id, subject_id, component_id, level, unit_number, week_number, title")
-      .eq("level", selectedLevel.id);
+    const data = await cachedQuery("lessons_" + selectedLevel.id, () =>
+      supabase.from("lessons").select("id, subject_id, component_id, level, unit_number, week_number, title")
+        .eq("level", selectedLevel.id));
     setAvailableLessons(data || []);
+  };
+
+  // Download every lesson scheduled this week (current unit + week), images
+  // included, videos excluded. Only used when offline mode is enabled.
+  const handleDownloadWeek = async () => {
+    const ids = Array.from(new Set(
+      (timetable || [])
+        .map((s) => getLessonForTopic(s.subject_id, s.component_id, selectedUnit, selectedWeek))
+        .filter(Boolean)
+        .map((l) => l.id)
+    ));
+    if (ids.length === 0) { setDl({ done: 0, total: 0, finished: true, empty: true }); return; }
+    setDl({ done: 0, total: ids.length });
+    const res = await downloadWeek(ids, (done, total) => setDl({ done, total }));
+    setCachedIds(await getCachedLessonIds());
+    setDl({ done: res.total, total: res.total, bytes: res.bytes, finished: true });
   };
 
   const getTopic = (unitNum, weekNum, subjectId, componentId) => {
@@ -615,42 +657,45 @@ export default function Dashboard({ teacher, onLogout }) {
     // saved list position so "Retour" still lands where the review started.
     if (!opts.keepListScroll) listScrollY.current = window.scrollY;
     setLoadingLesson(true);
-    const { data: lesson } = await supabase.from("lessons").select("*").eq("id", lessonId).single();
-    const { data: sections } = await supabase.from("lesson_sections").select("*").eq("lesson_id", lessonId).order("section_order");
-    const { data: exercises } = await supabase.from("exercises").select("*").eq("lesson_id", lessonId).order("exercise_order");
-    const { data: readiness } = await supabase.from("teacher_readiness").select("*").eq("teacher_id", teacher?.id).eq("lesson_id", lessonId).eq("passed", true).maybeSingle();
 
-    // Fetch every block for every section of this lesson in one query, then
-    // group them by section so the lesson screen can render text/image/video
-    // in the order the content team laid them out.
-    const sectionIds = (sections || []).map(s => s.id);
-    let blocksBySection = {};
-    if (sectionIds.length > 0) {
-      const { data: blocks } = await supabase
-        .from("section_blocks")
-        .select("*")
-        .in("section_id", sectionIds)
-        .order("block_order");
-      (blocks || []).forEach(b => {
-        if (!blocksBySection[b.section_id]) blocksBySection[b.section_id] = [];
-        blocksBySection[b.section_id].push(b);
-      });
+    // Content bundle (lesson + sections + blocks + exercises). Offline mode:
+    // fetch from the network, cache it, and fall back to the cache when offline.
+    let bundle = null;
+    try {
+      bundle = await fetchLessonBundle(lessonId);
+      if (OFFLINE_ENABLED) await saveLessonBundle(lessonId, bundle);
+    } catch (_) {
+      if (OFFLINE_ENABLED) bundle = await loadLessonBundle(lessonId);
+    }
+    if (!bundle) {
+      // Offline and this lesson was never downloaded (or an invalid id).
+      setLoadingLesson(false);
+      return;
     }
 
-    // Load this teacher's own feedback for the lesson (for showing/editing).
-    const { data: fb } = await supabase
-      .from("lesson_feedback")
-      .select("*")
-      .eq("teacher_id", teacher?.id)
-      .eq("lesson_id", lessonId);
+    // Teacher-specific state (readiness pass + own feedback) stays online-only.
+    let passed = false;
+    let fb = [];
+    const canReachTeacherData =
+      teacher?.id && (typeof navigator === "undefined" || navigator.onLine);
+    if (canReachTeacherData) {
+      try {
+        const { data: readiness } = await supabase.from("teacher_readiness").select("*")
+          .eq("teacher_id", teacher.id).eq("lesson_id", lessonId).eq("passed", true).maybeSingle();
+        passed = !!readiness;
+        const { data: fbData } = await supabase.from("lesson_feedback").select("*")
+          .eq("teacher_id", teacher.id).eq("lesson_id", lessonId);
+        fb = fbData || [];
+      } catch (_) {}
+    }
 
-    setCurrentLesson(lesson);
-    setLessonSections(sections || []);
-    setSectionBlocks(blocksBySection);
-    setLessonExercises(exercises || []);
+    setCurrentLesson(bundle.lesson);
+    setLessonSections(bundle.sections || []);
+    setSectionBlocks(bundle.blocksBySection || {});
+    setLessonExercises(bundle.exercises || []);
     setCollapsedSections({}); // enter a lesson with every section expanded
-    setLessonPassed(!!readiness);
-    setLessonFeedback(fb || []);
+    setLessonPassed(passed);
+    setLessonFeedback(fb);
     setFeedbackOpenFor(null);
     setScreen("lesson");
     setLoadingLesson(false);
@@ -935,6 +980,42 @@ export default function Dashboard({ teacher, onLogout }) {
           ))}
         </div>
 
+        {OFFLINE_ENABLED && !isIntegrationWeek && (() => {
+          const weekIds = Array.from(new Set((timetable || [])
+            .map(s => getLessonForTopic(s.subject_id, s.component_id, selectedUnit, selectedWeek))
+            .filter(Boolean).map(l => l.id)));
+          const already = weekIds.filter(id => cachedIds.includes(id)).length;
+          const downloading = dl && !dl.finished;
+          return (
+            <div style={{ marginBottom: 20 }}>
+              <button onClick={handleDownloadWeek} disabled={downloading || weekIds.length === 0}
+                style={{
+                  width: "100%", padding: "12px 16px", borderRadius: 10,
+                  border: "1.5px solid #0F4C3540", background: downloading ? "#F3F4F6" : "white",
+                  color: "#0F4C35", fontSize: 14, fontWeight: 700,
+                  cursor: (downloading || weekIds.length === 0) ? "default" : "pointer",
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 8
+                }}>
+                {downloading
+                  ? `Téléchargement… ${dl.done}/${dl.total}`
+                  : `⬇️ Télécharger les leçons de la semaine${weekIds.length ? ` (${weekIds.length})` : ""}`}
+              </button>
+              {dl && dl.finished && (
+                <div style={{ fontSize: 12, color: dl.empty ? "#6B7280" : "#16A34A", marginTop: 6, textAlign: "center" }}>
+                  {dl.empty
+                    ? "Aucune leçon disponible pour cette semaine pour le moment."
+                    : `✓ ${dl.total} leçon${dl.total > 1 ? "s" : ""} disponible${dl.total > 1 ? "s" : ""} hors ligne.`}
+                </div>
+              )}
+              {!dl && already > 0 && (
+                <div style={{ fontSize: 12, color: "#6B7280", marginTop: 6, textAlign: "center" }}>
+                  {already} leçon{already > 1 ? "s" : ""} déjà disponible{already > 1 ? "s" : ""} hors ligne.
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
         {isIntegrationWeek ? (
           <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 12, padding: "24px", textAlign: "center" }}>
             <div style={{ fontSize: 36, marginBottom: 12 }}>📝</div>
@@ -1013,8 +1094,15 @@ export default function Dashboard({ teacher, onLogout }) {
                                 <div style={{ fontSize: 15, fontWeight: 600, color: "#1F2937", marginTop: 4 }}>{topic.topic_title}</div>
                                 <div style={{ fontSize: 13, color: "#6B7280", marginTop: 2, lineHeight: 1.5 }}>{topic.topic_description}</div>
                                 {lesson ? (
-                                  <span style={{ display: "inline-block", marginTop: 6, fontSize: 11, fontWeight: 600, color: "#10B981", background: "#10B98115", padding: "3px 8px", borderRadius: 20 }}>
-                                    Leçon disponible — cliquez pour ouvrir
+                                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                                    <span style={{ fontSize: 11, fontWeight: 600, color: "#10B981", background: "#10B98115", padding: "3px 8px", borderRadius: 20 }}>
+                                      Leçon disponible — cliquez pour ouvrir
+                                    </span>
+                                    {OFFLINE_ENABLED && cachedIds.includes(lesson.id) && (
+                                      <span style={{ fontSize: 11, fontWeight: 600, color: "#0F4C35", background: "#0F4C3515", padding: "3px 8px", borderRadius: 20 }}>
+                                        ✓ hors ligne
+                                      </span>
+                                    )}
                                   </span>
                                 ) : (
                                   <span style={{ display: "inline-block", marginTop: 6, fontSize: 11, fontWeight: 600, color: "#9CA3AF", background: "#F3F4F6", padding: "3px 8px", borderRadius: 20 }}>
@@ -2032,6 +2120,14 @@ export default function Dashboard({ teacher, onLogout }) {
     <div style={{ minHeight: "100vh", background: "#F9FAFB", fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
       {projectorMode && <ProjectorView />}
       <Header />
+      {OFFLINE_ENABLED && !online && (
+        <div style={{
+          background: "#B45309", color: "white", textAlign: "center",
+          fontSize: 13, fontWeight: 600, padding: "8px 12px"
+        }}>
+          Hors ligne — les leçons téléchargées cette semaine restent disponibles.
+        </div>
+      )}
       <div style={{ maxWidth: 800, margin: "0 auto", padding: isMobile ? "20px 14px 90px" : "32px 20px 80px" }}>
         {screen === "home" && (
           <div>
