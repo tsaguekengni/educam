@@ -268,6 +268,9 @@ export default function Dashboard({ teacher, onLogout }) {
   const [lessonExercises, setLessonExercises] = useState([]);
   const [loadingLesson, setLoadingLesson] = useState(false);
   const [lessonPassed, setLessonPassed] = useState(false);
+  // "Leçon enseignée" — teacher marks a lesson as taught (unlocks it for parents later).
+  const [lessonTaught, setLessonTaught] = useState(false);
+  const [taughtSaving, setTaughtSaving] = useState(false);
   const [projectorMode, setProjectorMode] = useState(false);
 
   // Inline edit state
@@ -680,6 +683,7 @@ export default function Dashboard({ teacher, onLogout }) {
     // Teacher-specific state (readiness pass + own feedback) stays online-only.
     let passed = false;
     let fb = [];
+    let taught = false;
     const canReachTeacherData =
       teacher?.id && (typeof navigator === "undefined" || navigator.onLine);
     if (canReachTeacherData) {
@@ -691,6 +695,12 @@ export default function Dashboard({ teacher, onLogout }) {
           .eq("teacher_id", teacher.id).eq("lesson_id", lessonId);
         fb = fbData || [];
       } catch (_) {}
+      // Whether this teacher has marked this lesson taught (own resilient query).
+      try {
+        const { data: t } = await supabase.from("lessons_taught").select("id")
+          .eq("teacher_id", teacher.id).eq("lesson_id", lessonId).maybeSingle();
+        taught = !!t;
+      } catch (_) {}
     }
 
     setCurrentLesson(bundle.lesson);
@@ -699,10 +709,29 @@ export default function Dashboard({ teacher, onLogout }) {
     setLessonExercises(bundle.exercises || []);
     setCollapsedSections({}); // enter a lesson with every section expanded
     setLessonPassed(passed);
+    setLessonTaught(taught);
     setLessonFeedback(fb);
     setFeedbackOpenFor(null);
     setScreen("lesson");
     setLoadingLesson(false);
+  };
+
+  // Toggle "Leçon enseignée" for the current teacher + lesson.
+  const toggleTaught = async () => {
+    if (!teacher?.id || !currentLesson) return;
+    setTaughtSaving(true);
+    try {
+      if (lessonTaught) {
+        await supabase.from("lessons_taught").delete()
+          .eq("teacher_id", teacher.id).eq("lesson_id", currentLesson.id);
+        setLessonTaught(false);
+      } else {
+        await supabase.from("lessons_taught")
+          .upsert({ teacher_id: teacher.id, lesson_id: currentLesson.id }, { onConflict: "teacher_id,lesson_id" });
+        setLessonTaught(true);
+      }
+    } catch (_) {}
+    setTaughtSaving(false);
   };
 
   // Ordered list of the EXISTING lessons in the current lesson's component
@@ -1706,7 +1735,20 @@ export default function Dashboard({ teacher, onLogout }) {
               <span>⏱ {currentLesson.duration}</span>
               <span>📚 {selectedLevel.name}</span>
             </div>
-            <div style={{ display: "flex", gap: 10 }}>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <button onClick={toggleTaught} disabled={taughtSaving} style={{
+                display: "flex", alignItems: "center", gap: 8,
+                background: lessonTaught ? "#16A34A" : "white",
+                color: lessonTaught ? "white" : "#16A34A",
+                border: `1.5px solid ${lessonTaught ? "#16A34A" : "#86EFAC"}`,
+                borderRadius: 10, padding: "10px 20px", fontSize: 14, fontWeight: 700,
+                cursor: taughtSaving ? "default" : "pointer", transition: "all 0.2s"
+              }}
+                title="Marque cette leçon comme enseignée en classe"
+              >
+                <span style={{ fontSize: 16 }}>{lessonTaught ? "✅" : "○"}</span>
+                {lessonTaught ? "Leçon enseignée" : "Marquer comme enseignée"}
+              </button>
               {isAdmin && (
                 <button onClick={startInlineEdit} style={{
                   display: "flex", alignItems: "center", gap: 8,
