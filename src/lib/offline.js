@@ -93,31 +93,51 @@ export async function getCachedLessonIds() {
   return (await idbGet("kv", "cachedLessonIds")) || [];
 }
 
+// A content signature so re-download can skip lessons that haven't changed.
+// (There's no updated_at on lessons, so we compare the actual content.)
+function bundleSignature(b) {
+  try {
+    return JSON.stringify({
+      t: b.lesson && [b.lesson.title, b.lesson.objective, b.lesson.duration, b.lesson.theme],
+      s: (b.sections || []).map((x) => [x.section_type, x.title, x.icon, x.section_order]),
+      b: (b.blocks || []).map((x) => [x.block_type, x.text_content, x.media_url, x.caption, x.block_order]),
+      e: (b.exercises || []).map((x) => [x.question, x.answer, x.options, x.exercise_type, x.exercise_order]),
+    });
+  } catch (_) { return String(Date.now()); }
+}
+
 // ---------- Download this week's lessons (videos excluded) ----------
+// "Refresh only what changed": fetch the (small) lesson JSON, compare its
+// signature to what's cached; only NEW or CHANGED lessons re-download images.
 export async function downloadWeek(lessonIds, onProgress) {
-  let bytes = 0, done = 0, ok = 0;
+  let done = 0, fresh = 0, updated = 0, uptodate = 0, failed = 0;
   const cached = [];
   for (const id of lessonIds) {
     try {
       const bundle = await fetchLessonBundle(id);
-      await saveLessonBundle(id, bundle);
-      cached.push(id);
-      ok++;
-      bytes += JSON.stringify(bundle).length;
-      // Pre-cache images so they survive offline; skip video block media.
-      for (const b of bundle.blocks) {
-        if (b.block_type === "image" && b.media_url) {
-          try { await fetch(b.media_url, { mode: "no-cors", cache: "reload" }); } catch (_) {}
+      const prev = await loadLessonBundle(id);
+      const changed = !prev || bundleSignature(prev) !== bundleSignature(bundle);
+      if (changed) {
+        await saveLessonBundle(id, bundle);
+        // (Re)download images for new/changed lessons; skip video media.
+        for (const b of bundle.blocks) {
+          if (b.block_type === "image" && b.media_url) {
+            try { await fetch(b.media_url, { mode: "no-cors", cache: "reload" }); } catch (_) {}
+          }
         }
+        if (prev) updated++; else fresh++;
+      } else {
+        uptodate++; // unchanged → no image re-download, no data spent
       }
-    } catch (_) {}
+      cached.push(id);
+    } catch (_) { failed++; }
     done++;
     if (onProgress) onProgress(done, lessonIds.length);
   }
-  const prev = (await idbGet("kv", "cachedLessonIds")) || [];
-  const merged = Array.from(new Set(prev.concat(cached)));
+  const prevIds = (await idbGet("kv", "cachedLessonIds")) || [];
+  const merged = Array.from(new Set(prevIds.concat(cached)));
   await idbSet("kv", "cachedLessonIds", merged);
-  return { ok, total: lessonIds.length, bytes };
+  return { total: lessonIds.length, fresh, updated, uptodate, failed };
 }
 
 // ---------- 7-day offline unlock (localStorage) ----------

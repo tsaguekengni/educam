@@ -301,7 +301,11 @@ export default function Dashboard({ teacher, onLogout }) {
   useEffect(() => {
     if (!OFFLINE_ENABLED || typeof navigator === "undefined") return;
     setOnline(navigator.onLine);
-    const on = () => setOnline(true);
+    const on = () => {
+      setOnline(true);
+      // Signal is back — refresh the lists so any changes sync in.
+      fetchTimetable(); fetchTopics(); fetchAllLessons();
+    };
     const off = () => setOnline(false);
     window.addEventListener("online", on);
     window.addEventListener("offline", off);
@@ -310,7 +314,7 @@ export default function Dashboard({ teacher, onLogout }) {
       window.removeEventListener("online", on);
       window.removeEventListener("offline", off);
     };
-  }, []);
+  }, [selectedLevel]);
 
   const fetchTimetable = async () => {
     const data = await cachedQuery("timetable_" + selectedLevel.id, () =>
@@ -345,7 +349,7 @@ export default function Dashboard({ teacher, onLogout }) {
     setDl({ done: 0, total: ids.length });
     const res = await downloadWeek(ids, (done, total) => setDl({ done, total }));
     setCachedIds(await getCachedLessonIds());
-    setDl({ done: res.total, total: res.total, bytes: res.bytes, finished: true });
+    setDl({ done: res.total, total: res.total, finished: true, ...res });
   };
 
   const getTopic = (unitNum, weekNum, subjectId, componentId) => {
@@ -860,6 +864,16 @@ export default function Dashboard({ teacher, onLogout }) {
         <span style={{ color: "white", fontSize: isMobile ? 17 : 20, fontWeight: 800 }}>EduCam</span>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: isMobile ? 8 : 12, minWidth: 0 }}>
+        {OFFLINE_ENABLED && (
+          <span title={online ? "En ligne" : "Hors ligne"} style={{
+            display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0,
+            background: "rgba(255,255,255,0.15)", borderRadius: 20,
+            padding: isMobile ? "6px 8px" : "6px 10px", fontSize: 12, fontWeight: 700, color: "white"
+          }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", display: "inline-block", background: online ? "#22C55E" : "#EF4444" }} />
+            {!isMobile && (online ? "En ligne" : "Hors ligne")}
+          </span>
+        )}
         <select value={selectedLevel.id}
           onChange={(e) => setSelectedLevel(LEVELS.find(l => l.id === e.target.value))}
           style={{
@@ -1004,7 +1018,7 @@ export default function Dashboard({ teacher, onLogout }) {
                 <div style={{ fontSize: 12, color: dl.empty ? "#6B7280" : "#16A34A", marginTop: 6, textAlign: "center" }}>
                   {dl.empty
                     ? "Aucune leçon disponible pour cette semaine pour le moment."
-                    : `✓ ${dl.total} leçon${dl.total > 1 ? "s" : ""} disponible${dl.total > 1 ? "s" : ""} hors ligne.`}
+                    : `✓ ${dl.total} leçon${dl.total > 1 ? "s" : ""} hors ligne — ${dl.fresh || 0} nouvelle${(dl.fresh || 0) > 1 ? "s" : ""} · ${dl.updated || 0} mise${(dl.updated || 0) > 1 ? "s" : ""} à jour · ${dl.uptodate || 0} déjà à jour${dl.failed ? ` · ${dl.failed} échec${dl.failed > 1 ? "s" : ""}` : ""}`}
                 </div>
               )}
               {!dl && already > 0 && (
@@ -1803,6 +1817,15 @@ export default function Dashboard({ teacher, onLogout }) {
                               );
                             }
                             if (block.block_type === "video" && block.media_url) {
+                              if (OFFLINE_ENABLED && !online) {
+                                return (
+                                  <div key={k} style={{ background: "#F3F4F6", border: "1px dashed #D1D5DB", borderRadius: 10, padding: "24px 16px", textAlign: "center", color: "#6B7280" }}>
+                                    <div style={{ fontSize: 24, marginBottom: 6 }}>🎬</div>
+                                    <div style={{ fontSize: 13, fontWeight: 600 }}>Vidéo disponible uniquement en ligne</div>
+                                    {block.caption && <div style={{ fontSize: 12, marginTop: 4 }}>{block.caption}</div>}
+                                  </div>
+                                );
+                              }
                               return (
                                 <div key={k}>
                                   {isEmbeddable(block.media_url) ? (
@@ -2056,6 +2079,14 @@ export default function Dashboard({ teacher, onLogout }) {
                           );
                         }
                         if (block.block_type === "video" && block.media_url) {
+                          if (OFFLINE_ENABLED && !online) {
+                            return (
+                              <div key={k} style={{ width: "100%", maxWidth: 1000, margin: "0 auto", background: "#F3F4F6", border: "1px dashed #D1D5DB", borderRadius: 16, padding: "40px 20px", textAlign: "center", color: "#6B7280" }}>
+                                <div style={{ fontSize: 40, marginBottom: 8 }}>🎬</div>
+                                <div style={{ fontSize: `max(16px, ${baseFontVw * 0.8}vw)`, fontWeight: 700 }}>Vidéo disponible uniquement en ligne</div>
+                              </div>
+                            );
+                          }
                           return (
                             <div key={k} style={{ width: "100%", maxWidth: 1000, margin: "0 auto" }}>
                               {isEmbeddable(block.media_url) ? (
