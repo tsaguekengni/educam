@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef } from "react";
 import { supabase } from "../lib/supabase";
 import Admin from "./admin";
+import SchoolAdmin from "./schooladmin";
 import ReadinessQuiz from "./readiness";
 import { OFFLINE_ENABLED, PROFILES_ENABLED } from "../lib/flags";
 import {
@@ -205,6 +206,7 @@ export default function Dashboard({ teacher, onLogout }) {
   // Only admins may edit base content; everyone else is a read-only reviewer
   // who can leave feedback. Defaults to reviewer if role is missing.
   const isAdmin = teacher?.role === "admin";
+  const isSchoolAdmin = PROFILES_ENABLED && teacher?.role === "school_admin";
 
   const [selectedLevel, setSelectedLevel] = useState(
     LEVELS.find(l => l.id === teacher?.level) || LEVELS[2]
@@ -984,6 +986,15 @@ export default function Dashboard({ teacher, onLogout }) {
         }}>
           <div style={{ fontSize: 22 }}>⚙️</div>
           <div style={{ fontSize: 11, fontWeight: 600, marginTop: 2 }}>Gestion</div>
+        </button>
+      )}
+      {isSchoolAdmin && (
+        <button onClick={() => { setScreen("schooladmin"); }} style={{
+          background: "none", border: "none", cursor: "pointer", textAlign: "center",
+          color: screen === "schooladmin" ? "#0F4C35" : "#9CA3AF"
+        }}>
+          <div style={{ fontSize: 22 }}>🏫</div>
+          <div style={{ fontSize: 11, fontWeight: 600, marginTop: 2, whiteSpace: "nowrap" }}>École</div>
         </button>
       )}
     </div>
@@ -2312,6 +2323,32 @@ export default function Dashboard({ teacher, onLogout }) {
                   </div>
                 </div>
               )}
+
+              {isSchoolAdmin && (
+                <div onClick={() => { setScreen("schooladmin"); }}
+                  style={{
+                    background: "white", borderRadius: 14, padding: "28px 24px",
+                    border: "1px solid #E5E7EB", cursor: "pointer", transition: "all 0.2s"
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.borderColor = "#0F4C35"; e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 8px 20px rgba(0,0,0,0.08)"; }}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor = "#E5E7EB"; e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+                    <div style={{
+                      width: 56, height: 56, borderRadius: 14,
+                      background: "linear-gradient(135deg, #0F4C35, #1A7A56)",
+                      display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28
+                    }}>🏫</div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 18, fontWeight: 700, color: "#111827" }}>Gestion de l'école</div>
+                      <div style={{ fontSize: 14, color: "#6B7280", marginTop: 4, lineHeight: 1.5 }}>
+                        Emplois du temps par classe et codes parents de votre établissement.
+                      </div>
+                    </div>
+                    <span style={{ color: "#9CA3AF", fontSize: 22 }}>›</span>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -2320,6 +2357,7 @@ export default function Dashboard({ teacher, onLogout }) {
         {screen === "readiness" && currentLesson && <ReadinessQuiz lesson={currentLesson} teacherId={teacher?.id} onPass={() => { setLessonPassed(true); setScreen("lesson"); }} onBack={() => setScreen("lesson")} />}
         {screen === "lesson" && <LessonScreen />}
         {screen === "admin" && isAdmin && <Admin onBack={() => { setScreen(tab); }} />}
+        {screen === "schooladmin" && isSchoolAdmin && <SchoolAdmin school={schoolContext} onBack={() => { setScreen(tab); }} />}
       </div>
       {screen !== "lesson" && screen !== "home" && <BottomNav />}
     </div>
