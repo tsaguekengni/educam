@@ -137,9 +137,19 @@ export default function Home() {
         setLoading(false);
         return;
       }
-      const { data: t } = await supabase.from("teachers").select("id")
-        .eq("parent_passcode", parentCode.trim()).maybeSingle();
-      if (!t) {
+      // Validate the class passcode. Under RLS a new user can't read `teachers`
+      // directly, so we use a SECURITY DEFINER function; if it isn't there yet
+      // (RLS not enabled / earlier phase), fall back to the direct lookup.
+      let linkedTeacherId = null;
+      const rpcT = await supabase.rpc("educam_find_teacher_by_passcode", { code: parentCode.trim() });
+      if (rpcT.error) {
+        const { data: t } = await supabase.from("teachers").select("id")
+          .eq("parent_passcode", parentCode.trim()).maybeSingle();
+        linkedTeacherId = t?.id || null;
+      } else {
+        linkedTeacherId = rpcT.data || null;
+      }
+      if (!linkedTeacherId) {
         setError("Code parents invalide");
         setLoading(false);
         return;
@@ -153,7 +163,7 @@ export default function Home() {
         return;
       }
       const { error: pErr } = await supabase.from("parents").insert({
-        id: pData.user.id, full_name: fullName.trim(), linked_teacher_id: t.id,
+        id: pData.user.id, full_name: fullName.trim(), linked_teacher_id: linkedTeacherId,
       });
       if (pErr) {
         setError("Erreur lors de la création du profil");
@@ -188,14 +198,21 @@ export default function Home() {
     // Profiles mode: resolve the school from the staff join-code (validated if entered).
     let joinedSchool = null;
     if (PROFILES_ENABLED && schoolCode.trim()) {
-      const { data: sch } = await supabase.from("schools").select("id, name")
-        .eq("staff_code", schoolCode.trim()).maybeSingle();
-      if (!sch) {
+      // Same pattern as the parent passcode: SECURITY DEFINER lookup under RLS,
+      // with a fallback to the direct read when RLS isn't enabled yet.
+      const rpcS = await supabase.rpc("educam_find_school_by_staff_code", { code: schoolCode.trim() });
+      if (rpcS.error) {
+        const { data: sch } = await supabase.from("schools").select("id, name")
+          .eq("staff_code", schoolCode.trim()).maybeSingle();
+        joinedSchool = sch || null;
+      } else {
+        joinedSchool = rpcS.data || null;
+      }
+      if (!joinedSchool) {
         setError("Code école invalide");
         setLoading(false);
         return;
       }
-      joinedSchool = sch;
     }
 
     // Create teacher profile
