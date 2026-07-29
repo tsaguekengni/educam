@@ -202,11 +202,28 @@ function renderRichText(text) {
   });
 }
 
-export default function Dashboard({ teacher, onLogout }) {
+export default function Dashboard({ teacher, parent, onLogout }) {
   // Only admins may edit base content; everyone else is a read-only reviewer
   // who can leave feedback. Defaults to reviewer if role is missing.
   const isAdmin = teacher?.role === "admin";
   const isSchoolAdmin = PROFILES_ENABLED && teacher?.role === "school_admin";
+  const isParent = PROFILES_ENABLED && !!parent;
+
+  // Parent mode: the taught lessons of the linked class (read-only revision list).
+  const [parentLessons, setParentLessons] = useState([]);
+  useEffect(() => {
+    if (!isParent || !parent?.linked_teacher_id) { setParentLessons([]); return; }
+    let cancelled = false;
+    supabase.from("lessons_taught")
+      .select("taught_at, lessons(id, subject_id, component_id, unit_number, week_number, title, theme, objective)")
+      .eq("teacher_id", parent.linked_teacher_id)
+      .order("taught_at", { ascending: false })
+      .then(({ data }) => {
+        if (cancelled) return;
+        setParentLessons((data || []).filter((r) => r.lessons).map((r) => ({ ...r.lessons, taught_at: r.taught_at })));
+      });
+    return () => { cancelled = true; };
+  }, [isParent, parent?.linked_teacher_id]);
 
   const [selectedLevel, setSelectedLevel] = useState(
     LEVELS.find(l => l.id === teacher?.level) || LEVELS[2]
@@ -242,7 +259,7 @@ export default function Dashboard({ teacher, onLogout }) {
   const backFromLesson = () => {
     pendingRestore.current = true;
     setEditMode(false);
-    setScreen(tab);
+    setScreen(isParent ? "home" : tab);
   };
 
   // Review feedback state
@@ -829,7 +846,7 @@ export default function Dashboard({ teacher, onLogout }) {
   // Renders the reviewer comment + rating control for a section (or the whole
   // lesson when sectionId is null). Admins don't see it — they edit instead.
   const renderFeedback = (sectionId, sectionTitle) => {
-    if (isAdmin) return null;
+    if (isAdmin || isParent) return null;
     const target = sectionId == null ? "lesson" : sectionId;
     const isOpen = feedbackOpenFor === target;
     const existing = feedbackFor(sectionId);
@@ -907,7 +924,7 @@ export default function Dashboard({ teacher, onLogout }) {
       display: "flex", justifyContent: "space-between", alignItems: "center",
       gap: 8, position: "sticky", top: 0, zIndex: 10
     }}>
-      <div onClick={() => { setScreen(tab); setProgrammeView("subjects"); }}
+      <div onClick={() => { setScreen(isParent ? "home" : tab); setProgrammeView("subjects"); }}
         style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", flexShrink: 0, minWidth: 0 }}>
         <span style={{ fontSize: isMobile ? 20 : 24 }}>📚</span>
         <span style={{ display: "flex", flexDirection: "column", lineHeight: 1.1, minWidth: 0 }}>
@@ -930,6 +947,9 @@ export default function Dashboard({ teacher, onLogout }) {
             {!isMobile && (online ? "En ligne" : "Hors ligne")}
           </span>
         )}
+        {isParent ? (
+          <span style={{ color: "rgba(255,255,255,0.9)", fontSize: 13, fontWeight: 700, background: "rgba(255,255,255,0.15)", padding: "6px 12px", borderRadius: 20, whiteSpace: "nowrap" }}>Espace parent</span>
+        ) : (
         <select value={selectedLevel.id}
           onChange={(e) => setSelectedLevel(LEVELS.find(l => l.id === e.target.value))}
           style={{
@@ -941,6 +961,7 @@ export default function Dashboard({ teacher, onLogout }) {
           }}>
           {LEVELS.map(l => <option key={l.id} value={l.id} style={{ color: "#1F2937" }}>{isMobile ? l.name : `${l.name} — ${l.primary}`}</option>)}
         </select>
+        )}
         <button onClick={async () => { await supabase.auth.signOut(); onLogout(); }} style={{
           background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.2)",
           color: "white", padding: "8px 14px", borderRadius: 8, fontSize: 13, fontWeight: 600,
@@ -1755,7 +1776,7 @@ export default function Dashboard({ teacher, onLogout }) {
           color: "#6B7280", fontSize: 13, fontWeight: 600, cursor: "pointer", marginBottom: 20, padding: 0
         }}>← Retour</button>
 
-        {lessonNav}
+        {!isParent && lessonNav}
 
         <div style={{
           background: `linear-gradient(135deg, ${color}15, ${color}05)`,
@@ -1772,6 +1793,7 @@ export default function Dashboard({ teacher, onLogout }) {
               <span>📚 {selectedLevel.name}</span>
             </div>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              {!isParent && (
               <button onClick={toggleTaught} disabled={taughtSaving} style={{
                 display: "flex", alignItems: "center", gap: 8,
                 background: lessonTaught ? "#16A34A" : "white",
@@ -1785,6 +1807,7 @@ export default function Dashboard({ teacher, onLogout }) {
                 <span style={{ fontSize: 16 }}>{lessonTaught ? "✅" : "○"}</span>
                 {lessonTaught ? "Leçon enseignée" : "Marquer comme enseignée"}
               </button>
+              )}
               {isAdmin && (
                 <button onClick={startInlineEdit} style={{
                   display: "flex", alignItems: "center", gap: 8,
@@ -1945,7 +1968,7 @@ export default function Dashboard({ teacher, onLogout }) {
         </div>
 
         {/* Whole-lesson feedback (reviewers only) */}
-        {!isAdmin && currentLesson && (
+        {!isAdmin && !isParent && currentLesson && (
           <div style={{ marginTop: 20, padding: "18px 20px", borderRadius: 12, background: "white", border: "1px solid #E5E7EB" }}>
             <div style={{ fontSize: 15, fontWeight: 700, color: "#111827", marginBottom: 4 }}>Votre avis sur l'ensemble de la leçon</div>
             <div style={{ fontSize: 13, color: "#6B7280" }}>Une note et un commentaire général nous aident à améliorer cette leçon.</div>
@@ -1954,6 +1977,7 @@ export default function Dashboard({ teacher, onLogout }) {
         )}
 
         {/* Readiness status + quiz */}
+        {!isParent && (
         <div style={{
           marginTop: 28, padding: "20px", borderRadius: 12,
           background: lessonPassed ? "#F0FDF4" : "#F5F3FF",
@@ -1985,8 +2009,9 @@ export default function Dashboard({ teacher, onLogout }) {
             </div>
           )}
         </div>
+        )}
 
-        {lessonNav}
+        {!isParent && lessonNav}
 
         <div style={{ marginTop: 16 }}>
           <button onClick={backFromLesson} style={{
@@ -2238,7 +2263,46 @@ export default function Dashboard({ teacher, onLogout }) {
         </div>
       )}
       <div style={{ maxWidth: 800, margin: "0 auto", padding: isMobile ? "20px 14px 90px" : "32px 20px 80px" }}>
-        {screen === "home" && (
+        {screen === "home" && isParent && (
+          <div>
+            <div style={{ marginBottom: 24 }}>
+              <h1 style={{ fontSize: 24, fontWeight: 800, color: "#111827", margin: "0 0 4px" }}>
+                Bonjour, {parent?.full_name || "Parent"} 👋
+              </h1>
+              <p style={{ color: "#6B7280", margin: 0, fontSize: 14 }}>
+                Révisez avec votre enfant les leçons déjà vues en classe.
+              </p>
+            </div>
+            {parentLessons.length === 0 ? (
+              <div style={{ background: "white", border: "1px solid #E5E7EB", borderRadius: 12, padding: "40px 20px", textAlign: "center", color: "#6B7280" }}>
+                <div style={{ fontSize: 36, marginBottom: 10 }}>📚</div>
+                Aucune leçon n'a encore été marquée comme enseignée. Elles apparaîtront ici au fur et à mesure des cours.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {parentLessons.map((l) => {
+                  const color = getSubjectColor(l.subject_id);
+                  const icon = getSubjectIcon(l.subject_id);
+                  return (
+                    <div key={l.id} onClick={() => openLesson(l.id)} style={{
+                      background: "white", border: `1px solid ${color}30`, borderRadius: 12, padding: "14px 16px",
+                      cursor: "pointer", display: "flex", alignItems: "center", gap: 12
+                    }}>
+                      <span style={{ fontSize: 22 }}>{icon}</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: "#1F2937" }}>{l.title}</div>
+                        <div style={{ fontSize: 12, color: "#6B7280" }}>Unité {l.unit_number} · {l.theme}</div>
+                      </div>
+                      <span style={{ color: "#9CA3AF", fontSize: 20 }}>›</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {screen === "home" && !isParent && (
           <div>
             <div style={{ marginBottom: 32 }}>
               <h1 style={{ fontSize: 26, fontWeight: 800, color: "#111827", margin: "0 0 4px" }}>
@@ -2359,7 +2423,7 @@ export default function Dashboard({ teacher, onLogout }) {
         {screen === "admin" && isAdmin && <Admin onBack={() => { setScreen(tab); }} />}
         {screen === "schooladmin" && isSchoolAdmin && <SchoolAdmin school={schoolContext} onBack={() => { setScreen(tab); }} />}
       </div>
-      {screen !== "lesson" && screen !== "home" && <BottomNav />}
+      {!isParent && screen !== "lesson" && screen !== "home" && <BottomNav />}
     </div>
   );
 }

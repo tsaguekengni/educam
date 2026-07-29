@@ -8,6 +8,7 @@ import { setGrant, getGrant, clearGrant } from "../lib/offline";
 export default function Home() {
   const [session, setSession] = useState(null);
   const [teacher, setTeacher] = useState(null);
+  const [parent, setParent] = useState(null); // parent profile (profiles mode)
   const [mode, setMode] = useState("login"); // login or register
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -22,6 +23,8 @@ export default function Home() {
   const [schoolName, setSchoolName] = useState("");
   const [level, setLevel] = useState("cm1");
   const [schoolCode, setSchoolCode] = useState(""); // staff join-code (profiles mode)
+  const [accountType, setAccountType] = useState("teacher"); // teacher | parent (profiles mode)
+  const [parentCode, setParentCode] = useState(""); // class passcode (parent signup)
 
   // Session restore (offline mode only). When the flag is off this never runs,
   // so behaviour is unchanged: the login form shows as before.
@@ -35,11 +38,19 @@ export default function Home() {
           const { data } = await supabase.auth.getSession();
           const s = data?.session;
           if (s) {
-            const { data: t } = await supabase.from("teachers").select("*").eq("id", s.user.id).single();
+            const { data: t } = await supabase.from("teachers").select("*").eq("id", s.user.id).maybeSingle();
             if (t && !cancelled) {
               setGrant(t);
               setSession(s);
               setTeacher(t);
+              setBooting(false);
+              return;
+            }
+            // Parent profile?
+            const { data: p } = await supabase.from("parents").select("*").eq("id", s.user.id).maybeSingle();
+            if (p && !cancelled) {
+              setSession(s);
+              setParent(p);
               setBooting(false);
               return;
             }
@@ -76,11 +87,29 @@ export default function Home() {
       .from("teachers")
       .select("*")
       .eq("id", data.user.id)
-      .single();
+      .maybeSingle();
 
-    setGrant(teacherData);
-    setSession(data.session);
-    setTeacher(teacherData);
+    if (teacherData) {
+      setGrant(teacherData);
+      setSession(data.session);
+      setTeacher(teacherData);
+      setLoading(false);
+      return;
+    }
+
+    // Profiles mode: the account may be a parent.
+    if (PROFILES_ENABLED) {
+      const { data: parentData } = await supabase
+        .from("parents").select("*").eq("id", data.user.id).maybeSingle();
+      if (parentData) {
+        setSession(data.session);
+        setParent(parentData);
+        setLoading(false);
+        return;
+      }
+    }
+
+    setError("Profil introuvable pour ce compte");
     setLoading(false);
   };
 
@@ -97,6 +126,47 @@ export default function Home() {
 
     if (password.length < 6) {
       setError("Le mot de passe doit contenir au moins 6 caractères");
+      setLoading(false);
+      return;
+    }
+
+    // Profiles mode: PARENT signup via the class passcode. No child data collected.
+    if (PROFILES_ENABLED && accountType === "parent") {
+      if (!parentCode.trim()) {
+        setError("Entrez le code parents fourni par l'enseignant");
+        setLoading(false);
+        return;
+      }
+      const { data: t } = await supabase.from("teachers").select("id")
+        .eq("parent_passcode", parentCode.trim()).maybeSingle();
+      if (!t) {
+        setError("Code parents invalide");
+        setLoading(false);
+        return;
+      }
+      const { data: pData, error: pSignUp } = await supabase.auth.signUp({ email, password });
+      if (pSignUp) {
+        setError(pSignUp.message === "User already registered"
+          ? "Un compte existe déjà avec cet email"
+          : "Erreur lors de l'inscription: " + pSignUp.message);
+        setLoading(false);
+        return;
+      }
+      const { error: pErr } = await supabase.from("parents").insert({
+        id: pData.user.id, full_name: fullName.trim(), linked_teacher_id: t.id,
+      });
+      if (pErr) {
+        setError("Erreur lors de la création du profil");
+        setLoading(false);
+        return;
+      }
+      const { data: loginData } = await supabase.auth.signInWithPassword({ email, password });
+      if (loginData?.session) {
+        const { data: parentData } = await supabase.from("parents").select("*")
+          .eq("id", loginData.user.id).maybeSingle();
+        setSession(loginData.session);
+        setParent(parentData);
+      }
       setLoading(false);
       return;
     }
@@ -202,6 +272,10 @@ export default function Home() {
     return <Dashboard teacher={teacher} onLogout={() => { clearGrant(); setSession(null); setTeacher(null); }} />;
   }
 
+  if (session && parent) {
+    return <Dashboard parent={parent} onLogout={() => { clearGrant(); setSession(null); setParent(null); }} />;
+  }
+
   return (
     <div style={{
       minHeight: "100vh",
@@ -281,6 +355,21 @@ export default function Home() {
         {/* Registration-only fields */}
         {mode === "register" && (
           <>
+            {PROFILES_ENABLED && (
+              <div style={{ display: "flex", background: "#F3F4F6", borderRadius: 8, padding: 4, marginBottom: 16 }}>
+                <button type="button" onClick={() => { setAccountType("teacher"); setError(""); }}
+                  style={{ flex: 1, padding: "8px", border: "none", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer",
+                    background: accountType === "teacher" ? "white" : "transparent",
+                    color: accountType === "teacher" ? "#0F4C35" : "#6B7280",
+                    boxShadow: accountType === "teacher" ? "0 1px 3px rgba(0,0,0,0.1)" : "none" }}>Enseignant</button>
+                <button type="button" onClick={() => { setAccountType("parent"); setError(""); }}
+                  style={{ flex: 1, padding: "8px", border: "none", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer",
+                    background: accountType === "parent" ? "white" : "transparent",
+                    color: accountType === "parent" ? "#0F4C35" : "#6B7280",
+                    boxShadow: accountType === "parent" ? "0 1px 3px rgba(0,0,0,0.1)" : "none" }}>Parent</button>
+              </div>
+            )}
+
             <div style={{ marginBottom: 14 }}>
               <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
                 Nom complet *
@@ -297,6 +386,8 @@ export default function Home() {
               />
             </div>
 
+            {(!PROFILES_ENABLED || accountType === "teacher") && (
+              <>
             <div style={{ marginBottom: 14 }}>
               <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
                 Nom de l'école
@@ -343,6 +434,26 @@ export default function Home() {
                   placeholder="Code fourni par votre école"
                   value={schoolCode}
                   onChange={(e) => setSchoolCode(e.target.value)}
+                  style={{
+                    width: "100%", padding: "12px 14px", border: "1.5px solid #D1D5DB",
+                    borderRadius: 8, fontSize: 14, outline: "none", boxSizing: "border-box"
+                  }}
+                />
+              </div>
+            )}
+              </>
+            )}
+
+            {PROFILES_ENABLED && accountType === "parent" && (
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
+                  Code parents *
+                </label>
+                <input
+                  type="text"
+                  placeholder="Code fourni par l'enseignant de votre enfant"
+                  value={parentCode}
+                  onChange={(e) => setParentCode(e.target.value.toUpperCase())}
                   style={{
                     width: "100%", padding: "12px 14px", border: "1.5px solid #D1D5DB",
                     borderRadius: 8, fontSize: 14, outline: "none", boxSizing: "border-box"
