@@ -209,19 +209,43 @@ export default function Dashboard({ teacher, parent, onLogout }) {
   const isSchoolAdmin = PROFILES_ENABLED && teacher?.role === "school_admin";
   const isParent = PROFILES_ENABLED && !!parent;
 
-  // Parent mode: the taught lessons of the linked class (read-only revision list).
+  // Parent mode: the WHOLE curriculum of the linked class, each lesson tagged as
+  // taught (full access) or not-yet-taught (preview — the exercise & "à recopier"
+  // sections are locked). Parents can look ahead and practise, but the "do the
+  // work" sections stay locked until the teacher has taught the lesson.
   const [parentLessons, setParentLessons] = useState([]);
+  const [parentTaughtIds, setParentTaughtIds] = useState(() => new Set());
   useEffect(() => {
-    if (!isParent || !parent?.linked_teacher_id) { setParentLessons([]); return; }
+    if (!isParent || !parent?.linked_teacher_id) {
+      setParentLessons([]); setParentTaughtIds(new Set()); return;
+    }
     let cancelled = false;
-    supabase.from("lessons_taught")
-      .select("taught_at, lessons(id, subject_id, component_id, unit_number, week_number, title, theme, objective)")
-      .eq("teacher_id", parent.linked_teacher_id)
-      .order("taught_at", { ascending: false })
-      .then(({ data }) => {
-        if (cancelled) return;
-        setParentLessons((data || []).filter((r) => r.lessons).map((r) => ({ ...r.lessons, taught_at: r.taught_at })));
-      });
+    (async () => {
+      // Resolve the linked teacher's level (defaults to CM1 if unset).
+      const { data: t } = await supabase.from("teachers").select("level")
+        .eq("id", parent.linked_teacher_id).maybeSingle();
+      const lvl = t?.level || "cm1";
+      // Every lesson of that level + the set of lessons the teacher marked taught.
+      const [{ data: all }, { data: taught }] = await Promise.all([
+        supabase.from("lessons")
+          .select("id, subject_id, component_id, unit_number, week_number, title, theme, objective")
+          .eq("level", lvl),
+        supabase.from("lessons_taught").select("lesson_id, taught_at")
+          .eq("teacher_id", parent.linked_teacher_id),
+      ]);
+      if (cancelled) return;
+      const taughtMap = new Map((taught || []).map((r) => [r.lesson_id, r.taught_at]));
+      const merged = (all || []).map((l) => ({
+        ...l, taught: taughtMap.has(l.id), taught_at: taughtMap.get(l.id) || null,
+      }));
+      // Curriculum order so parents can follow the progression and look ahead.
+      merged.sort((a, b) =>
+        (a.unit_number || 0) - (b.unit_number || 0) ||
+        (a.week_number || 0) - (b.week_number || 0) ||
+        (a.subject_id || "").localeCompare(b.subject_id || ""));
+      setParentLessons(merged);
+      setParentTaughtIds(new Set(taughtMap.keys()));
+    })();
     return () => { cancelled = true; };
   }, [isParent, parent?.linked_teacher_id]);
 
@@ -1733,6 +1757,12 @@ export default function Dashboard({ teacher, parent, onLogout }) {
     }
 
     // ---- READ-ONLY VIEW ----
+    // Parent preview lock: on a lesson the linked teacher hasn't taught yet, the
+    // exercise section and the "à recopier dans ton cahier" (bilan) section are
+    // locked. Everything else (intro, content, video, activity) stays visible so
+    // the parent can read ahead. Taught lessons are fully unlocked.
+    const parentLocked = isParent && currentLesson && !parentTaughtIds.has(currentLesson.id);
+    const isLockedSection = (type) => parentLocked && (type === "exercise" || type === "bilan");
     const { prev: prevLesson, next: nextLesson } = getAdjacentLessons();
     const navBtnStyle = (active, align) => ({
       flex: 1, minWidth: 0, display: "flex", flexDirection: "column",
@@ -1842,6 +1872,26 @@ export default function Dashboard({ teacher, parent, onLogout }) {
             const accentColors = { intro: "#3B82F6", content: "#0F4C35", video: "#EF4444", activity: "#8B5CF6", exercise: "#F59E0B", bilan: "#D97706" };
             const accent = accentColors[section.section_type] || "#6B7280";
             const blocks = sectionBlocks[section.id] || [];
+
+            // Parent, lesson not yet taught: show this section as locked.
+            if (isLockedSection(section.section_type)) {
+              return (
+                <div key={i} style={{
+                  background: "#F9FAFB", borderRadius: 10, border: "1px dashed #D1D5DB",
+                  padding: "16px 18px", display: "flex", alignItems: "center", gap: 12
+                }}>
+                  <span style={{ fontSize: 20, opacity: 0.7 }}>🔒</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: "#6B7280" }}>
+                      {section.icon} {section.title}
+                    </div>
+                    <div style={{ fontSize: 12.5, color: "#9CA3AF", marginTop: 2, lineHeight: 1.5 }}>
+                      Disponible une fois la leçon vue en classe.
+                    </div>
+                  </div>
+                </div>
+              );
+            }
 
             return (
               <div key={i} style={{
@@ -2049,6 +2099,8 @@ export default function Dashboard({ teacher, parent, onLogout }) {
   const ProjectorView = () => {
     if (!currentLesson) return null;
     const color = getSubjectColor(currentLesson.subject_id);
+    // Same parent lock as the reader: hide exercise/bilan on untaught lessons.
+    const projectorLocked = isParent && !parentTaughtIds.has(currentLesson.id);
 
     // Auto-scale: measure total text and pick font size
     const allText = lessonSections.flatMap(s =>
@@ -2103,7 +2155,8 @@ export default function Dashboard({ teacher, parent, onLogout }) {
 
           {/* All sections — expanded, no collapse */}
           <div style={{ display: "flex", flexDirection: "column", gap: 40 }}>
-            {lessonSections.filter(s => s.section_type !== "exercise").map((section, i) => {
+            {lessonSections.filter(s => s.section_type !== "exercise")
+              .filter(s => !(projectorLocked && s.section_type === "bilan")).map((section, i) => {
               const accentColors = { intro: "#3B82F6", content: "#0F4C35", video: "#EF4444", activity: "#8B5CF6", bilan: "#D97706" };
               const accent = accentColors[section.section_type] || "#6B7280";
               const blocks = sectionBlocks[section.id] || [];
@@ -2270,13 +2323,15 @@ export default function Dashboard({ teacher, parent, onLogout }) {
                 Bonjour, {parent?.full_name || "Parent"} 👋
               </h1>
               <p style={{ color: "#6B7280", margin: 0, fontSize: 14 }}>
-                Révisez avec votre enfant les leçons déjà vues en classe.
+                Révisez avec votre enfant. Les leçons déjà vues en classe sont
+                complètes ; les autres peuvent être lues à l'avance (exercices et
+                « à recopier » débloqués après le cours).
               </p>
             </div>
             {parentLessons.length === 0 ? (
               <div style={{ background: "white", border: "1px solid #E5E7EB", borderRadius: 12, padding: "40px 20px", textAlign: "center", color: "#6B7280" }}>
                 <div style={{ fontSize: 36, marginBottom: 10 }}>📚</div>
-                Aucune leçon n'a encore été marquée comme enseignée. Elles apparaîtront ici au fur et à mesure des cours.
+                Aucune leçon disponible pour le moment. Elles apparaîtront ici dès que la classe démarre.
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -2285,14 +2340,26 @@ export default function Dashboard({ teacher, parent, onLogout }) {
                   const icon = getSubjectIcon(l.subject_id);
                   return (
                     <div key={l.id} onClick={() => openLesson(l.id)} style={{
-                      background: "white", border: `1px solid ${color}30`, borderRadius: 12, padding: "14px 16px",
+                      background: "white", border: `1px solid ${l.taught ? color + "30" : "#E5E7EB"}`,
+                      borderRadius: 12, padding: "14px 16px",
                       cursor: "pointer", display: "flex", alignItems: "center", gap: 12
                     }}>
-                      <span style={{ fontSize: 22 }}>{icon}</span>
+                      <span style={{ fontSize: 22, opacity: l.taught ? 1 : 0.55 }}>{icon}</span>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 15, fontWeight: 700, color: "#1F2937" }}>{l.title}</div>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: l.taught ? "#1F2937" : "#4B5563" }}>{l.title}</div>
                         <div style={{ fontSize: 12, color: "#6B7280" }}>Unité {l.unit_number} · {l.theme}</div>
                       </div>
+                      {l.taught ? (
+                        <span style={{
+                          fontSize: 11.5, fontWeight: 700, color: "#16A34A",
+                          background: "#DCFCE7", borderRadius: 999, padding: "3px 10px", whiteSpace: "nowrap"
+                        }}>✓ Vu en classe</span>
+                      ) : (
+                        <span style={{
+                          fontSize: 11.5, fontWeight: 600, color: "#9CA3AF",
+                          background: "#F3F4F6", borderRadius: 999, padding: "3px 10px", whiteSpace: "nowrap"
+                        }}>🔒 À venir</span>
+                      )}
                       <span style={{ color: "#9CA3AF", fontSize: 20 }}>›</span>
                     </div>
                   );
