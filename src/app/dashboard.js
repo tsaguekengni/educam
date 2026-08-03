@@ -2486,7 +2486,12 @@ export default function Dashboard({ teacher, parent, onLogout }) {
         {screen === "calendar" && <CalendarView />}
         {screen === "programme" && <ProgrammeView />}
         {screen === "readiness" && currentLesson && <ReadinessQuiz lesson={currentLesson} teacherId={teacher?.id} onPass={() => { setLessonPassed(true); setScreen("lesson"); }} onBack={() => setScreen("lesson")} />}
-        {screen === "lesson" && <LessonScreen />}
+        {/* Call LessonScreen() as a function instead of <LessonScreen /> so its
+            output is inlined into this render tree. Rendering it as an element
+            remounted the whole subtree on every Dashboard state change (it's an
+            inline-defined component with a fresh identity each render), which
+            made the feedback comment box lose focus after each keystroke. */}
+        {screen === "lesson" && LessonScreen()}
         {screen === "admin" && isAdmin && <Admin onBack={() => { setScreen(tab); }} />}
         {screen === "schooladmin" && isSchoolAdmin && <SchoolAdmin school={schoolContext} onBack={() => { setScreen(tab); }} />}
       </div>
