@@ -2305,8 +2305,11 @@ export default function Dashboard({ teacher, parent, onLogout }) {
   // ============ MAIN RENDER ============
   return (
     <div style={{ minHeight: "100vh", background: "#F9FAFB", fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
-      {projectorMode && <ProjectorView />}
-      <Header />
+      {/* Called as functions, not <Components />, to avoid remounting on every
+          Dashboard render — same fix as LessonScreen (these are inline-defined,
+          hook-free components, so inlining their output is safe). */}
+      {projectorMode && ProjectorView()}
+      {Header()}
       {OFFLINE_ENABLED && !online && (
         <div style={{
           background: "#B45309", color: "white", textAlign: "center",
@@ -2495,7 +2498,7 @@ export default function Dashboard({ teacher, parent, onLogout }) {
         {screen === "admin" && isAdmin && <Admin onBack={() => { setScreen(tab); }} />}
         {screen === "schooladmin" && isSchoolAdmin && <SchoolAdmin school={schoolContext} onBack={() => { setScreen(tab); }} />}
       </div>
-      {!isParent && screen !== "lesson" && screen !== "home" && <BottomNav />}
+      {!isParent && screen !== "lesson" && screen !== "home" && BottomNav()}
     </div>
   );
 }
