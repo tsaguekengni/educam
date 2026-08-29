@@ -733,7 +733,19 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const data = await cachedQuery("lessons_" + selectedLevel.id, () =>
       supabase.from("lessons").select("id, subject_id, component_id, level, unit_number, week_number, title")
         .eq("level", selectedLevel.id));
-    setAvailableLessons(data || []);
+    // Enrich each lesson with the "taught" state of the teacher whose class is
+    // being viewed (the teacher themselves, or the one a school-admin / admin is
+    // acting-as). Live query — offline it fails soft and everything reads as not
+    // taught, which is acceptable. This drives the "Déjà enseignée" badge.
+    let taughtSet = new Set();
+    if (teacher?.id) {
+      try {
+        const { data: tg } = await supabase.from("lessons_taught")
+          .select("lesson_id").eq("teacher_id", teacher.id);
+        taughtSet = new Set((tg || []).map((r) => r.lesson_id));
+      } catch (_) {}
+    }
+    setAvailableLessons((data || []).map((l) => ({ ...l, taught: taughtSet.has(l.id) })));
   };
 
   // Download every lesson scheduled this week (current unit + week), images
