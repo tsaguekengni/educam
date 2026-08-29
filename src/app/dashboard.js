@@ -733,21 +733,28 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const data = await cachedQuery("lessons_" + selectedLevel.id, () =>
       supabase.from("lessons").select("id, subject_id, component_id, level, unit_number, week_number, title")
         .eq("level", selectedLevel.id));
-    // Enrich each lesson with its "taught" state. We deliberately DON'T filter
-    // by the viewer's id — the RLS policy "taught read scoped" already scopes
-    // lessons_taught to what this role may see: a teacher gets their own marks,
-    // a school-admin gets the whole school, the technician (superadmin) gets
-    // everything, a parent gets their child's class. So the "Déjà enseignée"
-    // badge appears for the teacher, the school-admin AND the superadmin when
-    // browsing the class timetable — not only for the teacher who taught it.
-    // (Filtering by teacher.id was the bug: a school-admin/superadmin browsing
-    // without acting-as has no taught rows under their own id.) Live query;
-    // offline it fails soft and everything reads as not taught, acceptable.
+    // Enrich each lesson with its "taught" state, keyed on the TEACHER OF RECORD
+    // for the class being viewed — the exact same owner the timetable itself is
+    // keyed on above (parent → their child's class teacher; everyone else → the
+    // teacher whose class this is: yourself if you're the teacher, or the teacher
+    // a school-admin / superadmin entered via "act as"). Keying on the owner (not
+    // the whole school, and not the viewer's own id) means a school with two
+    // classes of the same level shows each class's own taught progress — no
+    // merge — because each class has a different owner_teacher_id. RLS still
+    // scopes the read: a teacher may read own marks, a parent their child's
+    // teacher's, an admin anyone's. Live query; offline it fails soft and
+    // everything reads as not taught, which is acceptable.
+    const ownerTeacherId = isParent
+      ? (parentStudent?.teacher_id || null)
+      : (teacher?.id || null);
     let taughtSet = new Set();
-    try {
-      const { data: tg } = await supabase.from("lessons_taught").select("lesson_id");
-      taughtSet = new Set((tg || []).map((r) => r.lesson_id));
-    } catch (_) {}
+    if (ownerTeacherId) {
+      try {
+        const { data: tg } = await supabase.from("lessons_taught")
+          .select("lesson_id").eq("teacher_id", ownerTeacherId);
+        taughtSet = new Set((tg || []).map((r) => r.lesson_id));
+      } catch (_) {}
+    }
     setAvailableLessons((data || []).map((l) => ({ ...l, taught: taughtSet.has(l.id) })));
   };
 
