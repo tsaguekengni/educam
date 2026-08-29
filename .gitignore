@@ -42,3 +42,10 @@ next-env.d.ts
 
 # lesson uploader tooling & scratch (local utility, not part of the app)
 /lesson-uploader
+
+# large media & generated build artifacts (not source; regenerable)
+/Demo Video/
+*.mp4
+/EduCam_Investor_Deck_1.pptx
+/EduCam_Investor_Deck_1.pdf
+/preview-en.html
