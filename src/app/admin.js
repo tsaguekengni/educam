@@ -183,6 +183,8 @@ export default function Admin({ onBack }) {
   const [teacherNames, setTeacherNames] = useState({});
   const [feedbackTab, setFeedbackTab] = useState("new"); // "new" | "done"
   const [pendingDelete, setPendingDelete] = useState(null); // feedback id awaiting delete confirm
+  const [selectedFeedback, setSelectedFeedback] = useState(() => new Set()); // bulk-triage selection (feedback ids)
+  const [bulkConfirmAll, setBulkConfirmAll] = useState(false); // "tout marquer traité" awaiting confirm
 
   const [subjectId, setSubjectId] = useState("francais");
   const [componentId, setComponentId] = useState("expression-orale");
@@ -390,6 +392,34 @@ export default function Admin({ onBack }) {
       : { processed_at: null, processed_by: null };
     const { error } = await supabase.from("lesson_feedback").update(patch).eq("id", id);
     if (!error) setFeedbackRows((prev) => prev.map((f) => (f.id === id ? { ...f, ...patch } : f)));
+  };
+
+  // Mark/reopen many feedbacks in one round-trip (.in). Admin-only via RLS.
+  // Drives the select-all → unselect-a-few → treat-the-rest workflow and the
+  // one-click "tout marquer traité".
+  const setFeedbackProcessedBulk = async (ids, processed) => {
+    const list = Array.from(new Set(ids || []));
+    if (list.length === 0) return;
+    const { data: u } = await supabase.auth.getUser();
+    const patch = processed
+      ? { processed_at: new Date().toISOString(), processed_by: u?.user?.id || null }
+      : { processed_at: null, processed_by: null };
+    const idSet = new Set(list);
+    const { error } = await supabase.from("lesson_feedback").update(patch).in("id", list);
+    if (!error) {
+      setFeedbackRows((prev) => prev.map((f) => (idSet.has(f.id) ? { ...f, ...patch } : f)));
+      setSelectedFeedback(new Set());
+      setBulkConfirmAll(false);
+    }
+  };
+
+  // Toggle one feedback in the selection.
+  const toggleFeedbackSelected = (id) => {
+    setSelectedFeedback((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
   };
 
   // Delete a feedback the admin judges unimportant. Admin-only via RLS.
@@ -716,11 +746,22 @@ export default function Admin({ onBack }) {
     const doneRows = feedbackRows.filter((f) => f.processed_at);
     const activeRows = feedbackTab === "done" ? doneRows : newRows;
     const label = feedbackTab === "done" ? "Traités" : "Nouveaux";
+    const isNewTab = feedbackTab === "new";
+    const selectedInTab = activeRows.filter((f) => selectedFeedback.has(f.id));
+    const allSelected = activeRows.length > 0 && selectedInTab.length === activeRows.length;
+    const toggleSelectAll = () => {
+      setSelectedFeedback((prev) => {
+        const next = new Set(prev);
+        if (allSelected) { activeRows.forEach((f) => next.delete(f.id)); }
+        else { activeRows.forEach((f) => next.add(f.id)); }
+        return next;
+      });
+    };
     const byLesson = {};
     activeRows.forEach((f) => { (byLesson[f.lesson_id] = byLesson[f.lesson_id] || []).push(f); });
     const lessonIds = Object.keys(byLesson);
     const tabBtn = (key, text, count, active) => (
-      <button onClick={() => { setFeedbackTab(key); setPendingDelete(null); }} style={{
+      <button onClick={() => { setFeedbackTab(key); setPendingDelete(null); setSelectedFeedback(new Set()); setBulkConfirmAll(false); }} style={{
         padding: "8px 16px", borderRadius: 999, fontSize: "var(--ec-fs-3)", fontWeight: 700, cursor: "pointer",
         border: active ? "none" : "1.5px solid #E5E7EB",
         background: active ? "#0F4C35" : "white", color: active ? "white" : COLORS.ink2,
@@ -751,6 +792,50 @@ export default function Admin({ onBack }) {
               cursor: activeRows.length === 0 ? "default" : "pointer", opacity: activeRows.length === 0 ? 0.5 : 1, whiteSpace: "nowrap",
             }}>⬇ Télécharger la liste</button>
           </div>
+          {!feedbackLoading && activeRows.length > 0 && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap",
+              background: "#F0FDF4", border: "1.5px solid #BBF7D0", borderRadius: 10, padding: "10px 14px",
+            }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: "var(--ec-fs-3)", fontWeight: 700, color: COLORS.ink }}>
+                <input type="checkbox" checked={allSelected} onChange={toggleSelectAll}
+                  style={{ width: 17, height: 17, accentColor: "#0F4C35", cursor: "pointer" }} />
+                {allSelected ? "Tout désélectionner" : "Tout sélectionner"}
+              </label>
+              <span style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3 }}>
+                {selectedInTab.length} sélectionné(s) sur {activeRows.length}
+              </span>
+              {isNewTab ? (
+                <button onClick={() => setFeedbackProcessedBulk(selectedInTab.map((f) => f.id), true)}
+                  disabled={selectedInTab.length === 0} style={{
+                    padding: "7px 14px", borderRadius: 8, fontSize: "var(--ec-fs-3)", fontWeight: 700, border: "none",
+                    background: "#0F4C35", color: "white", whiteSpace: "nowrap",
+                    cursor: selectedInTab.length === 0 ? "default" : "pointer", opacity: selectedInTab.length === 0 ? 0.45 : 1,
+                  }}>✓ Marquer la sélection comme traité ({selectedInTab.length})</button>
+              ) : (
+                <button onClick={() => setFeedbackProcessedBulk(selectedInTab.map((f) => f.id), false)}
+                  disabled={selectedInTab.length === 0} style={{
+                    padding: "7px 14px", borderRadius: 8, fontSize: "var(--ec-fs-3)", fontWeight: 700,
+                    border: "1.5px solid #E5E7EB", background: "white", color: "#374151", whiteSpace: "nowrap",
+                    cursor: selectedInTab.length === 0 ? "default" : "pointer", opacity: selectedInTab.length === 0 ? 0.45 : 1,
+                  }}>↩ Rouvrir la sélection ({selectedInTab.length})</button>
+              )}
+              {isNewTab && (
+                bulkConfirmAll ? (
+                  <span style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
+                    <span style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink2, fontWeight: 700 }}>Marquer les {newRows.length} comme traités ?</span>
+                    <button onClick={() => setFeedbackProcessedBulk(newRows.map((f) => f.id), true)} style={actBtn("#0F4C35", "white")}>Oui, tout traiter</button>
+                    <button onClick={() => setBulkConfirmAll(false)} style={actBtn("white", "#374151", "1.5px solid #E5E7EB")}>Annuler</button>
+                  </span>
+                ) : (
+                  <button onClick={() => setBulkConfirmAll(true)} style={{
+                    marginLeft: "auto", padding: "7px 14px", borderRadius: 8, fontSize: "var(--ec-fs-3)", fontWeight: 700,
+                    border: "1.5px solid #0F4C35", background: "white", color: COLORS.g700, whiteSpace: "nowrap", cursor: "pointer",
+                  }}>✓✓ Tout marquer comme traité ({newRows.length})</button>
+                )
+              )}
+            </div>
+          )}
           {feedbackLoading ? (
             <p style={{ color: COLORS.ink3 }}>Chargement…</p>
           ) : lessonIds.length === 0 ? (
@@ -781,6 +866,9 @@ export default function Admin({ onBack }) {
                       {rows.map((f) => (
                         <div key={f.id} style={{ background: COLORS.page, border: "1px solid #E5E7EB", borderRadius: 10, padding: "10px 14px" }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
+                            <input type="checkbox" checked={selectedFeedback.has(f.id)} onChange={() => toggleFeedbackSelected(f.id)}
+                              aria-label="Sélectionner ce retour"
+                              style={{ width: 16, height: 16, accentColor: "#0F4C35", cursor: "pointer", flex: "none" }} />
                             <span style={{ fontSize: "var(--ec-fs-3)", fontWeight: 700, color: COLORS.ink }}>{teacherNames[f.teacher_id] || "Enseignant"}</span>
                             {f.rating ? <span style={{ fontSize: "var(--ec-fs-2)", color: "#F59E0B" }}>{"★".repeat(f.rating)}{"☆".repeat(5 - f.rating)}</span> : null}
                             {f.section_title ? <span style={{ fontSize: "var(--ec-fs-2)", color: "#7C3AED", background: "#F5F3FF", borderRadius: 999, padding: "2px 8px" }}>{f.section_title}</span> : null}
