@@ -936,6 +936,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       return;
     }
     setHeroPlan((p) => ({ ...p, taught: true }));
+    setAvailableLessons((prev) => prev.map((l) => (l.id === lesson.id ? { ...l, taught: true } : l)));
     pushToast("Leçon marquée enseignée", "success");
     logActivity({
       actorId: teacher.id, actorRole: teacher?.role || "teacher",
@@ -1351,12 +1352,14 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           .eq("teacher_id", teacher.id).eq("lesson_id", currentLesson.id);
         if (error) throw error;
         setLessonTaught(false);
+        setAvailableLessons((prev) => prev.map((l) => (l.id === currentLesson.id ? { ...l, taught: false } : l)));
         logActivity({ actorId: teacher.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "unmark_taught", lessonId: currentLesson.id, detail: currentLesson.title });
       } else {
         const { error } = await supabase.from("lessons_taught")
           .upsert({ teacher_id: teacher.id, lesson_id: currentLesson.id }, { onConflict: "teacher_id,lesson_id" });
         if (error) throw error;
         setLessonTaught(true);
+        setAvailableLessons((prev) => prev.map((l) => (l.id === currentLesson.id ? { ...l, taught: true } : l)));
         logActivity({ actorId: teacher.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "mark_taught", lessonId: currentLesson.id, detail: currentLesson.title });
       }
     } catch (_) {
@@ -2151,7 +2154,9 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 9 }}>
                                 {lesson ? (
                                   <>
-                                    <Badge tone="brand">Leçon disponible</Badge>
+                                    {lesson.taught
+                                      ? <Badge tone="brand">✓ Déjà enseignée</Badge>
+                                      : <Badge tone="neutral">Leçon disponible</Badge>}
                                     {OFFLINE_ENABLED && cachedIds.includes(lesson.id) && (
                                       <Badge tone="brand">✓ hors ligne</Badge>
                                     )}
