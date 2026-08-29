@@ -2,19 +2,35 @@
 import { useEffect } from "react";
 import { OFFLINE_ENABLED } from "../lib/flags";
 
-// Registers the service worker ONLY when offline mode is enabled.
-// When the flag is off (default, during testing) this renders nothing and
-// registers nothing — zero behavioural change. It also actively unregisters
-// any stale worker if the flag gets turned back off, so toggling is clean.
+// The service worker is a PRODUCTION-ONLY feature.
+//
+// Under `next dev` (Turbopack) the server recompiles chunks on the fly and uses
+// hot-module reloading. A service worker that caches the app shell then serves a
+// stale HTML document pointing at chunks that no longer exist, the page fails to
+// hydrate, Next does a full reload, the stale worker serves the stale shell
+// again — an infinite reload loop that looks like "freezing / loading forever".
+//
+// So we register the worker ONLY in a production build AND only when offline
+// mode is enabled. In every other case (dev, or offline disabled) we actively
+// remove any worker + EduCam caches left over from earlier testing, so the dev
+// server is never served a stale shell.
 export default function ServiceWorkerRegister() {
   useEffect(() => {
     if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
 
-    if (!OFFLINE_ENABLED) {
-      // Safety: if offline mode was ever on and is now off, remove the worker.
+    const isProd = process.env.NODE_ENV === "production";
+    const shouldRun = OFFLINE_ENABLED && isProd;
+
+    if (!shouldRun) {
+      // Guarantee a clean slate: unregister any worker and drop EduCam caches.
       navigator.serviceWorker.getRegistrations()
         .then((regs) => regs.forEach((r) => r.unregister()))
         .catch(() => {});
+      if (typeof caches !== "undefined") {
+        caches.keys()
+          .then((keys) => keys.filter((k) => k.startsWith("educam-")).forEach((k) => caches.delete(k)))
+          .catch(() => {});
+      }
       return;
     }
 
