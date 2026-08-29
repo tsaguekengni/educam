@@ -1,0 +1,51 @@
+/* ============================================================
+   OFFRE D'EMPLOI — extension de la feuille du protocole.
+   N'ajoute que le bandeau d'en-tête et quelques ajustements ;
+   tout le reste (art-hd, puces, intention, faits, cle…) est
+   hérité de la charte. Corps ramené à 10,6 pt : une annonce
+   est plus courte et plus aérée qu'un contrat.
+   ============================================================ */
+@page { size: A4; margin: 15mm 16mm 16mm; }
+body { font-size: 10.6pt; line-height: 1.5; }
+.doc { max-width: 178mm; margin: 0 auto; }
+
+/* Rythme vertical resserré : l'annonce tient en deux pages pleines. */
+.art-hd { margin: 5mm 0 2.6mm; }
+p { margin-bottom: 2mm; }
+ul.puces li { margin-bottom: 1mm; }
+.cle { margin: 3mm 0; }
+.intention { margin: 2.8mm 0; }
+h3.cl { margin: 3.4mm 0 1.2mm; }
+
+/* --- bandeau d'en-tête (aplat vert profond) --- */
+.entete-offre { position: relative; overflow: hidden; background: var(--vert-700);
+  color: #fff; border-radius: 4mm; padding: 10mm 12mm 9.5mm; margin-bottom: 5.5mm;
+  break-inside: avoid; page-break-inside: avoid; }
+.entete-offre::after { content: ""; position: absolute; right: -30mm; top: -34mm;
+  width: 100mm; height: 100mm; border-radius: 50%; background: rgba(0,122,94,.34); }
+.entete-offre > * { position: relative; z-index: 2; }
+
+.entete-offre .logo { display: flex; align-items: center; gap: 3mm; margin-bottom: 6.5mm; }
+.entete-offre .logo__m { display: inline-flex; align-items: center; justify-content: center;
+  width: 11mm; height: 11mm; border-radius: 2.4mm; background: rgba(255,255,255,.12);
+  border: .6pt solid rgba(255,255,255,.30); color: #fff; font-weight: 800; font-size: 12pt;
+  letter-spacing: -.02em; }
+.entete-offre .logo b { display: block; color: #fff; font-size: 12.5pt; font-weight: 800; line-height: 1; }
+.entete-offre .logo i { display: block; font-style: normal; font-size: 8.4pt;
+  color: #A9CFBD; margin-top: .6mm; }
+
+.entete-offre .rule-j { width: 22mm; height: 1.4mm; background: var(--jaune);
+  border-radius: 1mm; margin-bottom: 4mm; }
+.entete-offre .eyebrow { display: block; font-size: 8pt; font-weight: 800;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--jaune); margin-bottom: 2.5mm; }
+.entete-offre h1 { font-size: 27pt; font-weight: 800; letter-spacing: -.03em;
+  line-height: 1.08; color: #fff; margin: 0 0 2.5mm; }
+.entete-offre .st { font-size: 11.4pt; font-weight: 500; color: #DCEDE5; margin: 0; text-align: left; }
+
+.entete-offre .chips { display: flex; flex-wrap: wrap; gap: 2.5mm; margin-top: 6mm; }
+.entete-offre .chip { display: inline-block; font-size: 8.6pt; font-weight: 700; color: #fff;
+  background: rgba(255,255,255,.12); border: .6pt solid rgba(255,255,255,.30);
+  border-radius: 20mm; padding: 1.6mm 4mm; }
+
+/* Le libellé « Ce qui compte le plus » est un peu plus long : on lui laisse la place. */
+.intention .lbl { letter-spacing: .11em; }

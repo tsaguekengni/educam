@@ -4,11 +4,15 @@ import { supabase } from "../lib/supabase";
 import Dashboard from "./dashboard";
 import { OFFLINE_ENABLED, PROFILES_ENABLED } from "../lib/flags";
 import { setGrant, getGrant, clearGrant } from "../lib/offline";
+import { COLORS, FONT } from "../lib/theme";
+import { Button, Callout } from "../components/ui";
+import { Field, PasswordField, SelectField, ChoiceGroup } from "../components/forms";
 
 export default function Home() {
   const [session, setSession] = useState(null);
   const [teacher, setTeacher] = useState(null);
   const [parent, setParent] = useState(null); // parent profile (profiles mode)
+  const [impersonation, setImpersonation] = useState(null); // admin "act as": { role:'teacher'|'parent', profile, name }
   const [mode, setMode] = useState("login"); // login or register
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -24,7 +28,21 @@ export default function Home() {
   const [level, setLevel] = useState("cm1");
   const [schoolCode, setSchoolCode] = useState(""); // staff join-code (profiles mode)
   const [accountType, setAccountType] = useState("teacher"); // teacher | parent (profiles mode)
-  const [parentCode, setParentCode] = useState(""); // class passcode (parent signup)
+  const [parentCode, setParentCode] = useState(""); // per-child access code (parent signup)
+
+  // Le formulaire sait maintenant si l'appareil est hors ligne, pour ne plus
+  // afficher « email ou mot de passe incorrect » quand c'est le réseau qui manque.
+  const [online, setOnline] = useState(true);
+  useEffect(() => {
+    const sync = () => setOnline(typeof navigator === "undefined" ? true : navigator.onLine);
+    sync();
+    window.addEventListener("online", sync);
+    window.addEventListener("offline", sync);
+    return () => {
+      window.removeEventListener("online", sync);
+      window.removeEventListener("offline", sync);
+    };
+  }, []);
 
   // Session restore (offline mode only). When the flag is off this never runs,
   // so behaviour is unchanged: the login form shows as before.
@@ -33,8 +51,8 @@ export default function Home() {
     let cancelled = false;
     (async () => {
       try {
-        const online = typeof navigator === "undefined" ? true : navigator.onLine;
-        if (online) {
+        const isOnline = typeof navigator === "undefined" ? true : navigator.onLine;
+        if (isOnline) {
           const { data } = await supabase.auth.getSession();
           const s = data?.session;
           if (s) {
@@ -71,6 +89,17 @@ export default function Home() {
   const handleLogin = async () => {
     setLoading(true);
     setError("");
+
+    // Hors ligne : dire la vérité plutôt que d'accuser le mot de passe.
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      setError(
+        OFFLINE_ENABLED
+          ? "Connexion indisponible. Votre accès hors ligne a peut-être expiré : reconnectez-vous une fois le réseau revenu."
+          : "Connexion indisponible. Vérifiez votre réseau et réessayez."
+      );
+      setLoading(false);
+      return;
+    }
 
     const { data, error: authError } = await supabase.auth.signInWithPassword({
       email,
@@ -118,6 +147,12 @@ export default function Home() {
     setError("");
     setSuccess("");
 
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      setError("Inscription impossible hors ligne. Reconnectez-vous au réseau puis réessayez.");
+      setLoading(false);
+      return;
+    }
+
     if (!fullName.trim()) {
       setError("Veuillez entrer votre nom complet");
       setLoading(false);
@@ -130,31 +165,35 @@ export default function Home() {
       return;
     }
 
-    // Profiles mode: PARENT signup via the class passcode. No child data collected.
+    // Profiles mode: PARENT signup via their CHILD's individual code. Links the
+    // parent to ONE student (no parent name required).
     if (PROFILES_ENABLED && accountType === "parent") {
       if (!parentCode.trim()) {
-        setError("Entrez le code parents fourni par l'enseignant");
+        setError("Entrez le code de votre enfant");
         setLoading(false);
         return;
       }
-      // Validate the class passcode. Under RLS a new user can't read `teachers`
+      // Validate the per-child code. Under RLS a new user can't read `students`
       // directly, so we use a SECURITY DEFINER function; if it isn't there yet
       // (RLS not enabled / earlier phase), fall back to the direct lookup.
-      let linkedTeacherId = null;
-      const rpcT = await supabase.rpc("educam_find_teacher_by_passcode", { code: parentCode.trim() });
-      if (rpcT.error) {
-        const { data: t } = await supabase.from("teachers").select("id")
-          .eq("parent_passcode", parentCode.trim()).maybeSingle();
-        linkedTeacherId = t?.id || null;
+      let linkedStudentId = null;
+      const rpcS = await supabase.rpc("educam_find_student_by_code", { code: parentCode.trim() });
+      if (rpcS.error) {
+        const { data: st } = await supabase.from("students").select("id")
+          .eq("access_code", parentCode.trim()).maybeSingle();
+        linkedStudentId = st?.id || null;
       } else {
-        linkedTeacherId = rpcT.data || null;
+        linkedStudentId = rpcS.data?.id || null;
       }
-      if (!linkedTeacherId) {
-        setError("Code parents invalide");
+      if (!linkedStudentId) {
+        setError("Code invalide");
         setLoading(false);
         return;
       }
-      const { data: pData, error: pSignUp } = await supabase.auth.signUp({ email, password });
+      const { data: pData, error: pSignUp } = await supabase.auth.signUp({
+        email, password,
+        options: { data: { display_name: fullName.trim() || null, full_name: fullName.trim() || null } },
+      });
       if (pSignUp) {
         setError(pSignUp.message === "User already registered"
           ? "Un compte existe déjà avec cet email"
@@ -163,7 +202,7 @@ export default function Home() {
         return;
       }
       const { error: pErr } = await supabase.from("parents").insert({
-        id: pData.user.id, full_name: fullName.trim(), linked_teacher_id: linkedTeacherId,
+        id: pData.user.id, full_name: fullName.trim() || null, student_id: linkedStudentId,
       });
       if (pErr) {
         setError("Erreur lors de la création du profil");
@@ -185,6 +224,7 @@ export default function Home() {
     const { data, error: signUpError } = await supabase.auth.signUp({
       email,
       password,
+      options: { data: { display_name: fullName.trim(), full_name: fullName.trim() } },
     });
 
     if (signUpError) {
@@ -269,273 +309,203 @@ export default function Home() {
     setLoading(false);
   };
 
+  const submit = (e) => {
+    e.preventDefault();
+    if (loading) return;
+    mode === "login" ? handleLogin() : handleRegister();
+  };
+
   // Brief boot screen while restoring a session (offline mode only).
   if (OFFLINE_ENABLED && booting) {
     return (
       <div style={{
-        minHeight: "100vh",
-        background: "linear-gradient(135deg, #0F4C35 0%, #1A7A56 50%, #0F4C35 100%)",
-        display: "flex", alignItems: "center", justifyContent: "center", color: "white"
+        minHeight: "100vh", background: COLORS.g700,
+        display: "flex", alignItems: "center", justifyContent: "center", color: "white",
       }}>
-        <div style={{ textAlign: "center" }}>
-          <div style={{ fontSize: 48, marginBottom: 8 }}>📚</div>
-          <p style={{ fontSize: 14, opacity: 0.85 }}>Chargement…</p>
+        <div style={{ textAlign: "center" }} role="status" aria-live="polite">
+          <div aria-hidden="true" style={{ fontSize: 44, marginBottom: 10 }}>📚</div>
+          <p style={{ fontSize: "var(--ec-fs-3)", opacity: 0.85 }}>Chargement…</p>
         </div>
       </div>
     );
   }
 
+  // Admin « Agir en tant que » : render the real dashboard AS the chosen
+  // teacher/parent, with a banner + one-click return. The admin's own session
+  // is untouched — we only swap which profile the dashboard runs on.
+  if (impersonation) {
+    const exit = () => setImpersonation(null);
+    return impersonation.role === "parent"
+      ? <Dashboard parent={impersonation.profile} impersonating impersonationName={impersonation.name} onExitImpersonation={exit} onLogout={exit} />
+      : <Dashboard teacher={impersonation.profile} impersonating impersonationName={impersonation.name} onExitImpersonation={exit} onLogout={exit} />;
+  }
+
   if (session && teacher) {
-    return <Dashboard teacher={teacher} onLogout={() => { clearGrant(); setSession(null); setTeacher(null); }} />;
+    return <Dashboard teacher={teacher}
+      onLogout={() => { clearGrant(); setSession(null); setTeacher(null); }}
+      onImpersonate={(role, profile, name) => setImpersonation({ role, profile, name })} />;
   }
 
   if (session && parent) {
     return <Dashboard parent={parent} onLogout={() => { clearGrant(); setSession(null); setParent(null); }} />;
   }
 
+  const isParentSignup = PROFILES_ENABLED && mode === "register" && accountType === "parent";
+
   return (
     <div style={{
-      minHeight: "100vh",
-      background: "linear-gradient(135deg, #0F4C35 0%, #1A7A56 50%, #0F4C35 100%)",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      padding: "1rem"
+      minHeight: "100vh", background: COLORS.page,
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
     }}>
-      <div style={{
-        width: "100%",
-        maxWidth: 420,
-        background: "white",
-        borderRadius: 16,
-        padding: "2.5rem 2rem",
-        boxShadow: "0 25px 50px rgba(0,0,0,0.3)"
-      }}>
-        <div style={{ textAlign: "center", marginBottom: "1.5rem" }}>
-          <div style={{ fontSize: 48, marginBottom: 8 }}>📚</div>
-          <h1 style={{ fontSize: 32, fontWeight: 800, color: "#0F4C35", margin: 0, letterSpacing: -1 }}>
-            EduCam
-          </h1>
-          <p style={{ color: "#6B7280", fontSize: 14, marginTop: 4 }}>
-            Plateforme éducative du Cameroun
-          </p>
-        </div>
+      <main style={{ width: "100%", maxWidth: 440 }}>
+        <div className="ec-card" style={{ padding: "26px 22px", borderRadius: 16 }}>
 
-        {/* Toggle between login and register */}
-        <div style={{
-          display: "flex", background: "#F3F4F6", borderRadius: 8,
-          padding: 4, marginBottom: 20
-        }}>
-          <button
-            onClick={() => { setMode("login"); setError(""); setSuccess(""); }}
-            style={{
-              flex: 1, padding: "10px", border: "none", borderRadius: 6,
-              fontSize: 14, fontWeight: 600, cursor: "pointer",
-              background: mode === "login" ? "white" : "transparent",
-              color: mode === "login" ? "#0F4C35" : "#6B7280",
-              boxShadow: mode === "login" ? "0 1px 3px rgba(0,0,0,0.1)" : "none"
-            }}
-          >
-            Se connecter
-          </button>
-          <button
-            onClick={() => { setMode("register"); setError(""); setSuccess(""); }}
-            style={{
-              flex: 1, padding: "10px", border: "none", borderRadius: 6,
-              fontSize: 14, fontWeight: 600, cursor: "pointer",
-              background: mode === "register" ? "white" : "transparent",
-              color: mode === "register" ? "#0F4C35" : "#6B7280",
-              boxShadow: mode === "register" ? "0 1px 3px rgba(0,0,0,0.1)" : "none"
-            }}
-          >
-            S'inscrire
-          </button>
-        </div>
-
-        {error && (
+          {/* Bandeau de marque */}
           <div style={{
-            background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8,
-            padding: "10px 14px", marginBottom: 16, fontSize: 13, color: "#DC2626"
+            background: COLORS.g700, borderRadius: 14,
+            display: "grid", placeItems: "center", color: "rgba(255,255,255,.75)",
+            fontSize: "var(--ec-fs-2)", textAlign: "center", padding: "24px 16px", marginBottom: 20,
           }}>
-            {error}
-          </div>
-        )}
-
-        {success && (
-          <div style={{
-            background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8,
-            padding: "10px 14px", marginBottom: 16, fontSize: 13, color: "#16A34A"
-          }}>
-            {success}
-          </div>
-        )}
-
-        {/* Registration-only fields */}
-        {mode === "register" && (
-          <>
-            {PROFILES_ENABLED && (
-              <div style={{ display: "flex", background: "#F3F4F6", borderRadius: 8, padding: 4, marginBottom: 16 }}>
-                <button type="button" onClick={() => { setAccountType("teacher"); setError(""); }}
-                  style={{ flex: 1, padding: "8px", border: "none", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer",
-                    background: accountType === "teacher" ? "white" : "transparent",
-                    color: accountType === "teacher" ? "#0F4C35" : "#6B7280",
-                    boxShadow: accountType === "teacher" ? "0 1px 3px rgba(0,0,0,0.1)" : "none" }}>Enseignant</button>
-                <button type="button" onClick={() => { setAccountType("parent"); setError(""); }}
-                  style={{ flex: 1, padding: "8px", border: "none", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer",
-                    background: accountType === "parent" ? "white" : "transparent",
-                    color: accountType === "parent" ? "#0F4C35" : "#6B7280",
-                    boxShadow: accountType === "parent" ? "0 1px 3px rgba(0,0,0,0.1)" : "none" }}>Parent</button>
+            {/* Emplacement de l'illustration à venir */}
+            <div>
+              <div aria-hidden="true" style={{ fontSize: "var(--ec-fs-7)", marginBottom: 6 }}>📚</div>
+              <div style={{ fontSize: "var(--ec-fs-5)", fontWeight: 800, color: "#fff", letterSpacing: "-.02em" }}>
+                EduCam
               </div>
+              <div style={{ fontSize: "var(--ec-fs-2)", marginTop: 3 }}>Plateforme éducative du Cameroun</div>
+            </div>
+          </div>
+
+          <h1 style={{ fontSize: FONT.xl, fontWeight: 800, letterSpacing: "-.03em", lineHeight: 1.2 }}>
+            {mode === "login" ? "Bienvenue sur EduCam" : "Créer votre compte"}
+          </h1>
+          <p style={{ fontSize: FONT.sm, color: COLORS.ink3, marginTop: 6, lineHeight: 1.5 }}>
+            {mode === "login"
+              ? "Connectez-vous pour retrouver vos leçons et votre emploi du temps."
+              : "Quelques informations, et vous pourrez commencer."}
+          </p>
+
+          {!online && (
+            <Callout tone="warn" icon="📡" style={{ marginTop: 16 }}>
+              Vous êtes hors ligne. La connexion nécessite un réseau.
+            </Callout>
+          )}
+
+          {error && (
+            <Callout tone="crit" icon="⚠" style={{ marginTop: 16 }}>{error}</Callout>
+          )}
+          {success && (
+            <Callout tone="brand" icon="✓" style={{ marginTop: 16 }}>{success}</Callout>
+          )}
+
+          <form onSubmit={submit} style={{ marginTop: 18 }}>
+            {/* Choix du rôle — d'abord, et non enfoui au milieu du formulaire */}
+            {mode === "register" && PROFILES_ENABLED && (
+              <ChoiceGroup
+                label="Vous êtes"
+                value={accountType}
+                onChange={(v) => { setAccountType(v); setError(""); }}
+                options={[
+                  { value: "teacher", label: "Enseignant", description: "Leçons, emploi du temps, résultats", icon: "🧑🏾‍🏫" },
+                  { value: "parent", label: "Parent", description: "Suivi de votre enfant", icon: "👨‍👩‍👦" },
+                ]}
+              />
             )}
 
-            <div style={{ marginBottom: 14 }}>
-              <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
-                Nom complet *
-              </label>
-              <input
-                type="text"
-                placeholder="Ex: Jean-Pierre Nguema"
+            {mode === "register" && (
+              <Field
+                label="Nom complet"
+                required
+                placeholder="Ex : Jean-Pierre Nguema"
+                autoComplete="name"
                 value={fullName}
                 onChange={(e) => setFullName(e.target.value)}
-                style={{
-                  width: "100%", padding: "12px 14px", border: "1.5px solid #D1D5DB",
-                  borderRadius: 8, fontSize: 14, outline: "none", boxSizing: "border-box"
-                }}
               />
-            </div>
-
-            {(!PROFILES_ENABLED || accountType === "teacher") && (
-              <>
-            <div style={{ marginBottom: 14 }}>
-              <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
-                Nom de l'école
-              </label>
-              <input
-                type="text"
-                placeholder="Ex: École Primaire de Bastos"
-                value={schoolName}
-                onChange={(e) => setSchoolName(e.target.value)}
-                style={{
-                  width: "100%", padding: "12px 14px", border: "1.5px solid #D1D5DB",
-                  borderRadius: 8, fontSize: 14, outline: "none", boxSizing: "border-box"
-                }}
-              />
-            </div>
-
-            <div style={{ marginBottom: 14 }}>
-              <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
-                Niveau enseigné
-              </label>
-              <select
-                value={level}
-                onChange={(e) => setLevel(e.target.value)}
-                style={{
-                  width: "100%", padding: "12px 14px", border: "1.5px solid #D1D5DB",
-                  borderRadius: 8, fontSize: 14, outline: "none", boxSizing: "border-box",
-                  background: "white", cursor: "pointer"
-                }}
-              >
-                <option value="ce1">CE1 — Primary 3</option>
-                <option value="ce2">CE2 — Primary 4</option>
-                <option value="cm1">CM1 — Primary 5</option>
-                <option value="cm2">CM2 — Primary 6</option>
-              </select>
-            </div>
-
-            {PROFILES_ENABLED && (
-              <div style={{ marginBottom: 14 }}>
-                <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
-                  Code école
-                </label>
-                <input
-                  type="text"
-                  placeholder="Code fourni par votre école"
-                  value={schoolCode}
-                  onChange={(e) => setSchoolCode(e.target.value)}
-                  style={{
-                    width: "100%", padding: "12px 14px", border: "1.5px solid #D1D5DB",
-                    borderRadius: 8, fontSize: 14, outline: "none", boxSizing: "border-box"
-                  }}
-                />
-              </div>
             )}
+
+            {mode === "register" && !isParentSignup && (
+              <>
+                <Field
+                  label="Nom de l'école"
+                  placeholder="Ex : École Primaire de Bastos"
+                  autoComplete="organization"
+                  value={schoolName}
+                  onChange={(e) => setSchoolName(e.target.value)}
+                />
+                <SelectField
+                  label="Niveau enseigné"
+                  value={level}
+                  onChange={(e) => setLevel(e.target.value)}
+                  options={[
+                    { value: "ce1", label: "CE1 — Primary 3" },
+                    { value: "ce2", label: "CE2 — Primary 4" },
+                    { value: "cm1", label: "CM1 — Primary 5" },
+                    { value: "cm2", label: "CM2 — Primary 6" },
+                  ]}
+                />
+                {PROFILES_ENABLED && (
+                  <Field
+                    label="Code école"
+                    placeholder="Code fourni par votre école"
+                    hint="Il relie votre compte à votre établissement et installe votre emploi du temps."
+                    value={schoolCode}
+                    onChange={(e) => setSchoolCode(e.target.value)}
+                  />
+                )}
               </>
             )}
 
-            {PROFILES_ENABLED && accountType === "parent" && (
-              <div style={{ marginBottom: 14 }}>
-                <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
-                  Code parents *
-                </label>
-                <input
-                  type="text"
-                  placeholder="Code fourni par l'enseignant de votre enfant"
-                  value={parentCode}
-                  onChange={(e) => setParentCode(e.target.value.toUpperCase())}
-                  style={{
-                    width: "100%", padding: "12px 14px", border: "1.5px solid #D1D5DB",
-                    borderRadius: 8, fontSize: 14, outline: "none", boxSizing: "border-box"
-                  }}
-                />
-              </div>
+            {isParentSignup && (
+              <Field
+                label="Code de votre enfant"
+                required
+                placeholder="Code personnel reçu de l'école"
+                hint="Ce code figure sur le document remis par l'enseignant de votre enfant."
+                value={parentCode}
+                onChange={(e) => setParentCode(e.target.value.toUpperCase())}
+              />
             )}
-          </>
-        )}
 
-        {/* Shared fields */}
-        <div style={{ marginBottom: 14 }}>
-          <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
-            Adresse email *
-          </label>
-          <input
-            type="email"
-            placeholder="enseignant@ecole.cm"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            style={{
-              width: "100%", padding: "12px 14px", border: "1.5px solid #D1D5DB",
-              borderRadius: 8, fontSize: 14, outline: "none", boxSizing: "border-box"
-            }}
-          />
+            <Field
+              label="Adresse email"
+              required
+              type="email"
+              inputMode="email"
+              placeholder="enseignant@ecole.cm"
+              autoComplete="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+
+            <PasswordField
+              required
+              placeholder={mode === "register" ? "Minimum 6 caractères" : "••••••••"}
+              hint={mode === "register" ? "Au moins 6 caractères." : undefined}
+              autoComplete={mode === "register" ? "new-password" : "current-password"}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+
+            <Button type="submit" block disabled={loading} style={{ marginTop: 6 }}>
+              {loading
+                ? (mode === "login" ? "Connexion…" : "Inscription…")
+                : (mode === "login" ? "Se connecter" : "Créer mon compte")}
+            </Button>
+          </form>
+
+          <div style={{ textAlign: "center", marginTop: 18, fontSize: FONT.sm, color: COLORS.ink3 }}>
+            {mode === "login" ? "Pas encore de compte ? " : "Vous avez déjà un compte ? "}
+            <button
+              type="button"
+              className="ec-link"
+              style={{ minHeight: 36 }}
+              onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(""); setSuccess(""); }}
+            >
+              {mode === "login" ? "S'inscrire" : "Se connecter"}
+            </button>
+          </div>
         </div>
-
-        <div style={{ marginBottom: 20 }}>
-          <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
-            Mot de passe *
-          </label>
-          <input
-            type="password"
-            placeholder={mode === "register" ? "Minimum 6 caractères" : "••••••••"}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                mode === "login" ? handleLogin() : handleRegister();
-              }
-            }}
-            style={{
-              width: "100%", padding: "12px 14px", border: "1.5px solid #D1D5DB",
-              borderRadius: 8, fontSize: 14, outline: "none", boxSizing: "border-box"
-            }}
-          />
-        </div>
-
-        <button
-          onClick={mode === "login" ? handleLogin : handleRegister}
-          disabled={loading}
-          style={{
-            width: "100%", padding: "14px",
-            background: loading ? "#6B7280" : "#0F4C35",
-            color: "white", border: "none", borderRadius: 8,
-            fontSize: 16, fontWeight: 700,
-            cursor: loading ? "default" : "pointer"
-          }}
-        >
-          {loading
-            ? (mode === "login" ? "Connexion..." : "Inscription...")
-            : (mode === "login" ? "Se connecter" : "Créer mon compte")
-          }
-        </button>
-      </div>
+      </main>
     </div>
   );
 }

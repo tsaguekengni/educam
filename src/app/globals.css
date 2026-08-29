@@ -1,18 +1,899 @@
 @import "tailwindcss";
 
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
+/* ==========================================================================
+   EduCam — jetons de design et base
+   Direction « VIBRANT », priorité écran d'ordinateur (décision du 2026-08-12).
+   Référence : claude/EduCam_Direction_Bureau.html, variante « B — Vibrant »
+   Spécification : claude/EduCam_Direction_Bureau_Spec.md
+
+   Trois principes que ce fichier applique :
+   1. Les bordures doivent SE VOIR (l'ancienne #E4E7EB faisait 1,24:1 sur blanc).
+   2. Plus grand ET plus dense : l'échelle typographique grandit à partir de
+      900 px, mais les paddings de ligne se resserrent (11 px au lieu de 16).
+   3. Le TÉLÉPHONE NE BOUGE PAS : toutes les nouvelles tailles sont dans
+      `@media (min-width: 900px)`. Les couleurs, elles, changent partout —
+      elles améliorent aussi le mobile.
+   ========================================================================== */
+
+:root {
+  /* --- Échelle verte (marque) — inchangée --- */
+  --ec-g50:  #E8F5EF;
+  --ec-g100: #C7E7DA;
+  --ec-g200: #97D3BD;
+  --ec-g300: #5FBC9C;
+  --ec-g400: #2A9C79;
+  --ec-g500: #007A5E;   /* PRIMAIRE — vert du drapeau */
+  --ec-g600: #0A6247;   /* survol / appui */
+  --ec-g700: #0F4C35;   /* vert historique — fonds sombres */
+  --ec-g800: #0A3626;
+
+  /* --- Surfaces --- */
+  --ec-page:     #E4EAE3;   /* tiède : 1,25:1 contre la carte blanche */
+  --ec-card:     #FFFFFF;
+  --ec-border:   #C0C8D1;   /* 1,69:1 — enfin visible à 60 cm */
+  --ec-border-2: #A9B3BF;   /* bordure forte, séparateurs structurants */
+  --ec-divider:  #DCE2E8;   /* filet entre lignes de liste */
+  --ec-panel:    #F2F6F1;   /* fond de champ, en-tête de tableau */
+  --ec-track:    #E3E8EC;   /* fond de jauge (+ bordure 1px --ec-divider) */
+
+  /* --- Encre --- */
+  --ec-ink:   #0D1219;
+  --ec-ink-2: #3A4552;
+  --ec-ink-3: #57616E;   /* 6,25:1 sur blanc, contre 4,74 auparavant */
+
+  /* --- Statuts : réservés, jamais décoratifs. INCHANGÉS. --- */
+  --ec-good:      #0A6E2E;
+  --ec-warn:      #8A5A06;
+  --ec-warn-bg:   #FDF1DC;
+  --ec-crit:      #A0231A;
+  --ec-crit-bg:   #FCE9E7;
+  --ec-crit-brd:  #F3C9C4;
+
+  /* --- Données : l'écart au calendrier n'est JAMAIS rouge/vert. INCHANGÉ. ---
+         Ajout 2026-08-13 (« Vibrant Command ») : l'ENCRE reste la même des deux
+         côtés, seul le FOND encode l'intensité. Un ton moyen plus clair
+         (#C4703F) tombait à 3,29:1 — écarté. Mesures : retard fort 4,76:1,
+         retard léger 5,56:1, avance 5,66:1, « à jour » 8,47:1. --- */
+  --ec-neg: #A83E1E;
+  --ec-pos: #0B5FA5;
+  --ec-neg-bg:   #F5DCD2;   /* retard marqué (≥ 2 semaines) */
+  --ec-neg-brd:  #C9755A;
+  --ec-neg2-bg:  #FBF0EB;   /* retard léger (1 semaine) */
+  --ec-neg2-brd: #E0B7A6;
+  --ec-pos-bg:   #E6EFF8;   /* avance */
+  --ec-pos-brd:  #A9C6E2;
+  --ec-mid:      #EDEFF3;   /* à jour — neutre, pas une valeur de l'échelle */
+  --ec-mid-brd:  #C7CDD6;
+  /* « pas encore commencé » : un vide n'est pas une valeur. Fond de carte,
+     bordure EN POINTILLÉ — c'est la forme, pas la couleur, qui le distingue. */
+
+  /* --- Surfaces teintées par DOMAINE (habillage de contexte, PAS un statut).
+         Une tuile ambre ne signifie pas « alerte » : l'alerte reste
+         --ec-warn / --ec-crit. --- */
+  --ec-tint-green:      #E4F1EB;  --ec-tint-green-brd:  #B4D8C8;
+  --ec-tint-blue:       #E3EEF7;  --ec-tint-blue-brd:   #B5CFE4;
+  --ec-tint-amber:      #FAEEE0;  --ec-tint-amber-brd:  #E6CDA9;
+  --ec-tint-violet:     #EEEAF7;  --ec-tint-violet-brd: #CBC2E6;
+
+  /* --- Carte héros « Prochain cours » — vert CLAIR teinté (demande de Maxime,
+         pas de vert foncé). Encre : titre 13,9:1 · secondaire #35414E 7,7:1. --- */
+  --ec-hero:      #C6E5D6;
+  --ec-hero-brd:  #8CC0A6;
+  --ec-hero-ink:  #0D1219;
+  --ec-hero-ink2: #35414E;
+
+  /* --- Rail latéral sombre (≥ 900 px) --- */
+  --ec-rail:        250px;   /* 268 → 250 : le rail flotte, il gagne 16 px de
+                                marge de chaque côté et reste moins large qu'avant */
+  --ec-rail-gap:    16px;
+  --ec-rail-bg:     linear-gradient(180deg, #0F4C35 0%, #07281F 100%);
+  --ec-rail-brd:    #061F18;
+  --ec-rail-ink:    #AFD3C3;
+  --ec-rail-ink-on: #FFFFFF;
+  --ec-rail-on-bg:  #0B7A57;   /* pilule pleine — blanc dessus à 5,34:1.
+                                  Le jaune n'y passe PAS (3,63:1) : il reste
+                                  réservé au filet de la marque. */
+  --ec-rail-sub:    #8CBFA9;   /* 4,48 → 4,82:1 sur le haut du dégradé */
+  --ec-rail-rule:   rgba(255, 255, 255, .14);
+
+  /* --- Jaune du drapeau : UNIQUEMENT sur surface sombre.
+         1,47:1 sur blanc (illisible) mais 6,78:1 sur #0F4C35.
+         Admis sur fond clair seulement comme filet décoratif de 3 px. --- */
+  --ec-flag-yellow: #FCD116;
+
+  /* --- Rayons (échelle élargie le 2026-08-13) --- */
+  --ec-r-sm: 8px;
+  --ec-r:    12px;
+  --ec-r-lg: 16px;
+  --ec-r-xl: 20px;      /* cartes de premier plan, rail flottant */
+  --ec-r-pill: 999px;
+
+  /* --- Espacement --- */
+  --ec-s1: 4px;  --ec-s2: 8px;  --ec-s3: 12px; --ec-s4: 16px;
+  --ec-s5: 20px; --ec-s6: 24px; --ec-s7: 32px; --ec-s8: 44px;
+
+  /* --- Ombres : l'ombre ne REMPLACE plus la bordure, elle s'y ajoute --- */
+  --ec-shadow:    0 1px 3px rgba(13, 18, 25, .10);
+  --ec-shadow-lg: 0 4px 14px rgba(13, 18, 25, .10);
+  /* Ombre à deux couches : une diffuse pour l'assise, une courte pour le
+     contact. Elle s'AJOUTE à la bordure, elle ne la remplace pas. */
+  --ec-shadow-float: 0 18px 30px -12px rgba(13, 18, 25, .13),
+                     0 6px 12px -6px rgba(13, 18, 25, .07);
+  --ec-shadow-rail:  0 18px 28px -10px rgba(7, 40, 31, .35);
+
+  /* --- Typographie (7 pas) — valeurs TÉLÉPHONE, inchangées.
+         Les valeurs d'ordinateur sont plus bas, dans la requête média unique.
+         Ces jetons sont lus aussi bien par le CSS que par les styles en ligne
+         React (via `FONT` dans lib/theme.js), ce qui permet à une requête
+         média de reprendre des tailles écrites dans du JSX. --- */
+  --ec-fs-1: 10.5px; --ec-fs-2: 12.5px; --ec-fs-3: 13.5px; --ec-fs-4: 16px;
+  --ec-fs-5: 21px;   --ec-fs-6: 24px;   --ec-fs-7: 32px;
+
+  /* Inter est auto-hébergée (voir layout.js). La pile de repli est identique
+     sur Android, Windows et iOS — l'ancien `Segoe UI` seul retombait sur
+     Roboto côté Android sans qu'on le sache. */
+  --ec-font: "Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* Zone sûre Android / iOS */
+  --ec-safe-b: env(safe-area-inset-bottom, 0px);
 }
+
+/* ==========================================================================
+   LA REQUÊTE MÉDIA UNIQUE — tout l'écran grandit d'un coup.
+   Elle ne redéfinit que les sept jetons : parce que `FONT` (theme.js) les
+   expose en `var()`, elle atteint aussi les ~330 tailles écrites en dur dans
+   les styles en ligne React, qu'aucune requête média ne pouvait reprendre.
+   ========================================================================== */
+@media (min-width: 900px) {
+  :root {
+    --ec-fs-1: 11.5px;  /* intertitre capitales */
+    --ec-fs-2: 13px;    /* méta */
+    --ec-fs-3: 15px;    /* corps, ligne de liste */
+    --ec-fs-4: 17px;
+    --ec-fs-5: 24px;
+    --ec-fs-6: 30px;    /* grands nombres */
+    --ec-fs-7: 36px;
+  }
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
 
 body {
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-  background: #F9FAFB;
-  color: #1F2937;
+  font-family: var(--ec-font);
+  background: var(--ec-page);
+  color: var(--ec-ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* La maquette activait deux variantes OpenType d'Inter, et c'est ce qui
+     donnait son allure au texte — la famille, elle, était déjà la même :
+       cv11 → « a » à un seul étage, plus géométrique ;
+       ss01 → chiffres et signes désambiguïsés (1 / l / I).
+     Sans ces deux lignes on a bien Inter, mais pas le même dessin. */
+  font-feature-settings: "cv11", "ss01";
 }
 
-a {
-  text-decoration: none;
-  color: inherit;
+a { text-decoration: none; color: inherit; }
+
+/* --------------------------------------------------------------------------
+   Focus visible — un seul anneau, partout.
+   -------------------------------------------------------------------------- */
+:focus-visible {
+  outline: 3px solid var(--ec-g500);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
+:focus:not(:focus-visible) { outline: none; }
+
+button, input, select, textarea { font-family: inherit; }
+button { cursor: pointer; }
+
+/* Cibles tactiles : plancher de 44 px, en règle GLOBALE depuis le lot E : `admin.js` est migré, plus aucun écran n'a
+   de bouton de 16 ou 24 px qu'elle déformerait. Les exceptions explicites
+   (liens en ligne, boutons compacts) déclarent leur propre `min-height`. */
+button, [role="button"], .ec-btn, .ec-row, .ec-choice, .ec-bottomnav button, .ec-input {
+  min-height: 44px;
+}
+.ec-btn--sm { min-height: 40px; }
+/* Un lien-bouton dans une phrase ne doit pas devenir un pavé de 44 px. */
+.ec-link, .ec-more, .ec-sched__rt { min-height: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    transition-duration: .01ms !important;
+  }
+}
+
+/* ==========================================================================
+   Classes de composants
+   ========================================================================== */
+
+/* --- Boutons --- */
+.ec-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--ec-s2);
+  padding: 12px var(--ec-s4); border: 1px solid transparent; border-radius: 10px;
+  background: var(--ec-g500); color: #fff;
+  font-size: 14px; font-weight: 700; line-height: 1.2;
+  transition: background .15s ease;
+}
+.ec-btn:hover:not(:disabled) { background: var(--ec-g600); }
+.ec-btn:active:not(:disabled) { background: var(--ec-g700); }
+.ec-btn:disabled { background: var(--ec-ink-3); cursor: default; }
+.ec-btn--block { display: flex; width: 100%; }
+/* Secondaire : transparent, bordure visible, encre normale (aucun bouton jaune) */
+.ec-btn--ghost {
+  background: var(--ec-card); color: var(--ec-ink);
+  border: 1px solid var(--ec-border);
+}
+.ec-btn--ghost:hover:not(:disabled) { background: var(--ec-panel); border-color: var(--ec-border-2); }
+.ec-btn--ghost:active:not(:disabled) { background: var(--ec-g50); }
+.ec-btn--danger {
+  background: var(--ec-card); color: var(--ec-crit);
+  border: 1px solid var(--ec-crit-brd);
+}
+.ec-btn--danger:hover:not(:disabled) { background: var(--ec-crit-bg); }
+.ec-btn--danger-solid { background: var(--ec-crit); color: #fff; }
+.ec-btn--danger-solid:hover:not(:disabled) { background: #8A1D15; }
+.ec-btn--sm { padding: 9px 13px; font-size: var(--ec-fs-2); min-height: 40px; }
+@media (min-width: 900px) {
+  .ec-btn { font-size: 14.5px; padding: 10px 16px; }
+}
+
+/* --- Carte : bordure RÉELLE + ombre (l'ombre ne remplace plus la bordure) --- */
+.ec-card {
+  background: var(--ec-card); border: 1px solid var(--ec-border);
+  border-radius: var(--ec-r); padding: var(--ec-s4); box-shadow: var(--ec-shadow);
+}
+@media (min-width: 900px) { .ec-card { padding: 18px; } }
+
+/* Titre de carte, avec filet décoratif de 3 px.
+   Le jaune est ici purement ornemental : il ne porte aucune information. */
+.ec-cardtitle {
+  position: relative; padding-left: 11px;
+  font-size: var(--ec-fs-4); font-weight: 700; letter-spacing: -.015em;
+}
+.ec-cardtitle::before {
+  content: ""; position: absolute; left: 0; top: .18em; bottom: .18em;
+  width: 3px; border-radius: 2px; background: var(--ec-flag-yellow);
+}
+@media (min-width: 900px) { .ec-cardtitle { font-size: 19px; } }
+
+/* En-tête de carte : titre + lien d'action aligné à droite */
+.ec-cardhd { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.ec-cardhd .ec-more {
+  margin-left: auto; font-size: var(--ec-fs-2); font-weight: 700;
+  color: var(--ec-g600); white-space: nowrap;
+}
+
+/* --- Champ de formulaire --- */
+.ec-input {
+  width: 100%; padding: 12px 13px; min-height: 46px;
+  border: 1px solid var(--ec-border-2); border-radius: 10px;
+  font-size: 14px; background: var(--ec-card); color: var(--ec-ink);
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.ec-input:hover { border-color: var(--ec-border-2); }
+.ec-input:focus {
+  outline: none; border-color: var(--ec-g500);
+  box-shadow: 0 0 0 3px var(--ec-g100);
+}
+.ec-input[aria-invalid="true"] { border-color: var(--ec-crit-brd); }
+.ec-input::placeholder { color: var(--ec-ink-3); }
+@media (min-width: 900px) { .ec-input { font-size: 15px; } }
+
+/* --- Ligne de liste cliquable --- */
+.ec-row {
+  display: flex; align-items: center; gap: var(--ec-s3);
+  width: 100%; text-align: left;
+  background: var(--ec-card); border: 1px solid var(--ec-border);
+  border-radius: 10px; padding: var(--ec-s3);
+  transition: border-color .15s ease, background .15s ease;
+}
+.ec-row:hover { border-color: var(--ec-g300); background: var(--ec-g50); }
+.ec-row:active { background: var(--ec-g100); }
+
+/* Barre de matière de 4 px, à gauche de la ligne */
+.ec-row__bar { width: 4px; align-self: stretch; border-radius: 3px; flex: 0 0 4px; }
+
+/* Les tailles de la ligne vivent ICI et non en style en ligne : un style en
+   ligne l'emporterait sur la requête média et la ligne resterait à 13,5 px. */
+.ec-row__title { font-size: var(--ec-fs-3); }
+.ec-row__meta  { font-size: var(--ec-fs-2); }
+
+/* --- Carte de rôle / option sélectionnable --- */
+.ec-choice {
+  display: flex; align-items: center; gap: var(--ec-s3);
+  width: 100%; text-align: left; padding: var(--ec-s3);
+  border: 1px solid var(--ec-border-2); border-radius: 11px;
+  background: var(--ec-card); transition: all .15s ease;
+}
+.ec-choice:hover { border-color: var(--ec-g300); }
+.ec-choice[aria-pressed="true"], .ec-choice[data-selected="true"] {
+  border-color: var(--ec-g500); background: var(--ec-g50);
+  box-shadow: 0 0 0 2px var(--ec-g100);
+}
+
+/* --- Lien --- */
+.ec-link {
+  color: var(--ec-g600); font-weight: 700;
+  text-decoration: underline; text-underline-offset: 3px;
+  background: none; border: 0; padding: 0; font-size: inherit;
+}
+.ec-link:hover { color: var(--ec-g700); }
+
+/* --- Grilles --------------------------------------------------------------
+   Sur téléphone : comportement actuel conservé (une colonne, gouttière 12 px).
+   À partir de 900 px : vraie grille de 12 colonnes, pilotée par `.ec-c*`.
+   Les appels existants qui posent leur propre `gridTemplateColumns` en style
+   en ligne restent prioritaires — ils ne sont donc pas affectés.
+   -------------------------------------------------------------------------- */
+.ec-grid { display: grid; gap: var(--ec-s3); }
+.ec-grid--auto { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.ec-grid--wide { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+
+@media (min-width: 900px) {
+  .ec-grid { grid-template-columns: repeat(12, 1fr); gap: 18px; }
+  .ec-grid--auto { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .ec-grid--wide { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+}
+
+.ec-c12 { grid-column: span 12 } .ec-c8 { grid-column: span 8 }
+.ec-c7  { grid-column: span 7 }  .ec-c6 { grid-column: span 6 }
+.ec-c5  { grid-column: span 5 }  .ec-c4 { grid-column: span 4 }
+.ec-c3  { grid-column: span 3 }
+@media (max-width: 1250px) {
+  .ec-c8, .ec-c7, .ec-c6, .ec-c5 { grid-column: span 12 }
+  .ec-c4, .ec-c3 { grid-column: span 6 }
+}
+@media (max-width: 899px) {
+  .ec-c12, .ec-c8, .ec-c7, .ec-c6, .ec-c5, .ec-c4, .ec-c3 { grid-column: auto }
+}
+
+/* --- Squelette de chargement --- */
+.ec-skeleton {
+  background: linear-gradient(90deg, var(--ec-track) 25%, #D6DDE4 37%, var(--ec-track) 63%);
+  background-size: 400% 100%;
+  animation: ec-shimmer 1.4s ease infinite;
+  border-radius: var(--ec-r-sm);
+}
+@keyframes ec-shimmer { 0% { background-position: 100% 50% } 100% { background-position: 0 50% } }
+
+/* --- Feuille modale (confirmation) --- */
+.ec-sheet-backdrop {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(13, 18, 25, .48);
+  display: flex; align-items: flex-end; justify-content: center;
+}
+.ec-sheet {
+  background: var(--ec-card); width: 100%; max-width: 480px;
+  border-radius: var(--ec-r-lg) var(--ec-r-lg) 0 0;
+  padding: var(--ec-s5) var(--ec-s4) calc(var(--ec-s5) + var(--ec-safe-b));
+}
+@media (min-width: 560px) {
+  .ec-sheet-backdrop { align-items: center; }
+  .ec-sheet { border-radius: var(--ec-r-lg); margin: var(--ec-s4); }
+}
+
+/* --------------------------------------------------------------------------
+   Navigation — barre basse sur téléphone (INCHANGÉE),
+   RAIL LATÉRAL SOMBRE à partir de 900 px.
+   -------------------------------------------------------------------------- */
+.ec-bottomnav {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+  display: flex; background: var(--ec-card);
+  border-top: 1px solid var(--ec-border);
+  padding: 7px 4px calc(11px + var(--ec-safe-b));
+}
+.ec-bottomnav button {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px;
+  background: none; border: 0; padding: 6px 2px; min-height: 52px;
+  font-size: 11px; font-weight: 600; color: var(--ec-ink-3); line-height: 1.35;
+}
+.ec-bottomnav button[aria-current="page"] { color: var(--ec-g600); }
+.ec-nav-ico { font-size: 21px; line-height: 1; }
+.ec-nav-brand { display: none; }
+.ec-nav-sect { display: none; }
+.ec-nav-foot { display: none; }
+
+@media (min-width: 900px) {
+  /* Rail FLOTTANT (2026-08-13) : détaché des bords, coins arrondis, ombre
+     portée. Il est plus étroit qu'avant (250 au lieu de 268) : marges
+     comprises il coûte 282 px au lieu de 268, mais l'écran y gagne en
+     respiration et le contenu reste au-dessus de 1000 px à 1366. */
+  .ec-bottomnav {
+    top: var(--ec-rail-gap); bottom: var(--ec-rail-gap);
+    left: var(--ec-rail-gap); right: auto; width: var(--ec-rail);
+    flex-direction: column; align-items: stretch; gap: 5px;
+    border-top: 0; border: 0; border-radius: var(--ec-r-xl);
+    background: var(--ec-rail-bg);
+    box-shadow: var(--ec-shadow-rail);
+    padding: 20px 14px 18px;
+    overflow-y: auto;
+  }
+  .ec-bottomnav button {
+    flex: 0 0 auto; flex-direction: row; justify-content: flex-start;
+    gap: 11px; padding: 0 14px; border-radius: var(--ec-r-pill);
+    font-size: 14px; font-weight: 600; min-height: 44px; text-align: left;
+    color: var(--ec-rail-ink);
+  }
+  .ec-bottomnav button:hover {
+    background: rgba(255, 255, 255, .07); color: var(--ec-rail-ink-on);
+  }
+  /* Pilule pleine. Le jaune du drapeau ne tient PAS ici (3,63:1 sur #0B7A57) :
+     l'entrée active se signale par la pilule et le blanc, pas par la couleur
+     d'une icône. */
+  .ec-bottomnav button[aria-current="page"] {
+    background: var(--ec-rail-on-bg); color: var(--ec-rail-ink-on); font-weight: 700;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, .28);
+  }
+  .ec-nav-ico { font-size: 19px; width: 22px; text-align: center; flex: none; }
+
+  /* Marque : pastille JAUNE sur fond vert profond — 6,78:1, la seule place
+     où le jaune du drapeau porte quelque chose. */
+  .ec-nav-brand {
+    display: flex; align-items: center; gap: 11px;
+    padding: 2px 6px 10px;
+  }
+  .ec-nav-brand span:first-child {
+    width: 36px; height: 36px; border-radius: 10px; flex: none;
+    background: linear-gradient(135deg, var(--ec-g500) 0%, var(--ec-g700) 100%);
+    color: #fff; display: grid; place-items: center; font-weight: 800; font-size: 14px;
+    box-shadow: 0 0 0 1px rgba(252, 209, 22, .35), 0 6px 14px rgba(0, 0, 0, .3);
+  }
+  /* Le jaune du drapeau passe du fond au FILET : il reste présent — c'est la
+     signature — mais il ne porte plus de texte. */
+  .ec-nav-brand b::after {
+    content: ""; display: block; width: 26px; height: 3px; border-radius: 2px;
+    background: var(--ec-flag-yellow); margin: 5px 0 3px;
+  }
+  .ec-nav-brand b {
+    font-size: 15.5px; font-weight: 700; letter-spacing: -.01em;
+    color: var(--ec-rail-ink-on); display: block;
+  }
+  .ec-nav-brand i {
+    display: block; font-size: 12px; font-style: normal; color: var(--ec-rail-sub);
+  }
+
+  /* Intertitres du rail : « MA CLASSE », « SUIVI » */
+  .ec-nav-sect {
+    display: block; font-size: 10.5px; font-weight: 800; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--ec-rail-sub); padding: 15px 14px 5px;
+  }
+
+  /* Pied de rail : identité de l'utilisateur */
+  .ec-nav-foot {
+    display: flex; align-items: center; gap: 10px;
+    margin-top: auto; padding: 10px;
+    background: rgba(255, 255, 255, .06);
+    border: 1px solid var(--ec-rail-rule); border-radius: var(--ec-r);
+  }
+  .ec-nav-foot span:first-child {
+    width: 32px; height: 32px; border-radius: 50%; flex: none;
+    background: rgba(255, 255, 255, .16); color: #fff;
+    display: grid; place-items: center; font-weight: 700; font-size: 12.5px;
+  }
+  .ec-nav-foot b {
+    display: block; font-size: 13.5px; font-weight: 650; color: var(--ec-rail-ink-on);
+  }
+  .ec-nav-foot i {
+    display: block; font-size: 12px; font-style: normal; color: var(--ec-rail-sub);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Enveloppe applicative et zone de contenu
+   -------------------------------------------------------------------------- */
+.ec-app { min-height: 100vh; background: var(--ec-page); }
+
+.ec-main {
+  max-width: 820px; margin: 0 auto;
+  padding: 18px 14px calc(100px + var(--ec-safe-b));
+}
+@media (min-width: 700px) {
+  .ec-main { padding: 26px 22px calc(100px + var(--ec-safe-b)); }
+}
+@media (min-width: 900px) {
+  .ec-app { padding-left: calc(var(--ec-rail) + var(--ec-rail-gap) * 2); }
+  /* Pleine largeur : 1180 px centrés perdaient 260 px sur un 1440 et 740 sur un 1920 */
+  .ec-main { max-width: 1620px; padding: 22px 26px 60px; }
+}
+
+/* --------------------------------------------------------------------------
+   Barre supérieure d'écran (≥ 900 px) — titre, recherche, état, niveau.
+   Sur téléphone, l'en-tête garde sa forme actuelle.
+   -------------------------------------------------------------------------- */
+@media (min-width: 900px) {
+  .ec-topbar {
+    height: 66px; display: flex; align-items: center; gap: 16px;
+    background: var(--ec-card); border-bottom: 1px solid var(--ec-border);
+    padding: 0 26px; position: sticky; top: 0; z-index: 8;
+  }
+  .ec-topbar__search {
+    margin-left: auto; display: flex; align-items: center; gap: 9px;
+    min-width: 300px; background: var(--ec-panel);
+    border: 1px solid var(--ec-border); border-radius: 8px;
+    padding: 9px 12px; color: var(--ec-ink-3); font-size: 14px;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   LOT B — Accueil enseignant
+   -------------------------------------------------------------------------- */
+
+/* Blocs réservés au grand écran : ils n'apparaissent pas sur téléphone, dont
+   le rendu ne doit pas bouger. */
+.ec-deskonly { display: none; }
+@media (min-width: 900px) { .ec-deskonly { display: block; } }
+
+/* --- Carte héros « Prochain cours » ---------------------------------------
+   Vert CLAIR teinté #C6E5D6 (et non vert foncé) : demande explicite de Maxime.
+   Encre vérifiée : titre 13,9:1 · secondaire #35414E 7,7:1 sur ce fond. */
+.ec-hero {
+  background: var(--ec-hero); border: 1px solid var(--ec-hero-brd);
+  border-radius: var(--ec-r); box-shadow: var(--ec-shadow);
+  padding: var(--ec-s4); color: var(--ec-hero-ink);
+}
+.ec-hero__when, .ec-hero__side { display: none; }
+
+@media (min-width: 900px) {
+  .ec-hero { display: flex; gap: 22px; align-items: stretch; padding: 18px; }
+  .ec-hero__when {
+    display: block; flex: 0 0 138px;
+    border-right: 1px solid var(--ec-hero-brd); padding-right: 20px;
+  }
+  /* « 09 h 00 » à 32 px ne tenait pas dans 118 px et passait à la ligne :
+     l'heure du prochain cours doit se lire d'un coup d'œil. */
+  .ec-hero__when b {
+    display: block; font-size: 32px; font-weight: 750;
+    letter-spacing: -.03em; line-height: 1; white-space: nowrap;
+  }
+  .ec-hero__when i {
+    display: block; font-style: normal; font-size: var(--ec-fs-2);
+    color: var(--ec-hero-ink2); margin-top: 5px; line-height: 1.4;
+  }
+  .ec-hero__body { flex: 1; min-width: 0; }
+}
+/* La colonne de droite n'apparaît qu'à partir de 1750 px. La spécification
+   disait 1520, mais elle raisonnait sur la largeur de la fenêtre : le rail de
+   268 px et les marges retirés, à 1600 px le héros ne fait plus que ~870 px et
+   la colonne de droite comprimait le titre du cours sur deux lignes, ce qui
+   faisait perdre deux blocs sous la ligne de flottaison. */
+@media (min-width: 1750px) {
+  .ec-hero__side {
+    display: flex; flex: 0 0 232px; flex-direction: column;
+    justify-content: center; gap: 10px;
+    border-left: 1px solid var(--ec-hero-brd); padding-left: 20px;
+  }
+  .ec-hero__side div { display: flex; justify-content: space-between; gap: 10px; font-size: var(--ec-fs-2); }
+  .ec-hero__side span { color: var(--ec-hero-ink2); }
+  .ec-hero__side b { font-weight: 650; white-space: nowrap; }
+}
+/* Sous 1250 px le héros repasse en bloc : plus de colonne d'heure. */
+@media (max-width: 1250px) {
+  .ec-hero { display: block; }
+  .ec-hero__when { display: none; }
+}
+
+/* Badge du héros — vert profond, texte blanc (le jaune serait illisible ici) */
+.ec-hero__badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11.5px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase;
+  background: var(--ec-g700); color: #fff; padding: 4px 10px; border-radius: 999px;
+}
+
+/* Contrepartie de `.ec-deskonly` : le rendu téléphone d'aujourd'hui. */
+.ec-mobonly { display: grid; gap: 8px; }
+@media (min-width: 900px) { .ec-mobonly { display: none; } }
+
+/* --- Suite de la journée : gouttière d'heures, une ligne par créneau --------
+   Plus dense que `ListRow` : sur une colonne de 4/12 à 1366 px, un titre
+   « matière — composante » passait à deux lignes et gonflait la carte. */
+.ec-sched { display: none; list-style: none; }
+@media (min-width: 900px) { .ec-sched { display: block; } }
+.ec-sched li {
+  display: flex; align-items: center; gap: 11px;
+  padding: 10px 0; border-top: 1px solid var(--ec-divider);
+}
+.ec-sched li:first-child { border-top: 0; }
+.ec-sched__time {
+  flex: 0 0 52px; font-variant-numeric: tabular-nums;
+  font-weight: 650; font-size: var(--ec-fs-3); color: var(--ec-ink-2);
+}
+.ec-sched__t { font-weight: 600; font-size: var(--ec-fs-3); letter-spacing: -.01em; }
+.ec-sched__s { font-size: var(--ec-fs-2); color: var(--ec-ink-3); margin-top: 1px; }
+.ec-sched__rt { margin-left: auto; font-size: var(--ec-fs-2); color: var(--ec-ink-3); white-space: nowrap; }
+
+/* --- Accès rapides : 6 colonnes compactes sur grand écran -------------------
+   Sur téléphone, la liste actuelle (`ListRow`) est conservée telle quelle. */
+.ec-quick { display: none; }
+@media (min-width: 900px) {
+  .ec-quick { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+}
+@media (min-width: 1250px) {
+  .ec-quick { grid-template-columns: repeat(6, 1fr); }
+}
+.ec-quicklist { display: grid; gap: 8px; }
+@media (min-width: 900px) { .ec-quicklist { display: none; } }
+
+.ec-qi {
+  background: var(--ec-card); border: 1px solid var(--ec-border);
+  border-radius: var(--ec-r-sm); padding: 14px; min-height: 44px;
+  display: flex; flex-direction: column; gap: 9px;
+  text-align: left; color: var(--ec-ink);
+  transition: border-color .15s ease, background .15s ease;
+}
+.ec-qi:hover { border-color: var(--ec-g300); background: var(--ec-g50); }
+.ec-qi__ic {
+  width: 38px; height: 38px; border-radius: 9px; flex: none;
+  display: grid; place-items: center; font-size: 18px;
+}
+.ec-qi b { font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
+.ec-qi i { font-style: normal; font-size: var(--ec-fs-2); color: var(--ec-ink-3); line-height: 1.35; }
+
+/* --- Visible uniquement pour les lecteurs d'écran --- */
+.ec-sr {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* --- Icône de ligne de liste --- */
+.ec-row__ico {
+  width: 38px; height: 38px; border-radius: 10px; flex: none;
+  display: grid; place-items: center; font-size: 15px; font-weight: 800;
+}
+/* Plus grand ET plus dense : le titre grandit, le padding vertical se resserre. */
+@media (min-width: 900px) {
+  .ec-row__ico { width: 42px; height: 42px; border-radius: 11px; font-size: 17px; }
+  .ec-row { padding: 11px var(--ec-s4); }
+  .ec-row__title { font-size: 16.5px; }
+  .ec-row__meta { font-size: 13px; }
+}
+
+/* --- Titre d'écran --- */
+.ec-h1 { font-size: 22px; font-weight: 800; letter-spacing: -.03em; line-height: 1.2; }
+@media (min-width: 900px) { .ec-h1 { font-size: 30px; letter-spacing: -.02em; } }
+.ec-sub { font-size: 13px; color: var(--ec-ink-3); margin-top: 5px; }
+@media (min-width: 900px) { .ec-sub { font-size: 13px; margin-top: 2px; } }
+
+/* Masqué à partir du rail latéral (la marque y est déjà) */
+@media (min-width: 900px) { .ec-hide-wide { display: none !important; } }
+/* Réservé au grand écran */
+.ec-only-wide { display: none !important; }
+@media (min-width: 900px) { .ec-only-wide { display: revert !important; } }
+
+/* --- Entrées de rail réservées au grand écran ------------------------------
+   Le rail porte toutes les destinations du rôle. La barre basse du téléphone,
+   elle, reste courte : au-delà de cinq entrées les cibles deviennent trop
+   étroites. Les entrées secondaires restent accessibles sur téléphone par le
+   bloc « Accès rapides » de l'accueil. */
+.ec-nav-wideonly { display: none !important; }
+@media (min-width: 900px) { .ec-nav-wideonly { display: flex !important; } }
+
+/* Pastille de non-lus dans le rail */
+.ec-nav-pill {
+  margin-left: auto; font-size: 11.5px; font-weight: 700;
+  padding: 1px 7px; border-radius: 999px;
+  background: var(--ec-crit); color: #fff;
+}
+
+/* --- Tableaux (lot C) -------------------------------------------------------
+   En-tête sur `panel`, capitales 11 px, colonnes numériques en chiffres à
+   chasse fixe alignées à droite. Le projet n'utilise `<table>` que pour de
+   vraies données tabulaires, jamais pour la mise en page. */
+.ec-table { width: 100%; border-collapse: collapse; }
+.ec-table th {
+  text-align: left; font-size: 11px; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--ec-ink-3); font-weight: 750; padding: 9px 12px;
+  border-bottom: 1px solid var(--ec-border); background: var(--ec-panel);
+  white-space: nowrap;
+}
+.ec-table td {
+  padding: 10px 12px; border-bottom: 1px solid var(--ec-divider);
+  font-size: var(--ec-fs-3);
+}
+.ec-table tr:last-child td { border-bottom: 0; }
+.ec-table .num { font-variant-numeric: tabular-nums; text-align: right; }
+
+/* ==========================================================================
+   « VIBRANT COMMAND » (2026-08-13) — composants issus de la revue externe.
+   Décisions et mesures : claude/EduCam_Direction_Vibrant_Command.md
+   ========================================================================== */
+
+/* --- Bannière d'exception -------------------------------------------------
+   Un tableau de bord doit DIRE QUOI FAIRE avant de montrer des chiffres.
+   Elle ne s'affiche que s'il y a réellement quelque chose à traiter : une
+   bannière permanente ne se lit plus au bout d'une semaine. */
+.ec-exc {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap;
+  background: var(--ec-crit-bg); border: 1px solid var(--ec-crit-brd);
+  border-left: 6px solid var(--ec-crit);
+  border-radius: var(--ec-r-lg); padding: 14px 18px;
+  box-shadow: var(--ec-shadow);
+}
+.ec-exc--warn {
+  background: var(--ec-warn-bg); border-color: #E3CDA0; border-left-color: var(--ec-warn);
+}
+.ec-exc__in { display: flex; align-items: center; gap: 13px; min-width: 0; }
+.ec-exc__ico {
+  width: 34px; height: 34px; border-radius: var(--ec-r-sm); flex: none;
+  display: grid; place-items: center; font-weight: 800; font-size: 17px;
+  background: #F3D9D5; color: var(--ec-crit);
+}
+.ec-exc--warn .ec-exc__ico { background: #F2E3BF; color: var(--ec-warn); }
+.ec-exc__t { display: block; font-size: var(--ec-fs-3); font-weight: 800; color: var(--ec-ink); }
+.ec-exc__d { font-size: var(--ec-fs-2); color: var(--ec-ink-2); margin-top: 2px; line-height: 1.45; }
+
+/* --- Encadré « Objectifs de la leçon » ------------------------------------
+   Sur la carte du prochain cours. La donnée existe depuis toujours
+   (`lessons.objective`) mais était reléguée en petit sous le titre. */
+.ec-obj {
+  background: var(--ec-card); border: 1px solid var(--ec-hero-brd);
+  border-radius: var(--ec-r); padding: 11px 13px; margin-top: 13px;
+}
+.ec-obj ul { list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.ec-obj li { display: flex; gap: 8px; align-items: flex-start; }
+.ec-obj li::before {
+  content: ""; width: 5px; height: 5px; border-radius: 50%; flex: 0 0 5px;
+  background: var(--ec-g500); margin-top: .55em;
+}
+@media (min-width: 900px) {
+  /* Sur grand écran les objectifs tiennent côte à côte. */
+  .ec-obj ul { flex-direction: row; flex-wrap: wrap; gap: 6px 26px; }
+  .ec-obj li { max-width: 38ch; }
+}
+.ec-obj__l {
+  font-size: var(--ec-fs-1); font-weight: 800; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--ec-g800); margin-bottom: 6px;
+}
+.ec-obj__b { font-size: var(--ec-fs-3); color: var(--ec-ink-2); line-height: 1.5; }
+
+/* --- Barre de raccourcis clavier (saisie des résultats) -------------------- */
+.ec-kbar {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  background: var(--ec-g50); border: 1px solid var(--ec-g100);
+  border-radius: var(--ec-r); padding: 9px 14px;
+  font-size: var(--ec-fs-2); font-weight: 700; color: var(--ec-g800);
+}
+.ec-kbd {
+  display: inline-grid; place-items: center; min-width: 22px; height: 22px;
+  padding: 0 5px; margin-right: 5px;
+  background: var(--ec-card); border: 1px solid var(--ec-border-2);
+  border-bottom-width: 2px; border-radius: 5px;
+  font-size: 11.5px; font-weight: 800; color: var(--ec-ink);
+}
+
+/* --- Boutons de niveau de maîtrise ----------------------------------------
+   48 px et non 44 : c'est le geste le plus répété de la plateforme
+   (36 élèves x plusieurs contrôles par semaine). Seul endroit surélevé. */
+.ec-mast { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 8px; }
+.ec-mast button {
+  min-height: 48px; padding: 0 8px;
+  border: 1px solid var(--ec-border); background: var(--ec-card);
+  border-radius: var(--ec-r); font: inherit;
+  font-size: var(--ec-fs-2); font-weight: 700; color: var(--ec-ink-2);
+  cursor: pointer; white-space: nowrap;
+}
+.ec-mast button:hover { border-color: var(--ec-border-2); background: var(--ec-panel); }
+.ec-mast button[aria-pressed="true"] { box-shadow: inset 0 0 0 1px currentColor; }
+.ec-mast .is-good[aria-pressed="true"] { background: var(--ec-g50);     color: var(--ec-good); border-color: var(--ec-good); }
+.ec-mast .is-warn[aria-pressed="true"] { background: var(--ec-warn-bg); color: var(--ec-warn); border-color: var(--ec-warn); }
+.ec-mast .is-crit[aria-pressed="true"] { background: var(--ec-crit-bg); color: var(--ec-crit); border-color: var(--ec-crit); }
+
+/* --- Liseré de teinte sur les tuiles d'indicateur --------------------------
+   La teinte est un CONTEXTE, pas un statut : elle vit sur 3 px en haut de la
+   tuile, jamais sur le chiffre ni sur le fond. */
+.ec-tile-rule { border-top: 3px solid var(--ec-border-2); }
+.ec-tile-rule--green  { border-top-color: #0B7A57; }
+.ec-tile-rule--blue   { border-top-color: var(--ec-pos); }
+.ec-tile-rule--amber  { border-top-color: var(--ec-warn); }
+.ec-tile-rule--violet { border-top-color: #5B3FA8; }
+.ec-tile-rule--crit   { border-top-color: var(--ec-crit); }
+
+/* --- Cellules de carte de chaleur -----------------------------------------
+   L'encre ne change pas d'un cran à l'autre : seul le fond encode l'intensité.
+   « Pas encore commencé » se distingue par sa BORDURE EN POINTILLÉ, pas par
+   une teinte — un vide n'est pas une valeur de l'échelle. */
+.ec-hcell {
+  padding: 9px 4px; border-radius: var(--ec-r-sm); text-align: center;
+  font-size: var(--ec-fs-1); font-weight: 800; border: 1px solid; white-space: nowrap;
+}
+.ec-hcell--neg  { background: var(--ec-neg-bg);  color: var(--ec-neg);   border-color: var(--ec-neg-brd); }
+.ec-hcell--neg2 { background: var(--ec-neg2-bg); color: var(--ec-neg);   border-color: var(--ec-neg2-brd); }
+.ec-hcell--mid  { background: var(--ec-mid);     color: var(--ec-ink-2); border-color: var(--ec-mid-brd); }
+.ec-hcell--pos  { background: var(--ec-pos-bg);  color: var(--ec-pos);   border-color: var(--ec-pos-brd); }
+.ec-hcell--na   { background: var(--ec-card);    color: var(--ec-ink-3); border-color: var(--ec-border); border-style: dashed; }
+
+/* --- Parent sur ordinateur : barre haute, pas de rail ----------------------
+   Décision du 2026-08-13 : la navigation est propre à chaque rôle, et aucun
+   utilisateur ne cumule les rôles. Le parent n'a que quatre destinations —
+   un rail permanent de 250 px lui présenterait surtout du vide.
+   Sur téléphone, son usage principal, la barre basse ne change pas. */
+@media (min-width: 900px) {
+  .ec-bottomnav--parent {
+    top: 0; left: 0; right: 0; bottom: auto;
+    width: auto; height: 66px;
+    flex-direction: row; align-items: center; gap: 5px;
+    border-radius: 0; padding: 0 24px;
+    background: var(--ec-card);
+    border-bottom: 1px solid var(--ec-border);
+    box-shadow: var(--ec-shadow);
+    overflow: visible;
+  }
+  .ec-bottomnav--parent .ec-nav-sect { display: none; }
+  .ec-bottomnav--parent button {
+    color: var(--ec-ink-2); font-weight: 650;
+  }
+  .ec-bottomnav--parent button:hover { background: var(--ec-panel); color: var(--ec-ink); }
+  .ec-bottomnav--parent button[aria-current="page"] {
+    background: var(--ec-g50); color: var(--ec-g700); box-shadow: none;
+  }
+  .ec-bottomnav--parent .ec-nav-ico { color: inherit; }
+  .ec-bottomnav--parent .ec-nav-brand {
+    padding: 0 18px 0 0; margin-right: 6px;
+    border-right: 1px solid var(--ec-divider);
+  }
+  /* Pastille verte et non jaune : sur une surface CLAIRE le jaune du drapeau
+     tombe à 1,47:1 — il ne vit que sur fond sombre (règle 8). */
+  .ec-bottomnav--parent .ec-nav-brand span:first-child {
+    background: var(--ec-g500); color: #fff;
+  }
+  .ec-bottomnav--parent .ec-nav-brand b { color: var(--ec-ink); }
+  .ec-bottomnav--parent .ec-nav-brand i { color: var(--ec-ink-3); }
+  .ec-bottomnav--parent .ec-nav-foot {
+    margin-left: auto; margin-top: 0; padding: 6px 12px 6px 6px;
+    background: var(--ec-panel); border-color: var(--ec-border);
+  }
+  .ec-bottomnav--parent .ec-nav-foot span:first-child {
+    background: var(--ec-g500); color: #fff;
+  }
+  .ec-bottomnav--parent .ec-nav-foot b { color: var(--ec-ink); }
+  .ec-bottomnav--parent .ec-nav-foot i { color: var(--ec-ink-3); }
+
+  .ec-app--parent { padding-left: 0; padding-top: 66px; }
+}
+
+/* --- Conseil d'accompagnement au parent ------------------------------------
+   Vit dans la carte de résumé, qui est en vert clair : l'encart doit donc être
+   BLANC, un vert sur vert serait invisible. Même raisonnement que `.ec-obj`. */
+.ec-advice {
+  background: var(--ec-card); border: 1px solid var(--ec-hero-brd);
+  border-radius: var(--ec-r); padding: 12px 14px; margin-top: 13px;
+  font-size: var(--ec-fs-3); color: var(--ec-ink-2); line-height: 1.55;
+}
+.ec-advice b { display: block; color: var(--ec-ink); margin-bottom: 3px; }
+
+/* --- Histogramme d'activité compact (console superadmin) -------------------
+   Barres en CSS pur : 14 valeurs ne méritent pas un SVG, et `Histogram` de
+   charts.js dessine une étiquette par barre — elles se chevaucheraient. */
+.ec-spark { display: flex; align-items: flex-end; gap: 4px; height: 44px; }
+.ec-spark i {
+  flex: 1; background: var(--ec-g200); border-radius: 3px 3px 0 0; min-height: 2px;
+}
+.ec-spark i.is-peak { background: var(--ec-g500); }
+
+/* --- Lignes d'anomalie (console superadmin) --------------------------------
+   Un bloc teinté par gravité, plus lisible qu'une ligne de liste : la pastille
+   d'icône pleine de `ListRow` écrasait le texte à cette largeur. La couleur
+   accompagne TOUJOURS un intitulé, jamais seule. */
+.ec-al {
+  display: flex; gap: 11px; align-items: flex-start;
+  padding: 12px 13px; border-radius: var(--ec-r);
+  border: 1px solid var(--ec-border); background: var(--ec-panel);
+}
+.ec-al--crit { background: var(--ec-crit-bg); border-color: var(--ec-crit-brd); }
+.ec-al--warn { background: var(--ec-warn-bg); border-color: #E3CDA0; }
+.ec-al__b {
+  width: 26px; height: 26px; border-radius: 7px; flex: none;
+  display: grid; place-items: center; font-size: 13px; font-weight: 800;
+  background: var(--ec-card); border: 1px solid var(--ec-border); color: var(--ec-ink-2);
+}
+.ec-al--crit .ec-al__b { color: var(--ec-crit); border-color: var(--ec-crit-brd); }
+.ec-al--warn .ec-al__b { color: var(--ec-warn); border-color: #E3CDA0; }
+.ec-al__t { display: block; font-size: var(--ec-fs-2); font-weight: 800; color: var(--ec-ink); }
+.ec-al--crit .ec-al__t { color: var(--ec-crit); }
+.ec-al--warn .ec-al__t { color: var(--ec-warn); }
+.ec-al p { font-size: var(--ec-fs-2); color: var(--ec-ink-2); margin-top: 2px; line-height: 1.45; }
+.ec-al time { display: block; font-size: var(--ec-fs-1); color: var(--ec-ink-3); margin-top: 5px; }
