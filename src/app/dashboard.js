@@ -10,6 +10,7 @@ import ActivityLog from "./activitylog";
 import ReadinessQuiz from "./readiness";
 import { OFFLINE_ENABLED, PROFILES_ENABLED, PARENT_TIP_ENABLED } from "../lib/flags";
 import { logActivity } from "../lib/activity";
+import { notifyParentWhatsApp } from "../lib/whatsapp";
 import {
   cachedQuery, fetchLessonBundle, saveLessonBundle, loadLessonBundle,
   getCachedLessonIds, downloadWeek, getGrant,
@@ -239,7 +240,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // Only admins may edit base content; everyone else is a read-only reviewer
   // who can leave feedback. Defaults to reviewer if role is missing.
   const isAdmin = teacher?.role === "admin";
-  const isSchoolAdmin = PROFILES_ENABLED && teacher?.role === "school_admin";
+  // The on-site "référent" shares the school-director experience for now, but is
+  // a DISTINCT role so its access can be restricted independently later. Every
+  // director-scoped check below treats referent like school_admin; isReferent is
+  // kept for labels and any future divergence. (RLS mirrors this: educam_is_school_admin()
+  // returns true for role IN ('school_admin','referent').)
+  const isReferent = PROFILES_ENABLED && teacher?.role === "referent";
+  const isSchoolAdmin = PROFILES_ENABLED && (teacher?.role === "school_admin" || teacher?.role === "referent");
   const isParent = PROFILES_ENABLED && !!parent;
 
   // Parent mode: the WHOLE curriculum of the linked class, each lesson tagged as
@@ -339,6 +346,78 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     }
   };
   const unreadCount = inbox.filter((m) => !m.read_at).length;
+
+  // ---- Compose a new message (teacher / director / referent / superadmin) ----
+  // Recipients depend on the sender's role:
+  //  • teacher            → a parent of a pupil in THEIR class
+  //  • director / referent → any parent OR any teacher of THEIR school
+  //  • superadmin (admin)  → any pupil's parent OR any staff member, any school
+  // Parents don't compose. RLS enforces the same scoping server-side.
+  const openComposer = async () => {
+    setComposeOpen(true);
+    setCMsg(""); setCRecipient("");
+    setCAudience("parent");
+    if (isParent) return;
+    // Pupils the sender may write a parent about.
+    let sq = supabase.from("students").select("id, full_name, teacher_id, school_id");
+    if (isAdmin) { /* every school */ }
+    else if (isSchoolAdmin) sq = sq.eq("school_id", teacher?.school_id || "");
+    else sq = sq.eq("teacher_id", teacher?.id || ""); // plain teacher: own class only
+    const { data: st } = await sq;
+    setCStudents(st || []);
+    // Staff the sender may write to (directors/referents + admin only).
+    if (isSchoolAdmin || isAdmin) {
+      let tq = supabase.from("teachers").select("id, full_name, role, school_id");
+      if (isSchoolAdmin && !isAdmin) tq = tq.eq("school_id", teacher?.school_id || "");
+      const { data: stf } = await tq;
+      setCStaff((stf || []).filter((t) => t.role !== "admin" && t.id !== teacher?.id));
+    } else {
+      setCStaff([]);
+    }
+  };
+
+  const sendNewMessage = async () => {
+    if (!cSubject.trim() || !cBody.trim() || !cRecipient) return;
+    setCSending(true); setCMsg("");
+    const { data: u } = await supabase.auth.getUser();
+    const senderId = u?.user?.id || null;
+    const base = {
+      sender_id: senderId, subject: cSubject.trim(), body: cBody.trim(),
+      link_url: cLink.trim() || null,
+    };
+    let row;
+    if (cAudience === "parent") {
+      const stu = cStudents.find((s) => s.id === cRecipient);
+      const { data: p } = await supabase.from("parents").select("id").eq("student_id", cRecipient).limit(1);
+      row = {
+        ...base, audience: "parent", student_id: cRecipient,
+        recipient_id: p && p.length ? p[0].id : null,
+        school_id: stu?.school_id || teacher?.school_id || null,
+      };
+    } else {
+      const st = cStaff.find((t) => t.id === cRecipient);
+      row = {
+        ...base,
+        audience: (st?.role === "school_admin" || st?.role === "referent") ? "school_admin" : "teacher",
+        recipient_id: cRecipient,
+        school_id: st?.school_id || teacher?.school_id || null,
+      };
+    }
+    const { data: ins, error } = await supabase.from("messages").insert(row).select("id").single();
+    if (error) { setCMsg("Erreur lors de l'envoi. Réessayez."); setCSending(false); return; }
+    if (row.audience === "parent") {
+      notifyParentWhatsApp({ studentId: cRecipient, messageId: ins?.id, kind: "message" });
+    }
+    logActivity({
+      actorId: senderId, actorRole: teacher?.role || "teacher",
+      schoolId: row.school_id, eventType: "message_sent", detail: row.subject,
+    });
+    setCMsg(row.audience === "parent" && !row.recipient_id
+      ? "Message enregistré ✓ — le parent le verra dès son inscription."
+      : "Message envoyé ✓");
+    setCSubject(""); setCBody(""); setCLink(""); setCRecipient("");
+    setCSending(false);
+  };
 
   // Log a "login" activity event once per app load (teacher or parent).
   const loggedLogin = useRef(false);
@@ -475,6 +554,18 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
 
   // Profiles mode: the teacher's school (name/role), resolved on load.
   const [schoolContext, setSchoolContext] = useState(null);
+
+  // ---- Message composer (role-aware; parents don't compose) ----
+  const [composeOpen, setComposeOpen] = useState(false);
+  const [cAudience, setCAudience] = useState("parent"); // 'parent' | 'staff'
+  const [cRecipient, setCRecipient] = useState("");     // student_id (parent) or teacher_id (staff)
+  const [cSubject, setCSubject] = useState("");
+  const [cBody, setCBody] = useState("");
+  const [cLink, setCLink] = useState("");
+  const [cSending, setCSending] = useState(false);
+  const [cMsg, setCMsg] = useState("");
+  const [cStudents, setCStudents] = useState([]);       // pupils the sender may write about
+  const [cStaff, setCStaff] = useState([]);             // teachers/directors the sender may write to
 
   useEffect(() => {
     if (!PROFILES_ENABLED || !teacher?.school_id) { setSchoolContext(null); return; }
@@ -1703,7 +1794,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       : (teacher?.full_name || "Enseignant");
     const whoSub = isParent
       ? (parentStudent?.full_name ? `Parent de ${parentStudent.full_name}` : "Espace parent")
-      : [selectedLevel?.name, isAdmin ? "administration" : isSchoolAdmin ? "direction" : "enseignant"]
+      : [selectedLevel?.name, isAdmin ? "administration" : isReferent ? "référent" : isSchoolAdmin ? "direction" : "enseignant"]
           .filter(Boolean).join(" · ");
     const initials = (who || "?").split(" ").filter(Boolean).slice(0, 2)
       .map((w) => w[0]).join("").toUpperCase();
@@ -1878,6 +1969,75 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         <p className="ec-sub">
           {isParent ? "Les messages de l'école au sujet de votre enfant." : "Vos messages."}
         </p>
+
+        {!isParent && (
+          <div style={{ marginTop: 14 }}>
+            {!composeOpen ? (
+              <Button onClick={openComposer}>✉ Nouveau message</Button>
+            ) : (
+              <Card>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 12 }}>
+                  <CardLabel>Nouveau message</CardLabel>
+                  <button className="ec-link" style={{ color: COLORS.ink3 }} onClick={() => { setComposeOpen(false); setCMsg(""); }}>Fermer</button>
+                </div>
+                <div style={{ display: "grid", gap: 10 }}>
+                  {(isSchoolAdmin || isAdmin) && (
+                    <label style={{ display: "block" }}>
+                      <span style={{ display: "block", fontSize: FONT.sm, fontWeight: 700, color: COLORS.ink2, marginBottom: 4 }}>Destinataire</span>
+                      <select className="ec-input" value={cAudience}
+                        onChange={(e) => { setCAudience(e.target.value); setCRecipient(""); }}>
+                        <option value="parent">Un parent d'élève</option>
+                        <option value="staff">{isAdmin ? "Un membre du personnel (enseignant / direction)" : "Un enseignant de l'école"}</option>
+                      </select>
+                    </label>
+                  )}
+                  {cAudience === "parent" ? (
+                    <label style={{ display: "block" }}>
+                      <span style={{ display: "block", fontSize: FONT.sm, fontWeight: 700, color: COLORS.ink2, marginBottom: 4 }}>
+                        {isSchoolAdmin || isAdmin ? "Élève concerné (le parent lié le recevra)" : "Élève de votre classe (le parent le recevra)"}
+                      </span>
+                      {cStudents.length === 0 ? (
+                        <div style={{ fontSize: FONT.sm, color: COLORS.ink3 }}>Aucun élève à afficher.</div>
+                      ) : (
+                        <select className="ec-input" value={cRecipient} onChange={(e) => setCRecipient(e.target.value)}>
+                          <option value="">— choisir un élève —</option>
+                          {cStudents.map((s) => <option key={s.id} value={s.id}>{s.full_name}</option>)}
+                        </select>
+                      )}
+                    </label>
+                  ) : (
+                    <label style={{ display: "block" }}>
+                      <span style={{ display: "block", fontSize: FONT.sm, fontWeight: 700, color: COLORS.ink2, marginBottom: 4 }}>Destinataire</span>
+                      {cStaff.length === 0 ? (
+                        <div style={{ fontSize: FONT.sm, color: COLORS.ink3 }}>Aucun destinataire à afficher.</div>
+                      ) : (
+                        <select className="ec-input" value={cRecipient} onChange={(e) => setCRecipient(e.target.value)}>
+                          <option value="">— choisir un destinataire —</option>
+                          {cStaff.map((t) => (
+                            <option key={t.id} value={t.id}>
+                              {(t.full_name || t.id) + (t.role === "school_admin" ? " · directeur" : t.role === "referent" ? " · référent" : " · enseignant")}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </label>
+                  )}
+                  <input className="ec-input" placeholder="Objet" value={cSubject} onChange={(e) => setCSubject(e.target.value)} maxLength={140} />
+                  <textarea className="ec-input" placeholder="Votre message…" value={cBody} onChange={(e) => setCBody(e.target.value)} rows={5} style={{ resize: "vertical" }} />
+                  {cAudience === "parent" && (
+                    <input className="ec-input" placeholder="Lien (n° de leçon ou URL) — optionnel" value={cLink} onChange={(e) => setCLink(e.target.value)} />
+                  )}
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                    <Button onClick={sendNewMessage} disabled={cSending || !cSubject.trim() || !cBody.trim() || !cRecipient}>
+                      {cSending ? "Envoi…" : "Envoyer"}
+                    </Button>
+                    {cMsg && <span style={{ fontSize: FONT.sm, fontWeight: 700, color: cMsg.startsWith("Erreur") ? COLORS.crit : COLORS.g600 }}>{cMsg}</span>}
+                  </div>
+                </div>
+              </Card>
+            )}
+          </div>
+        )}
 
         <div className="ec-grid" style={{ marginTop: 18 }}>
           {/* Quand un message est ouvert, la liste disparaît sur téléphone
@@ -4604,7 +4764,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 }}>
                         {classesOfSchool.map((t) => (
                           <Card key={t.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                            <div style={{ fontSize: FONT.md, fontWeight: 700, color: COLORS.ink, minWidth: 0 }}>{t.full_name || t.id}{t.role === "school_admin" ? " · directeur" : ""}</div>
+                            <div style={{ fontSize: FONT.md, fontWeight: 700, color: COLORS.ink, minWidth: 0 }}>{t.full_name || t.id}{t.role === "school_admin" ? " · directeur" : t.role === "referent" ? " · référent" : ""}</div>
                             <Button size="sm" onClick={() => actAsTeacher(t)}>Ouvrir la vue enseignant</Button>
                           </Card>
                         ))}
@@ -4685,7 +4845,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                 ) : adminTeachers.filter((t) => t.role !== "admin").map((t, i, arr) => (
                   <div key={t.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "9px 2px", borderBottom: i < arr.length - 1 ? `1px solid ${COLORS.border}` : "none", flexWrap: "wrap" }}>
                     <div style={{ fontSize: FONT.md, color: COLORS.ink, fontWeight: 600, minWidth: 0 }}>
-                      {t.full_name || t.id}{t.role === "school_admin" ? " · directeur" : ""}
+                      {t.full_name || t.id}{t.role === "school_admin" ? " · directeur" : t.role === "referent" ? " · référent" : ""}
                     </div>
                     <select className="ec-input" style={{ width: "auto", cursor: "pointer" }} value={t.school_id || ""} onChange={(e) => assignTeacherToSchool(t.id, e.target.value || null)}>
                       <option value="">— Aucune école —</option>

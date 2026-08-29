@@ -119,7 +119,9 @@ export default function SchoolAdmin({ school, onBack }) {
     const { data } = await supabase.from("teachers")
       .select("id, full_name, level, class_label, parent_passcode, role")
       .eq("school_id", school.id).order("full_name");
-    setClasses((data || []).filter((t) => t.role !== "admin"));
+    // Classes = actual teachers. Exclude the technician (admin) and the school's
+    // director/referent accounts — they are staff, not a class/timetable.
+    setClasses((data || []).filter((t) => t.role !== "admin" && t.role !== "school_admin" && t.role !== "referent"));
     setLoading(false);
   };
 
