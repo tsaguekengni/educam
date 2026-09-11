@@ -273,6 +273,15 @@ export default function SchoolDashboard({ school, onBack, onOpenTab }) {
   // ou à défaut les classes évaluées. Sans résultat ni couverture, c'est 0.
   const classCount = new Set([...coverage.map((c) => c.teacher_id), ...classes.map((c) => c.teacher_id)]).size;
 
+  // Les tuiles d'indicateurs sont des raccourcis vers la section de CETTE page
+  // où vit la donnée — le directeur reste sur son tableau de bord au lieu d'être
+  // renvoyé vers la console de gestion.
+  const scrollToSection = (id) => {
+    if (typeof document === "undefined") return;
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   return (
     <div>
       {backLink}
@@ -383,24 +392,24 @@ export default function SchoolDashboard({ school, onBack, onOpenTab }) {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 18 }}>
               <StatTile label="Élèves suivis" tint="green" value={studentCount}
                 foot={`${evaluated} avec au moins un résultat`}
-                onClick={onOpenTab ? () => onOpenTab("students") : undefined} />
+                onClick={() => scrollToSection("sd-classes")} />
               <StatTile label="Moyenne de l'école" tint="blue"
                 value={schoolAvg == null ? "—" : fr(schoolAvg)}
                 unit={schoolAvg == null ? "" : "/20"}
-                onClick={onOpenTab ? () => onOpenTab("students") : undefined}>
+                onClick={() => scrollToSection("sd-trend")}>
                 {trend.length > 1 && <Sparkline values={trend.map((t) => t.value)} />}
               </StatTile>
               <StatTile label="Élèves sous la moyenne" tint="amber" value={belowPass}
                 foot={evaluated ? `${Math.round((belowPass / evaluated) * 100)} % des élèves évalués` : "aucun élève évalué"}
-                onClick={onOpenTab ? () => onOpenTab("students") : undefined} />
+                onClick={() => scrollToSection("sd-atrisk")} />
               <StatTile label="Classes à rattraper" tint={late.length ? "crit" : "violet"} value={late.length}
                 foot={heatRows.length ? `sur ${heatRows.length} classes suivies` : "couverture non renseignée"}
-                onClick={onOpenTab ? () => onOpenTab("students") : undefined} />
+                onClick={() => scrollToSection("sd-heat")} />
             </div>
           </div>
 
           {/* ---- Carte de chaleur : le graphique signature ---- */}
-          <Card className="ec-c8">
+          <Card className="ec-c8" id="sd-heat" style={{ scrollMarginTop: 84 }}>
             <div className="ec-cardhd">
               <h2 className="ec-cardtitle">Avance et retard sur la répartition</h2>
             </div>
@@ -515,7 +524,7 @@ export default function SchoolDashboard({ school, onBack, onOpenTab }) {
           </Card>
 
           {/* ---- Évolution mensuelle ---- */}
-          <Card className="ec-c5">
+          <Card className="ec-c5" id="sd-trend" style={{ scrollMarginTop: 84 }}>
             <div className="ec-cardhd"><h2 className="ec-cardtitle">Évolution de la moyenne</h2></div>
             {trend.length > 1 ? (
               <LineChart
@@ -534,7 +543,7 @@ export default function SchoolDashboard({ school, onBack, onOpenTab }) {
           </Card>
 
           {/* ---- Tableau des classes ---- */}
-          <Card className="ec-c7" style={{ padding: 0, overflow: "hidden" }}>
+          <Card className="ec-c7" id="sd-classes" style={{ padding: 0, overflow: "hidden", scrollMarginTop: 84 }}>
             <div className="ec-cardhd" style={{ padding: "18px 18px 0", marginBottom: 12 }}>
               <h2 className="ec-cardtitle">Classes</h2>
               {onOpenTab && <button className="ec-more ec-link" style={{ textDecoration: "none" }}
@@ -577,7 +586,7 @@ export default function SchoolDashboard({ school, onBack, onOpenTab }) {
           </Card>
 
           {/* ---- Élèves à suivre ---- */}
-          <Card className="ec-c5">
+          <Card className="ec-c5" id="sd-atrisk" style={{ scrollMarginTop: 84 }}>
             <div className="ec-cardhd"><h2 className="ec-cardtitle">Élèves à suivre en priorité</h2></div>
             {atRisk.length ? (
               <div style={{ display: "grid", gap: 8 }}>

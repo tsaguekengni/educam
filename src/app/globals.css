@@ -816,6 +816,14 @@ button, [role="button"], .ec-btn, .ec-row, .ec-choice, .ec-bottomnav button, .ec
 .ec-progrow { transition: background .12s ease; }
 .ec-progrow:hover { background: var(--ec-g50); }
 
+/* Carte « Agir en tant que » du journal d'activité : cliquable, ouvre la vue
+   de l'enseignant ou du parent. La flèche du bandeau s'accentue au survol. */
+.ec-actcard { transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease; }
+.ec-actcard:hover { transform: translateY(-2px); box-shadow: var(--ec-shadow-lg); border-color: var(--ec-border-2); }
+.ec-actcard:active { transform: translateY(0); }
+.ec-actcard__cta { transition: transform .12s ease; }
+.ec-actcard:hover .ec-actcard__cta { transform: translateX(2px); }
+
 /* --- Cellules de carte de chaleur -----------------------------------------
    L'encre ne change pas d'un cran à l'autre : seul le fond encode l'intensité.
    « Pas encore commencé » se distingue par sa BORDURE EN POINTILLÉ, pas par
