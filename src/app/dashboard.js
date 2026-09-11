@@ -2373,26 +2373,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const ProgrammeView = () => {
     const q = progQuery.trim().toLowerCase();
 
-    const SearchBar = () => (
-      <div style={{ position: "relative", marginBottom: 16 }}>
-        <label htmlFor="ec-prog-search" className="ec-sr">Rechercher dans le programme</label>
-        <input
-          id="ec-prog-search"
-          className="ec-input"
-          type="search"
-          placeholder="Rechercher une leçon, une notion…"
-          value={progQuery}
-          onChange={(e) => setProgQuery(e.target.value)}
-          style={{ paddingLeft: 40 }}
-        />
-        <span aria-hidden="true" style={{
-          position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)",
-          color: COLORS.ink3, fontSize: "var(--ec-fs-4)", pointerEvents: "none",
-        }}>🔍</span>
-      </div>
-    );
-
-    // ---- RÉSULTATS DE RECHERCHE (la première recherche de l'application) ----
+    // Search hits — computed here, then rendered INSIDE the subjects view below
+    // the search input so the input keeps a STABLE tree position and never
+    // remounts. (It used to lose focus on every keystroke: SearchBar was an
+    // inline <Component/> re-created each render, and the input also jumped
+    // between the results branch and the subjects branch at the 2-char
+    // threshold.)
+    let searchHits = null;
     if (q.length >= 2) {
       const hits = [];
       availableLessons.forEach((l) => {
@@ -2417,59 +2404,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         }
       });
       const seen = new Set();
-      const unique = hits.filter((h) => {
+      searchHits = hits.filter((h) => {
         const k = h.title + "|" + h.meta;
         if (seen.has(k)) return false;
         seen.add(k); return true;
       }).slice(0, 40);
-
-      return (
-        <div>
-          <h1 className="ec-h1">Programme</h1>
-          <p className="ec-sub">{selectedLevel.name} · recherche</p>
-          <div style={{ marginTop: 18 }}><SearchBar /></div>
-
-          <button className="ec-row" style={{ marginTop: 14, borderColor: COLORS.g300, background: COLORS.g50 }}
-            onClick={() => setProgrammeView("week")}>
-            <span aria-hidden="true" className="ec-row__ico" style={{ background: COLORS.g500, color: "#fff" }}>◉</span>
-            <span style={{ flex: 1, minWidth: 0 }}>
-              <span className="ec-row__title" style={{ display: "block", fontWeight: 700, color: COLORS.ink }}>
-                Programme de cette semaine
-              </span>
-              <span className="ec-row__meta" style={{ display: "block", color: COLORS.ink3, marginTop: 3 }}>
-                Unité {selectedUnit} · Semaine {selectedWeek} · toutes les matières d'un coup
-              </span>
-            </span>
-            <span aria-hidden="true" style={{ color: COLORS.ink3, fontSize: FONT.base, flex: "none" }}>›</span>
-          </button>
-          {unique.length === 0 ? (
-            <Card>
-              <EmptyState icon="🔍" title="Aucun résultat">
-                Aucune leçon ni sujet ne correspond à « {progQuery} » pour le {selectedLevel.name}.
-              </EmptyState>
-            </Card>
-          ) : (
-            <>
-              <p style={{ fontSize: FONT.sm, color: COLORS.ink3, marginBottom: 10 }}>
-                {unique.length} résultat{unique.length > 1 ? "s" : ""}
-              </p>
-              <div style={{ display: "grid", gap: 8 }}>
-                {unique.map((h) => (
-                  <ListRow
-                    key={h.key}
-                    icon={h.icon}
-                    iconColor={h.color}
-                    title={h.title}
-                    meta={h.meta}
-                    onClick={h.lessonId ? () => openLesson(h.lessonId) : undefined}
-                    right={h.lessonId ? undefined : <Badge tone="neutral">À créer</Badge>}
-                  />
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-      );
     }
 
     // ---- LISTE DES MATIÈRES ----
@@ -2550,43 +2489,107 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             )}
           </div>
 
-          <div style={{ marginTop: 18 }}><SearchBar /></div>
-
-          {totalTopics > 0 && (
-            <Callout tone="brand" icon="📊" style={{ marginBottom: 16 }}>
-              <b>{totalLessons} leçon{totalLessons > 1 ? "s" : ""} sur {totalTopics} sujets</b> disponibles pour le {selectedLevel.name}.
-            </Callout>
-          )}
-
-          <CardLabel>Matières</CardLabel>
-          {loadingData && <SkeletonRows rows={4} />}
-          <div style={{ display: "grid", gap: 9, gridTemplateColumns: "repeat(auto-fit, minmax(390px, 1fr))" }}>
-            {SUBJECTS.map((subject) => {
-              const subjTopics = topics.filter((t) => t.subject_id === subject.id).length;
-              const subjLessons = availableLessons.filter((l) => l.subject_id === subject.id).length;
-              return (
-                <ListRow
-                  key={subject.id}
-                  icon={subject.icon}
-                  iconColor={subject.color}
-                  title={subject.name}
-                  meta={subjTopics > 0
-                    ? `${subjLessons} / ${subjTopics} leçons · ${subject.components.length} composantes`
-                    : `${subject.components.length} composantes · ${subject.hours}`}
-                  onClick={() => { setSelectedSubject(subject); setProgrammeView("components"); }}
-                >
-                  {subjTopics > 0 && (
-                    <Meter
-                      value={Math.min(subjLessons, subjTopics)}
-                      max={subjTopics}
-                      color={subject.color}
-                      label={`Avancement ${subject.name}`}
-                    />
-                  )}
-                </ListRow>
-              );
-            })}
+          {/* Single, STABLE search input — same position whether we show the
+              results or the subjects list, so it never remounts and never loses
+              focus while typing. */}
+          <div style={{ marginTop: 18, marginBottom: 16, position: "relative" }}>
+            <label htmlFor="ec-prog-search" className="ec-sr">Rechercher dans le programme</label>
+            <input
+              id="ec-prog-search"
+              className="ec-input"
+              type="search"
+              placeholder="Rechercher une leçon, une notion…"
+              value={progQuery}
+              onChange={(e) => setProgQuery(e.target.value)}
+              style={{ paddingLeft: 40 }}
+            />
+            <span aria-hidden="true" style={{
+              position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)",
+              color: COLORS.ink3, fontSize: "var(--ec-fs-4)", pointerEvents: "none",
+            }}>🔍</span>
           </div>
+
+          {searchHits ? (
+            <>
+              <button className="ec-row" style={{ marginBottom: 14, borderColor: COLORS.g300, background: COLORS.g50 }}
+                onClick={() => { setProgQuery(""); setProgrammeView("week"); }}>
+                <span aria-hidden="true" className="ec-row__ico" style={{ background: COLORS.g500, color: "#fff" }}>◉</span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span className="ec-row__title" style={{ display: "block", fontWeight: 700, color: COLORS.ink }}>
+                    Programme de cette semaine
+                  </span>
+                  <span className="ec-row__meta" style={{ display: "block", color: COLORS.ink3, marginTop: 3 }}>
+                    Unité {selectedUnit} · Semaine {selectedWeek} · toutes les matières d'un coup
+                  </span>
+                </span>
+                <span aria-hidden="true" style={{ color: COLORS.ink3, fontSize: FONT.base, flex: "none" }}>›</span>
+              </button>
+              {searchHits.length === 0 ? (
+                <Card>
+                  <EmptyState icon="🔍" title="Aucun résultat">
+                    Aucune leçon ni sujet ne correspond à « {progQuery} » pour le {selectedLevel.name}.
+                  </EmptyState>
+                </Card>
+              ) : (
+                <>
+                  <p style={{ fontSize: FONT.sm, color: COLORS.ink3, marginBottom: 10 }}>
+                    {searchHits.length} résultat{searchHits.length > 1 ? "s" : ""}
+                  </p>
+                  <div style={{ display: "grid", gap: 8 }}>
+                    {searchHits.map((h) => (
+                      <ListRow
+                        key={h.key}
+                        icon={h.icon}
+                        iconColor={h.color}
+                        title={h.title}
+                        meta={h.meta}
+                        onClick={h.lessonId ? () => openLesson(h.lessonId) : undefined}
+                        right={h.lessonId ? undefined : <Badge tone="neutral">À créer</Badge>}
+                      />
+                    ))}
+                  </div>
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              {totalTopics > 0 && (
+                <Callout tone="brand" icon="📊" style={{ marginBottom: 16 }}>
+                  <b>{totalLessons} leçon{totalLessons > 1 ? "s" : ""} sur {totalTopics} sujets</b> disponibles pour le {selectedLevel.name}.
+                </Callout>
+              )}
+
+              <CardLabel>Matières</CardLabel>
+              {loadingData && <SkeletonRows rows={4} />}
+              <div style={{ display: "grid", gap: 9, gridTemplateColumns: "repeat(auto-fit, minmax(390px, 1fr))" }}>
+                {SUBJECTS.map((subject) => {
+                  const subjTopics = topics.filter((t) => t.subject_id === subject.id).length;
+                  const subjLessons = availableLessons.filter((l) => l.subject_id === subject.id).length;
+                  return (
+                    <ListRow
+                      key={subject.id}
+                      icon={subject.icon}
+                      iconColor={subject.color}
+                      title={subject.name}
+                      meta={subjTopics > 0
+                        ? `${subjLessons} / ${subjTopics} leçons · ${subject.components.length} composantes`
+                        : `${subject.components.length} composantes · ${subject.hours}`}
+                      onClick={() => { setSelectedSubject(subject); setProgrammeView("components"); }}
+                    >
+                      {subjTopics > 0 && (
+                        <Meter
+                          value={Math.min(subjLessons, subjTopics)}
+                          max={subjTopics}
+                          color={subject.color}
+                          label={`Avancement ${subject.name}`}
+                        />
+                      )}
+                    </ListRow>
+                  );
+                })}
+              </div>
+            </>
+          )}
         </div>
       );
     }
