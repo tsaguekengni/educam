@@ -410,7 +410,7 @@ export function EntryRow({ name, value, status, total, inputRef, onChange, onCom
 /* ========================================================================== */
 /* Composant principal — aiguillage par rôle                                   */
 /* ========================================================================== */
-export default function Results({ teacher, school, parent, student, results: resultsProp, onBack, onOpenLesson }) {
+export default function Results({ teacher, school, parent, student, results: resultsProp, onBack, onOpenLesson, initialTab }) {
   const isParent = !!parent;
 
   const backLink = (
@@ -445,16 +445,16 @@ export default function Results({ teacher, school, parent, student, results: res
   }
 
   /* --------------------------- ENSEIGNANT --------------------------------- */
-  return <TeacherResults teacher={teacher} school={school} backLink={backLink} />;
+  return <TeacherResults teacher={teacher} school={school} backLink={backLink} initialTab={initialTab} />;
 }
 
 /* -------------------------------------------------------------------------- */
 /* Enseignant — saisie + vue classe + détail élève                             */
 /* -------------------------------------------------------------------------- */
-function TeacherResults({ teacher, school, backLink }) {
+function TeacherResults({ teacher, school, backLink, initialTab }) {
   const { pushToast, ToastViewport } = useToasts();
 
-  const [tab, setTab] = useState("entry"); // "entry" | "class"
+  const [tab, setTab] = useState(initialTab === "class" ? "class" : "entry"); // "entry" | "class"
   const [loading, setLoading] = useState(true);
   const [students, setStudents] = useState([]);
   const [taughtLessons, setTaughtLessons] = useState([]);

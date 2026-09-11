@@ -32,9 +32,11 @@ const fmtDate = (s) => (s ? String(s).slice(0, 10) : "—");
 const fmtDateTime = (s) => (s ? String(s).slice(0, 16).replace("T", " ") : "—");
 const dm = (iso) => { const [, m, d] = String(iso || "").split("-"); return d && m ? `${d}/${m}` : iso; };
 
-export default function ActivityLog({ school, isAdmin, onBack }) {
+export default function ActivityLog({ school, isAdmin, onBack, initialTab, onActAsTeacher, onActAsParent }) {
   const { pushToast, ToastViewport } = useToasts();
-  const [tab, setTab] = useState("teachers"); // teachers | parents | journal
+  const [tab, setTab] = useState(
+    ["teachers", "parents", "journal"].includes(initialTab) ? initialTab : "teachers"
+  ); // teachers | parents | journal
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState(null);
 
@@ -324,8 +326,16 @@ export default function ActivityLog({ school, isAdmin, onBack }) {
                 if (!list.length) return <Card><EmptyState icon="🧑‍🏫" title="Aucun enseignant à afficher" /></Card>;
                 return (
                   <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(430px, 1fr))" }}>
-                    {list.map((t) => (
-                      <Card key={t.id} style={{ borderLeft: `3px solid ${t.flags.length ? COLORS.crit : COLORS.g300}` }}>
+                    {list.map((t) => {
+                      const act = onActAsTeacher ? () => onActAsTeacher(t.id, t.name) : undefined;
+                      return (
+                      <Card key={t.id}
+                        className={act ? "ec-actcard" : undefined}
+                        role={act ? "button" : undefined}
+                        tabIndex={act ? 0 : undefined}
+                        onClick={act}
+                        onKeyDown={act ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); act(); } } : undefined}
+                        style={{ borderLeft: `3px solid ${t.flags.length ? COLORS.crit : COLORS.g300}`, cursor: act ? "pointer" : undefined }}>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
                           <div style={{ fontSize: "var(--ec-fs-4)", fontWeight: 700, color: COLORS.ink }}>{t.name}</div>
                           <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3 }}>actif {fmtDate(t.last)}</div>
@@ -336,8 +346,14 @@ export default function ActivityLog({ school, isAdmin, onBack }) {
                           <Stat label="commentaires" n={t.fb} />
                         </div>
                         {t.flags.length > 0 && flags(t.flags)}
+                        {act && (
+                          <div className="ec-actcard__cta" style={{ marginTop: 10, fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.g700 }}>
+                            Ouvrir sa vue · consulter ou agir en tant que lui <span aria-hidden="true">›</span>
+                          </div>
+                        )}
                       </Card>
-                    ))}
+                      );
+                    })}
                   </div>
                 );
               })()}
@@ -354,8 +370,16 @@ export default function ActivityLog({ school, isAdmin, onBack }) {
                 if (!list.length) return <Card><EmptyState icon="👪" title="Aucun parent à afficher" /></Card>;
                 return (
                   <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(430px, 1fr))" }}>
-                    {list.map((p) => (
-                      <Card key={p.id} style={{ borderLeft: `3px solid ${p.flags.length ? COLORS.crit : COLORS.g300}` }}>
+                    {list.map((p) => {
+                      const act = onActAsParent ? () => onActAsParent(p.id, `Parent de ${p.child}`) : undefined;
+                      return (
+                      <Card key={p.id}
+                        className={act ? "ec-actcard" : undefined}
+                        role={act ? "button" : undefined}
+                        tabIndex={act ? 0 : undefined}
+                        onClick={act}
+                        onKeyDown={act ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); act(); } } : undefined}
+                        style={{ borderLeft: `3px solid ${p.flags.length ? COLORS.crit : COLORS.g300}`, cursor: act ? "pointer" : undefined }}>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
                           <div style={{ fontSize: "var(--ec-fs-4)", fontWeight: 700, color: COLORS.ink }}>Parent de {p.child}</div>
                           <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3 }}>{p.last ? `connecté ${fmtDate(p.last)}` : "jamais connecté"}</div>
@@ -365,8 +389,14 @@ export default function ActivityLog({ school, isAdmin, onBack }) {
                           <Stat label="non lus" n={p.unread} /><Stat label="reçus" n={p.total} />
                         </div>
                         {p.flags.length > 0 && flags(p.flags)}
+                        {act && (
+                          <div className="ec-actcard__cta" style={{ marginTop: 10, fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.g700 }}>
+                            Ouvrir sa vue · consulter ou agir en tant que lui <span aria-hidden="true">›</span>
+                          </div>
+                        )}
                       </Card>
-                    ))}
+                      );
+                    })}
                   </div>
                 );
               })()}

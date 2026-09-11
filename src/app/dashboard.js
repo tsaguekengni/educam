@@ -458,6 +458,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     setScreenRaw(prev);
   };
   const [tab, setTab] = useState("calendar");
+  // Onglet d'ouverture de l'écran Résultats : "entry" (saisie) par défaut,
+  // "class" quand on arrive depuis une tuile « Moyenne de classe » / « Élèves à
+  // suivre ». Onglet d'ouverture du journal d'activité (admin).
+  const [resultsTab, setResultsTab] = useState("entry");
+  const [activityTab, setActivityTab] = useState("teachers");
+  const openResults = (t = "entry") => { setResultsTab(t); setScreen("results"); };
+  const openActivity = (t = "teachers") => { setActivityTab(t); setScreen("activitylog"); };
 
   // Responsive breakpoint: phones/small screens (≤640px) get tuned layouts.
   const [isMobile, setIsMobile] = useState(false);
@@ -960,6 +967,21 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const { data: p } = await supabase.from("parents").select("*").eq("student_id", student.id).limit(1);
     const profile = (p && p[0]) ? p[0] : { id: student.id, student_id: student.id, full_name: student.full_name };
     onImpersonate("parent", profile, student.full_name);
+  };
+  // Depuis le journal d'activité, les cartes ne portent qu'un objet de
+  // statistiques (id + nom) — pas un profil complet. On va donc chercher la
+  // ligne réelle avant d'ouvrir la vue « Agir en tant que ».
+  const actAsTeacherById = async (id, name) => {
+    if (!onImpersonate || id == null) return;
+    const { data } = await supabase.from("teachers").select("*").eq("id", id).limit(1);
+    const profile = (data && data[0]) ? data[0] : { id, full_name: name };
+    onImpersonate("teacher", profile, profile.full_name || name || "Enseignant");
+  };
+  const actAsParentById = async (parentId, childName) => {
+    if (!onImpersonate || parentId == null) return;
+    const { data } = await supabase.from("parents").select("*").eq("id", parentId).limit(1);
+    const profile = (data && data[0]) ? data[0] : { id: parentId, full_name: childName };
+    onImpersonate("parent", profile, childName || profile.full_name || "Parent");
   };
 
   // ============ HORLOGE ET « PROCHAIN COURS » ============
@@ -1738,6 +1760,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const go = (s2, t) => () => {
       if (t) setTab(t);
       if (s2 === "programme") setProgrammeView("subjects");
+      if (s2 === "results") setResultsTab("entry");
+      if (s2 === "activitylog") setActivityTab("teachers");
       setScreen(s2);
     };
 
@@ -4148,7 +4172,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                     ? `${classStats.evaluated} élève${classStats.evaluated > 1 ? "s" : ""} évalué${classStats.evaluated > 1 ? "s" : ""} sur ${classStats.students}`
                     : "aucun résultat saisi")
                 : "chargement…",
-              onClick: () => setScreen("results"),
+              onClick: () => openResults("class"),
             },
             {
               label: "Élèves à suivre", tint: "amber",
@@ -4156,7 +4180,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               foot: classStats
                 ? (classStats.atRisk ? "moyenne sous 10 / 20" : "aucun élève sous 10 / 20")
                 : "chargement…",
-              onClick: () => setScreen("results"),
+              onClick: () => openResults("class"),
             },
           ];
           if (OFFLINE_ENABLED) {
@@ -4186,7 +4210,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           ];
           if (PROFILES_ENABLED && !isAdmin) quick.push({
             key: "results", icon: "✓", tint: "amber", title: "Résultats",
-            meta: "Saisir et suivre les notes", onClick: () => setScreen("results"),
+            meta: "Saisir et suivre les notes", onClick: () => openResults("entry"),
           });
           if (isSchoolAdmin) quick.push({
             key: "schooldash", icon: "▦", tint: "violet", title: "Tableau de bord",
@@ -4457,7 +4481,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                         { n: 3, done: (classStats?.evaluated || 0) > 0, icon: "✓",
                           title: "Saisir les premiers résultats",
                           meta: "Après le contrôle, corrigé sur papier",
-                          onClick: () => setScreen("results") },
+                          onClick: () => openResults("entry") },
                       ].map((step) => (
                         <ListRow
                           key={step.n}
@@ -4633,7 +4657,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                   <StatTile label="Enseignants" tint="blue"
                     value={adminStats ? adminStats.teachers : "—"}
                     foot={adminStats ? `${adminStats.teachers7} connecté${adminStats.teachers7 > 1 ? "s" : ""} ces 7 jours` : "chargement…"}
-                    onClick={() => setScreen("activitylog")} />
+                    onClick={() => openActivity("teachers")} />
                   <StatTile label="Parents actifs" tint="amber"
                     value={adminStats && adminStats.parents > 0
                       ? Math.round((adminStats.parents30 / adminStats.parents) * 100)
@@ -4642,17 +4666,14 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                     foot={adminStats
                       ? `${adminStats.parents30} sur ${adminStats.parents} compte${adminStats.parents > 1 ? "s" : ""}`
                       : "chargement…"}
-                    onClick={() => setScreen("activitylog")} />
+                    onClick={() => openActivity("parents")} />
                   <StatTile label="Anomalies ouvertes"
                     tint={Array.isArray(anomalies) && anomalies.length > 0 ? "crit" : "violet"}
                     value={Array.isArray(anomalies) ? anomalies.length : anomalies === false ? "—" : "…"}
                     foot={anomalies === false ? "détection non activée"
                       : Array.isArray(anomalies) && anomalies.length === 0 ? "rien à vérifier"
                       : "motifs à vérifier"}
-                    onClick={() => {
-                      const el = typeof document !== "undefined" && document.getElementById("ec-admin-anomalies");
-                      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-                    }} />
+                    onClick={() => openActivity("journal")} />
                 </div>
               </div>
 
@@ -4754,7 +4775,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               {/* ---- INTÉGRITÉ ----
                    Une anomalie n'est pas une accusation : c'est un motif de
                    vérifier. Le détail nomme le fait constaté, jamais une intention. */}
-              <Card className="ec-c5" id="ec-admin-anomalies" style={{ scrollMarginTop: 16 }}>
+              <Card className="ec-c5">
                 <div className="ec-cardhd">
                   <h2 className="ec-cardtitle">Anomalies détectées</h2>
                   {Array.isArray(anomalies) && anomalies.length > 6 && (
@@ -4980,9 +5001,14 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         {screen === "results" && PROFILES_ENABLED && !isAdmin && (
           isParent
             ? <Results parent={parent} student={parentStudent} results={parentResults} onOpenLesson={(id) => openLesson(id)} onBack={() => setScreen("home")} />
-            : <Results teacher={teacher} school={schoolContext} onBack={goBack} />
+            : <Results teacher={teacher} school={schoolContext} onBack={goBack} initialTab={resultsTab} />
         )}
-        {screen === "activitylog" && PROFILES_ENABLED && (isAdmin || isSchoolAdmin) && <ActivityLog school={schoolContext} isAdmin={isAdmin} onBack={goBack} />}
+        {screen === "activitylog" && PROFILES_ENABLED && (isAdmin || isSchoolAdmin) && (
+          <ActivityLog school={schoolContext} isAdmin={isAdmin} onBack={goBack}
+            initialTab={activityTab}
+            onActAsTeacher={isAdmin && onImpersonate ? actAsTeacherById : undefined}
+            onActAsParent={isAdmin && onImpersonate ? actAsParentById : undefined} />
+        )}
         {screen === "messages" && PROFILES_ENABLED && MessagesInbox()}
       </main>
       {screen !== "lesson" && BottomNav()}
