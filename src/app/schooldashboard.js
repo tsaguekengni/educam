@@ -305,9 +305,11 @@ export default function SchoolDashboard({ school, onBack, onOpenTab }) {
           <div className="ec-c12">
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 18 }}>
               <StatTile label="Élèves enregistrés" tint="green" value={studentCount}
-                foot={studentCount ? "prêts à être suivis" : "aucun élève enregistré"} />
+                foot={studentCount ? "prêts à être suivis" : "aucun élève enregistré"}
+                onClick={onOpenTab ? () => onOpenTab("students") : undefined} />
               <StatTile label="Classes" tint="blue" value={classCount}
-                foot={classCount ? "enseignants rattachés" : "aucun enseignant n'a rejoint"} />
+                foot={classCount ? "enseignants rattachés" : "aucun enseignant n'a rejoint"}
+                onClick={onOpenTab ? () => onOpenTab("students") : undefined} />
               <StatTile label="Semaines au calendrier" tint="amber" value={32}
                 foot="8 unités de 4 semaines" />
               <StatTile label="Résultats saisis" tint="violet" value={0}
@@ -380,16 +382,20 @@ export default function SchoolDashboard({ school, onBack, onOpenTab }) {
           <div className="ec-c12">
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 18 }}>
               <StatTile label="Élèves suivis" tint="green" value={studentCount}
-                foot={`${evaluated} avec au moins un résultat`} />
+                foot={`${evaluated} avec au moins un résultat`}
+                onClick={onOpenTab ? () => onOpenTab("students") : undefined} />
               <StatTile label="Moyenne de l'école" tint="blue"
                 value={schoolAvg == null ? "—" : fr(schoolAvg)}
-                unit={schoolAvg == null ? "" : "/20"}>
+                unit={schoolAvg == null ? "" : "/20"}
+                onClick={onOpenTab ? () => onOpenTab("students") : undefined}>
                 {trend.length > 1 && <Sparkline values={trend.map((t) => t.value)} />}
               </StatTile>
               <StatTile label="Élèves sous la moyenne" tint="amber" value={belowPass}
-                foot={evaluated ? `${Math.round((belowPass / evaluated) * 100)} % des élèves évalués` : "aucun élève évalué"} />
+                foot={evaluated ? `${Math.round((belowPass / evaluated) * 100)} % des élèves évalués` : "aucun élève évalué"}
+                onClick={onOpenTab ? () => onOpenTab("students") : undefined} />
               <StatTile label="Classes à rattraper" tint={late.length ? "crit" : "violet"} value={late.length}
-                foot={heatRows.length ? `sur ${heatRows.length} classes suivies` : "couverture non renseignée"} />
+                foot={heatRows.length ? `sur ${heatRows.length} classes suivies` : "couverture non renseignée"}
+                onClick={onOpenTab ? () => onOpenTab("students") : undefined} />
             </div>
           </div>
 

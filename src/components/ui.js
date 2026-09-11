@@ -346,15 +346,29 @@ export function Breadcrumb({ items }) {
  *
  * `foot` — ligne de contexte sous le nombre (« +6 cette semaine · sur 136 »).
  */
-export function StatTile({ label, value, unit, delta, deltaDir, tint, foot, children }) {
+export function StatTile({ label, value, unit, delta, deltaDir, tint, foot, children, onClick }) {
   const col = deltaDir === "up" ? COLORS.good : deltaDir === "down" ? COLORS.crit : COLORS.ink3;
+  // « Raccourci » (2026-09-11) : une tuile peut désormais mener là où vit la
+  // donnée. Si onClick est fourni, la carte devient un bouton accessible au
+  // clavier (Entrée / Espace), avec curseur, survol relevé et chevron « › ».
+  const clickable = typeof onClick === "function";
+  const interactive = clickable ? {
+    onClick,
+    role: "button",
+    tabIndex: 0,
+    onKeyDown: (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(e); }
+    },
+    style: { position: "relative" },
+  } : {};
   // « Vibrant Command » (2026-08-13) : la teinte de domaine passe d'un FOND
   // plein à un liseré de 3 px en haut de la tuile. Un fond teinté finissait par
   // se lire comme un statut — exactement ce que la règle 1 interdit. La carte
   // redevient blanche, donc le chiffre garde son contraste maximal.
   const rule = tint ? `ec-tile-rule ec-tile-rule--${tint}` : "";
+  const cls = `${rule}${clickable ? " ec-tile-clickable" : ""}`.trim();
   return (
-    <Card className={rule}>
+    <Card className={cls} {...interactive}>
       <div style={{
         fontSize: FONT.xs, color: COLORS.ink3, fontWeight: 750,
         letterSpacing: ".09em", textTransform: "uppercase",
@@ -378,6 +392,7 @@ export function StatTile({ label, value, unit, delta, deltaDir, tint, foot, chil
         <div style={{ fontSize: FONT.sm, color: COLORS.ink3, marginTop: 6, lineHeight: 1.4 }}>{foot}</div>
       ) : null}
       {children}
+      {clickable ? <span aria-hidden="true" className="ec-tile-chevron">›</span> : null}
     </Card>
   );
 }
