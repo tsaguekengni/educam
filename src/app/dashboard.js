@@ -3966,13 +3966,16 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                     unit={avg20 != null ? "/20" : ""}
                     foot={withPct.length
                       ? `${withPct.length} contrôle${withPct.length > 1 ? "s" : ""} corrigé${withPct.length > 1 ? "s" : ""}`
-                      : "aucun contrôle encore"} />
+                      : "aucun contrôle encore"}
+                    onClick={() => setScreen("results")} />
                   <StatTile label="Leçons à revoir" tint="amber"
                     value={reviewIds.size}
-                    foot={reviewIds.size ? "à retravailler ensemble" : "aucune difficulté"} />
+                    foot={reviewIds.size ? "à retravailler ensemble" : "aucune difficulté"}
+                    onClick={() => setScreen("results")} />
                   <StatTile label="Messages" tint="violet"
                     value={unreadCount}
-                    foot={unreadCount ? "non lus" : "tout est lu"} />
+                    foot={unreadCount ? "non lus" : "tout est lu"}
+                    onClick={() => { setOpenMsg(null); setScreen("messages"); }} />
                 </div>
               );
             })()}
@@ -4134,6 +4137,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             {
               label: "Cours aujourd'hui", value: lessonSlotsToday.length, tint: "green",
               foot: upcomingSlot ? `prochain à ${fmtHour(upcomingSlot.start_time)}` : "journée terminée",
+              onClick: () => { setTab("calendar"); setScreen("calendar"); },
             },
             {
               label: "Moyenne de classe", tint: "blue",
@@ -4144,6 +4148,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                     ? `${classStats.evaluated} élève${classStats.evaluated > 1 ? "s" : ""} évalué${classStats.evaluated > 1 ? "s" : ""} sur ${classStats.students}`
                     : "aucun résultat saisi")
                 : "chargement…",
+              onClick: () => setScreen("results"),
             },
             {
               label: "Élèves à suivre", tint: "amber",
@@ -4151,6 +4156,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               foot: classStats
                 ? (classStats.atRisk ? "moyenne sous 10 / 20" : "aucun élève sous 10 / 20")
                 : "chargement…",
+              onClick: () => setScreen("results"),
             },
           ];
           if (OFFLINE_ENABLED) {
@@ -4159,6 +4165,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               foot: grantDaysLeft != null
                 ? `leçons prêtes · accès ${grantDaysLeft} j`
                 : "leçons prêtes sans réseau",
+              onClick: () => { setTab("calendar"); setScreen("calendar"); },
             });
           }
 
@@ -4469,7 +4476,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                 <div className="ec-c12 ec-deskonly">
                   <div style={{ display: "grid", gridTemplateColumns: `repeat(${tiles.length}, 1fr)`, gap: 18 }}>
                     {tiles.map((t) => (
-                      <StatTile key={t.label} label={t.label} value={t.value} unit={t.unit} tint={t.tint} foot={t.foot} />
+                      <StatTile key={t.label} label={t.label} value={t.value} unit={t.unit} tint={t.tint} foot={t.foot} onClick={t.onClick} />
                     ))}
                   </div>
                 </div>
@@ -4486,11 +4493,19 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                         Programme
                       </button>
                     </div>
-                    {progress.map((s, i) => (
-                      <div key={s.name} style={{
-                        padding: "11px 0",
-                        borderTop: i === 0 ? "none" : `1px solid ${COLORS.divider}`,
-                      }}>
+                    {progress.map((s, i) => {
+                      const goProgramme = () => { setTab("programme"); setScreen("programme"); setProgrammeView("subjects"); };
+                      return (
+                      <div key={s.name}
+                        className="ec-progrow"
+                        role="button" tabIndex={0}
+                        onClick={goProgramme}
+                        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); goProgramme(); } }}
+                        style={{
+                          padding: "11px 8px", margin: "0 -8px", borderRadius: 8,
+                          borderTop: i === 0 ? "none" : `1px solid ${COLORS.divider}`,
+                          cursor: "pointer",
+                        }}>
                         <div style={{ display: "flex", alignItems: "baseline", gap: 9, fontSize: FONT.md }}>
                           <b style={{ fontWeight: 600 }}>{s.name}</b>
                           <span style={{
@@ -4503,7 +4518,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                         <Meter value={Math.min(s.done, s.total)} max={s.total}
                           color={subjectColor(s.name)} label={`${s.name} : ${s.done} sur ${s.total}`} />
                       </div>
-                    ))}
+                      );
+                    })}
                   </Card>
                 </div>
               )}
@@ -4612,10 +4628,12 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                       ? (adminStats.schoolsActive === adminStats.schools && adminStats.schools > 0
                           ? "toutes actives cette semaine"
                           : `${adminStats.schoolsActive} active${adminStats.schoolsActive > 1 ? "s" : ""} cette semaine`)
-                      : "chargement…"} />
+                      : "chargement…"}
+                    onClick={() => { setScreen("adminschools"); loadAdminSchools(); }} />
                   <StatTile label="Enseignants" tint="blue"
                     value={adminStats ? adminStats.teachers : "—"}
-                    foot={adminStats ? `${adminStats.teachers7} connecté${adminStats.teachers7 > 1 ? "s" : ""} ces 7 jours` : "chargement…"} />
+                    foot={adminStats ? `${adminStats.teachers7} connecté${adminStats.teachers7 > 1 ? "s" : ""} ces 7 jours` : "chargement…"}
+                    onClick={() => setScreen("activitylog")} />
                   <StatTile label="Parents actifs" tint="amber"
                     value={adminStats && adminStats.parents > 0
                       ? Math.round((adminStats.parents30 / adminStats.parents) * 100)
@@ -4623,13 +4641,18 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                     unit={adminStats && adminStats.parents > 0 ? "%" : ""}
                     foot={adminStats
                       ? `${adminStats.parents30} sur ${adminStats.parents} compte${adminStats.parents > 1 ? "s" : ""}`
-                      : "chargement…"} />
+                      : "chargement…"}
+                    onClick={() => setScreen("activitylog")} />
                   <StatTile label="Anomalies ouvertes"
                     tint={Array.isArray(anomalies) && anomalies.length > 0 ? "crit" : "violet"}
                     value={Array.isArray(anomalies) ? anomalies.length : anomalies === false ? "—" : "…"}
                     foot={anomalies === false ? "détection non activée"
                       : Array.isArray(anomalies) && anomalies.length === 0 ? "rien à vérifier"
-                      : "motifs à vérifier"} />
+                      : "motifs à vérifier"}
+                    onClick={() => {
+                      const el = typeof document !== "undefined" && document.getElementById("ec-admin-anomalies");
+                      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+                    }} />
                 </div>
               </div>
 
@@ -4731,7 +4754,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               {/* ---- INTÉGRITÉ ----
                    Une anomalie n'est pas une accusation : c'est un motif de
                    vérifier. Le détail nomme le fait constaté, jamais une intention. */}
-              <Card className="ec-c5">
+              <Card className="ec-c5" id="ec-admin-anomalies" style={{ scrollMarginTop: 16 }}>
                 <div className="ec-cardhd">
                   <h2 className="ec-cardtitle">Anomalies détectées</h2>
                   {Array.isArray(anomalies) && anomalies.length > 6 && (
