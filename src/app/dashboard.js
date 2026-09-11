@@ -534,6 +534,17 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [taughtSaving, setTaughtSaving] = useState(false);
   const [projectorMode, setProjectorMode] = useState(false);
   const projectorScrollRef = useRef(null); // the scrollable projector panel (for pointer/keyboard scrolling)
+  // Presenter mode: the lesson runs in a SECOND window (on the projector) while
+  // the teacher keeps working on the laptop. `presenting` = this is the laptop
+  // control side; `isPresentWindow` = this IS the projector window (opened with
+  // ?present=<lessonId>).
+  const [presenting, setPresenting] = useState(false);
+  const presenterWinRef = useRef(null);
+  const projectorChanRef = useRef(null); // BroadcastChannel to the projector window
+  const [isPresentWindow] = useState(() => {
+    if (typeof window === "undefined") return false;
+    try { return new URLSearchParams(window.location.search).has("present"); } catch (_) { return false; }
+  });
 
   // Inline edit state
   const [editMode, setEditMode] = useState(false);
@@ -3238,7 +3249,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                 {taughtSaving ? "Enregistrement…" : lessonTaught ? "✓ Enseignée" : "Marquer enseignée"}
               </Button>
             )}
-            <Button variant="ghost" onClick={enterProjector} aria-label="Mode projecteur" title="Mode projecteur">
+            <Button variant="ghost" onClick={startProjector} aria-label="Mode projecteur" title="Projeter (2e écran si disponible)">
               📽 {!isMobile && "Projecteur"}
             </Button>
             {isAdmin && (
@@ -3483,60 +3494,114 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     try { if (document.fullscreenElement) document.exitFullscreen?.(); } catch (_) {}
   };
 
-  // Projector keyboard control. A presentation pointer (clicker) sends key
-  // events — usually PageDown/PageUp, sometimes arrows or Space. By default the
-  // browser scrolls the DOCUMENT with those keys, not our fixed overlay, so in
-  // projector mode nothing moved (it was scrolling the page hidden behind the
-  // overlay). Here we intercept those keys and scroll the projector panel itself.
+  // Send a command to the projector window.
+  const projectorPost = (msg) => { try { projectorChanRef.current?.postMessage(msg); } catch (_) {} };
+  const stopPresenter = () => {
+    projectorPost({ cmd: "exit" });
+    try { presenterWinRef.current?.close(); } catch (_) {}
+    presenterWinRef.current = null;
+    setPresenting(false);
+  };
+  // Launch the lesson onto the projector. If the laptop has a SECOND screen
+  // (projector via HDMI in "extend" mode), the lesson opens as its own window on
+  // that screen while the platform stays usable on the laptop. A single screen
+  // keeps the old same-screen fullscreen. Every failure path falls back safely.
+  const startProjector = async () => {
+    if (!currentLesson) return;
+    if (presenting) { try { presenterWinRef.current?.focus(); } catch (_) {} return; }
+    // `screen.isExtended` tells us if a second display exists WITHOUT any
+    // permission. Single screen → keep the classic same-screen projector.
+    const multi = (typeof window !== "undefined" && window.screen && typeof window.screen.isExtended === "boolean")
+      ? window.screen.isExtended : null;
+    if (multi === false) { enterProjector(); return; }
+    const lessonId = currentLesson.id;
+    const url = window.location.origin + "/?present=" + lessonId;
+    let win = null;
+    try {
+      if (typeof window.getScreenDetails === "function") {
+        const sd = await window.getScreenDetails();
+        const ext = sd.screens.find((s) => s !== sd.currentScreen && s.isInternal === false)
+          || sd.screens.find((s) => s !== sd.currentScreen);
+        if (ext) win = window.open(url, "educam_projector", `left=${ext.availLeft},top=${ext.availTop},width=${ext.availWidth},height=${ext.availHeight}`);
+      }
+    } catch (_) { /* permission denied / API absent → movable popup below */ }
+    if (!win) win = window.open(url, "educam_projector", "width=1280,height=800");
+    if (!win) { enterProjector(); return; } // popup blocked → same-screen fallback
+    presenterWinRef.current = win;
+    setPresenting(true);
+    logActivity({ actorId: teacher?.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "projector", lessonId, detail: currentLesson?.title });
+  };
+
+  // Keyboard / clicker control for the projector.
+  // - Local projector (same-screen fullscreen, OR the projector window itself):
+  //   keys scroll the local panel.
+  // - Laptop while presenting to the projector window (relaying): keys are
+  //   BROADCAST to that window instead.
+  const PROJECTOR_SCROLL_FRACTION = 0.04;
   useEffect(() => {
-    if (!projectorMode) return;
-    // Small step per keystroke (~4% of the screen) so holding / repeatedly
-    // pressing the pointer scrolls the lesson smoothly and continuously,
-    // rather than jumping a whole screen at a time. Instant behaviour keeps
-    // rapid key-repeat responsive (smooth animations would stack and lag).
-    const PROJECTOR_SCROLL_FRACTION = 0.04;
-    const scrollPanel = (factor) => {
+    const localProjector = projectorMode && !presenting;
+    const relaying = presenting && !isPresentWindow;
+    if (!localProjector && !relaying) return;
+    const scrollLocal = (factor) => {
       const el = projectorScrollRef.current;
       if (!el) return;
-      const step = Math.round((el.clientHeight || window.innerHeight) * PROJECTOR_SCROLL_FRACTION) * factor;
-      el.scrollBy({ top: step, behavior: "auto" });
+      el.scrollBy({ top: Math.round((el.clientHeight || window.innerHeight) * PROJECTOR_SCROLL_FRACTION) * factor, behavior: "auto" });
     };
+    const doScroll = (f) => { relaying ? projectorPost({ cmd: "scroll", factor: f }) : scrollLocal(f); };
+    const doTop = () => { relaying ? projectorPost({ cmd: "top" }) : projectorScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" }); };
+    const doBottom = () => {
+      if (relaying) { projectorPost({ cmd: "bottom" }); return; }
+      const el = projectorScrollRef.current; if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    };
+    const doExit = () => { relaying ? stopPresenter() : exitProjector(); };
     const onKey = (e) => {
       switch (e.key) {
-        case "Escape":
-          exitProjector();
-          break;
-        // Advance / forward → scroll DOWN (covers most clicker mappings).
-        case "PageDown":
-        case "ArrowDown":
-        case "ArrowRight":
-          e.preventDefault(); scrollPanel(1); break;
-        // Back / previous → scroll UP.
-        case "PageUp":
-        case "ArrowUp":
-        case "ArrowLeft":
-          e.preventDefault(); scrollPanel(-1); break;
-        case " ": // Space (Shift+Space scrolls up)
-          e.preventDefault(); scrollPanel(e.shiftKey ? -1 : 1); break;
-        case "Home":
-          e.preventDefault();
-          projectorScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" }); break;
-        case "End":
-          e.preventDefault();
-          if (projectorScrollRef.current)
-            projectorScrollRef.current.scrollTo({ top: projectorScrollRef.current.scrollHeight, behavior: "smooth" });
-          break;
+        case "Escape": doExit(); break;
+        case "PageDown": case "ArrowDown": case "ArrowRight": e.preventDefault(); doScroll(1); break;
+        case "PageUp": case "ArrowUp": case "ArrowLeft": e.preventDefault(); doScroll(-1); break;
+        case " ": e.preventDefault(); doScroll(e.shiftKey ? -1 : 1); break;
+        case "Home": e.preventDefault(); doTop(); break;
+        case "End": e.preventDefault(); doBottom(); break;
         default: break;
       }
     };
-    const onFsChange = () => { if (!document.fullscreenElement) setProjectorMode(false); };
+    const onFsChange = () => { if (localProjector && !isPresentWindow && !document.fullscreenElement) setProjectorMode(false); };
     window.addEventListener("keydown", onKey);
     document.addEventListener("fullscreenchange", onFsChange);
     return () => {
       window.removeEventListener("keydown", onKey);
       document.removeEventListener("fullscreenchange", onFsChange);
     };
-  }, [projectorMode]);
+  }, [projectorMode, presenting, isPresentWindow]);
+
+  // BroadcastChannel between the laptop and the projector window. The projector
+  // window applies the remote scroll/exit commands to its own panel.
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof BroadcastChannel === "undefined") return;
+    const ch = new BroadcastChannel("educam_projector");
+    projectorChanRef.current = ch;
+    const onMsg = (e) => {
+      if (!isPresentWindow) return;
+      const m = e.data || {}; const el = projectorScrollRef.current;
+      if (m.cmd === "scroll" && el) el.scrollBy({ top: Math.round((el.clientHeight || window.innerHeight) * PROJECTOR_SCROLL_FRACTION) * m.factor, behavior: "auto" });
+      else if (m.cmd === "top" && el) el.scrollTo({ top: 0, behavior: "smooth" });
+      else if (m.cmd === "bottom" && el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+      else if (m.cmd === "exit") { try { window.close(); } catch (_) {} }
+    };
+    ch.addEventListener("message", onMsg);
+    return () => { try { ch.removeEventListener("message", onMsg); ch.close(); } catch (_) {} projectorChanRef.current = null; };
+  }, [isPresentWindow]);
+
+  // The projector window boots straight into its lesson + projector mode.
+  const presentBootedRef = useRef(false);
+  useEffect(() => {
+    if (!isPresentWindow || presentBootedRef.current || !teacher?.id) return;
+    let id = null;
+    try { id = Number(new URLSearchParams(window.location.search).get("present")); } catch (_) {}
+    if (!id) return;
+    presentBootedRef.current = true;
+    (async () => { await openLesson(id); setProjectorMode(true); })();
+  }, [isPresentWindow, teacher?.id]);
 
   const ProjectorView = () => {
     if (!currentLesson) return null;
@@ -3562,12 +3627,19 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           position: "fixed", top: 20, right: 24, zIndex: 10000,
           display: "flex", gap: 10
         }}>
-          <button onClick={exitProjector} style={{
+          {isPresentWindow && (
+            <button onClick={() => { try { document.documentElement.requestFullscreen?.(); } catch (_) {} }} style={{
+              background: "rgba(0,0,0,0.7)", color: "white", border: "none",
+              borderRadius: 10, padding: "10px 20px", fontSize: "var(--ec-fs-4)", fontWeight: 700,
+              cursor: "pointer", backdropFilter: "blur(8px)", boxShadow: "0 4px 20px rgba(0,0,0,0.2)"
+            }}>⛶ Plein écran</button>
+          )}
+          <button onClick={isPresentWindow ? () => { try { window.close(); } catch (_) {} } : exitProjector} style={{
             background: "rgba(0,0,0,0.7)", color: "white", border: "none",
             borderRadius: 10, padding: "10px 20px", fontSize: "var(--ec-fs-4)", fontWeight: 700,
             cursor: "pointer", backdropFilter: "blur(8px)",
             boxShadow: "0 4px 20px rgba(0,0,0,0.2)"
-          }}>✕ Quitter le projecteur</button>
+          }}>✕ {isPresentWindow ? "Fermer" : "Quitter le projecteur"}</button>
         </div>
 
         {/* Content */}
@@ -3745,6 +3817,17 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   };
 
   // ============ MAIN RENDER ============
+  const presentBtn = { background: "rgba(255,255,255,.15)", color: "#fff", border: "1px solid rgba(255,255,255,.35)", borderRadius: 8, padding: "7px 12px", fontSize: 14, fontWeight: 700, cursor: "pointer" };
+  // The projector window renders ONLY the lesson (no teacher chrome).
+  if (isPresentWindow) {
+    return (
+      <div className="ec-app">
+        {projectorMode && currentLesson ? ProjectorView() : (
+          <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#FAF9F5", color: COLORS.ink3, fontSize: FONT.md }}>Chargement de la leçon…</div>
+        )}
+      </div>
+    );
+  }
   return (
     <div className={`ec-app${isParent ? " ec-app--parent" : ""}`}>
       {/* Called as functions, not <Components />, to avoid remounting on every
@@ -3756,6 +3839,17 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         <div style={{ background: COLORS.warnBg, color: COLORS.warn, borderBottom: `1px solid ${COLORS.border}`, padding: "10px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <span style={{ fontSize: FONT.sm, fontWeight: 700 }}>👁 Vous agissez en tant que {impersonationName || "cet utilisateur"}</span>
           <Button size="sm" onClick={onExitImpersonation}>Quitter l'aperçu</Button>
+        </div>
+      )}
+      {presenting && (
+        <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 10000, background: COLORS.g700, color: "#fff", display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", flexWrap: "wrap", boxShadow: "0 -2px 14px rgba(0,0,0,.25)" }}>
+          <span style={{ fontSize: FONT.sm, fontWeight: 800 }}>📽 Leçon projetée</span>
+          <span style={{ fontSize: 12, opacity: .85, flex: 1, minWidth: 140 }}>Vous pouvez continuer sur la plateforme ; la classe voit la leçon au tableau.</span>
+          <button onClick={() => projectorPost({ cmd: "top" })} style={presentBtn} title="Haut de la leçon">⤒</button>
+          <button onClick={() => projectorPost({ cmd: "scroll", factor: -1 })} style={presentBtn} title="Monter">↑</button>
+          <button onClick={() => projectorPost({ cmd: "scroll", factor: 1 })} style={presentBtn} title="Descendre">↓</button>
+          <button onClick={() => projectorPost({ cmd: "bottom" })} style={presentBtn} title="Bas de la leçon">⤓</button>
+          <button onClick={stopPresenter} style={{ ...presentBtn, background: "rgba(255,255,255,.92)", color: COLORS.g800 }}>✕ Arrêter</button>
         </div>
       )}
       {OFFLINE_ENABLED && !online && (
