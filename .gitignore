@@ -49,3 +49,18 @@ next-env.d.ts
 /EduCam_Investor_Deck_1.pptx
 /EduCam_Investor_Deck_1.pdf
 /preview-en.html
+
+# Documents d'entreprise, contractuels et commerciaux — dépôt PUBLIC, ne pas suivre.
+# Dé-suivis le 2026-09-12 ; sauvegardés sur OneDrive (EduCam-Dev/sauvegarde).
+/Company registration/
+/protocole/
+/plaquette/
+/recrutement/
+/demo/
+/manuel/
+
+# PDF de référence et captures (lourds, non-source)
+/Curriculum-CM1 CM2.pdf
+/REPARTITION ANNUELLE CM1 -.pdf
+/REPARTITION ANNUELLE CM2 -.pdf
+Capture d*.png
