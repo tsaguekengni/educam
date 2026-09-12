@@ -64,3 +64,13 @@ next-env.d.ts
 /REPARTITION ANNUELLE CM1 -.pdf
 /REPARTITION ANNUELLE CM2 -.pdf
 Capture d*.png
+
+# Ajouts 2026-09-12 (2e passe) — remontés par `git add -A` dans un dépôt PUBLIC.
+# Documents RH / personnels — ne JAMAIS suivre.
+/Claude outputs/
+# PDF de répartitions officielles (~23 Mo) — disque + OneDrive
+/Curriculum et Divers Repartitions/
+# Page d'atterrissage rendue (728 Ko, regenerable) — politique « poids du projet »
+/claude/EduCam_Landing_Page.html
+# Fichier parasite vide
+/Vercel
