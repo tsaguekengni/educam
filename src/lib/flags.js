@@ -25,6 +25,25 @@ export const WHATSAPP_ENABLED =
 export const PROFILES_ENABLED =
   process.env.NEXT_PUBLIC_PROFILES_ENABLED === "true";
 
+// Lien « Mot de passe oublié ? » sur l'écran de connexion.
+//
+// OFF par défaut, et c'est VOLONTAIRE : le lien ne dépend d'aucune colonne, mais
+// il dépend d'un courriel qui part vraiment. Le mailer intégré de Supabase est
+// plafonné à quelques envois par heure — inutilisable en production. Un lien qui
+// annonce « un courriel vient d'être envoyé » alors que rien n'arrive est PIRE
+// que pas de lien du tout : l'utilisateur attend au lieu de demander de l'aide.
+//
+// Ordre à respecter : configurer l'envoi de courriels (SMTP personnalisé ou
+// fournisseur d'envoi) + inscrire l'adresse de l'application dans Supabase →
+// Authentication → URL Configuration, tester la réception, PUIS lever ce drapeau.
+//
+// L'écran « Choisir un nouveau mot de passe » n'est PAS derrière ce drapeau : on
+// ne l'atteint qu'avec un jeton de récupération valide, donc il reste utilisable
+// pour une réinitialisation déclenchée à la main depuis Supabase.
+// Détail : claude/EduCam_Console_Utilisateurs.md
+export const PASSWORD_RESET_ENABLED =
+  process.env.NEXT_PUBLIC_PASSWORD_RESET_ENABLED === "true";
+
 // Position de l'enfant montrée au PARENT, sous forme de TRANCHE ("premier tiers
 // de la classe", "a besoin de soutien") — JAMAIS un rang chiffré « 12e / 34 ».
 // Décision produit du 2026-08-11 (Maxime) : afficher une tranche adoucie, pas un
