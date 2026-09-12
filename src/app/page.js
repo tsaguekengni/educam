@@ -2,18 +2,19 @@
 import { useState, useEffect } from "react";
 import { supabase } from "../lib/supabase";
 import Dashboard from "./dashboard";
-import { OFFLINE_ENABLED, PROFILES_ENABLED } from "../lib/flags";
+import { OFFLINE_ENABLED, PROFILES_ENABLED, PASSWORD_RESET_ENABLED } from "../lib/flags";
 import { setGrant, getGrant, clearGrant } from "../lib/offline";
 import { COLORS, FONT } from "../lib/theme";
 import { Button, Callout } from "../components/ui";
 import { Field, PasswordField, SelectField, ChoiceGroup } from "../components/forms";
+import { normalizePhone } from "../lib/phone";
 
 export default function Home() {
   const [session, setSession] = useState(null);
   const [teacher, setTeacher] = useState(null);
   const [parent, setParent] = useState(null); // parent profile (profiles mode)
   const [impersonation, setImpersonation] = useState(null); // admin "act as": { role:'teacher'|'parent', profile, name }
-  const [mode, setMode] = useState("login"); // login or register
+  const [mode, setMode] = useState("login"); // login | register | forgot
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -29,6 +30,17 @@ export default function Home() {
   const [schoolCode, setSchoolCode] = useState(""); // staff join-code (profiles mode)
   const [accountType, setAccountType] = useState("teacher"); // teacher | parent (profiles mode)
   const [parentCode, setParentCode] = useState(""); // per-child access code (parent signup)
+  // Téléphone : COORDONNÉE de contact, jamais un identifiant de connexion. Il va
+  // dans teachers.phone / parents.phone — pas dans auth.users — ce qui permet à
+  // la console superadmin de le corriger sans clé de service.
+  const [phone, setPhone] = useState("");
+
+  // ---- Réinitialisation du mot de passe (« mot de passe oublié ») ----
+  // Aucune clé de service : resetPasswordForEmail et updateUser agissent sur le
+  // compte de l'utilisateur lui-même, donc tout se fait côté navigateur.
+  const [recovering, setRecovering] = useState(false); // l'utilisateur arrive d'un lien de réinitialisation
+  const [newPassword, setNewPassword] = useState("");
+  const [newPassword2, setNewPassword2] = useState("");
 
   // Le formulaire sait maintenant si l'appareil est hors ligne, pour ne plus
   // afficher « email ou mot de passe incorrect » quand c'est le réseau qui manque.
@@ -42,6 +54,37 @@ export default function Home() {
       window.removeEventListener("online", sync);
       window.removeEventListener("offline", sync);
     };
+  }, []);
+
+  // Retour d'un lien « mot de passe oublié ».
+  //
+  // Supabase renvoie l'utilisateur ici avec un jeton de récupération dans l'URL
+  // et ouvre une session temporaire. Sans le garde-fou ci-dessous, la logique
+  // habituelle verrait « une session + un profil » et afficherait le tableau de
+  // bord — l'utilisateur n'aurait jamais l'écran pour choisir son mot de passe.
+  //
+  // On lit donc l'URL TOUT DE SUITE (synchrone, avant que la restauration de
+  // session asynchrone n'ait pu aboutir), et on écoute aussi l'événement
+  // PASSWORD_RECOVERY pour les cas où le jeton est échangé plus tard.
+  // Cet effet est déclaré AVANT la restauration de session : l'ordre compte.
+  useEffect(() => {
+    const looksLikeRecovery = () => {
+      if (typeof window === "undefined") return false;
+      const hash = window.location.hash || "";
+      const query = window.location.search || "";
+      return hash.includes("type=recovery") || query.includes("type=recovery");
+    };
+    if (looksLikeRecovery()) {
+      setRecovering(true);
+      setBooting(false);
+    }
+    const { data: sub } = supabase.auth.onAuthStateChange((event) => {
+      if (event === "PASSWORD_RECOVERY") {
+        setRecovering(true);
+        setBooting(false);
+      }
+    });
+    return () => sub?.subscription?.unsubscribe();
   }, []);
 
   // Session restore (offline mode only). When the flag is off this never runs,
@@ -203,6 +246,9 @@ export default function Home() {
       }
       const { error: pErr } = await supabase.from("parents").insert({
         id: pData.user.id, full_name: fullName.trim() || null, student_id: linkedStudentId,
+        // Coordonnées : normalisées à la saisie pour qu'un numéro mal tapé ne
+        // devienne pas une notification qui n'arrive jamais.
+        phone: normalizePhone(phone), contact_email: email.trim() || null,
       });
       if (pErr) {
         setError("Erreur lors de la création du profil");
@@ -261,6 +307,9 @@ export default function Home() {
       full_name: fullName.trim(),
       school_name: schoolName.trim() || null,
       level: level,
+      // Coordonnées : normalisées à la saisie (voir src/lib/phone.js).
+      phone: normalizePhone(phone),
+      contact_email: email.trim() || null,
       ...(joinedSchool ? { school_id: joinedSchool.id } : {}),
     });
 
@@ -309,11 +358,141 @@ export default function Home() {
     setLoading(false);
   };
 
+  // Envoi du lien de réinitialisation. Le message de confirmation ne dit JAMAIS
+  // si l'adresse existe : sinon le formulaire devient un moyen de savoir qui est
+  // inscrit sur la plateforme. On répond donc la même chose dans tous les cas.
+  const handleForgot = async () => {
+    setLoading(true);
+    setError("");
+    setSuccess("");
+
+    if (!email.trim()) {
+      setError("Entrez votre adresse email");
+      setLoading(false);
+      return;
+    }
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      setError("Cette action nécessite un réseau. Reconnectez-vous puis réessayez.");
+      setLoading(false);
+      return;
+    }
+
+    await supabase.auth.resetPasswordForEmail(email.trim(), {
+      redirectTo: typeof window === "undefined" ? undefined : window.location.origin,
+    });
+
+    setSuccess(
+      "Si un compte existe pour cette adresse, un lien de réinitialisation vient d'être envoyé. " +
+      "Pensez à regarder dans les courriers indésirables."
+    );
+    setLoading(false);
+  };
+
+  // Choix du nouveau mot de passe, au retour du lien.
+  const handleSetNewPassword = async () => {
+    setLoading(true);
+    setError("");
+    setSuccess("");
+
+    if (newPassword.length < 6) {
+      setError("Le mot de passe doit contenir au moins 6 caractères");
+      setLoading(false);
+      return;
+    }
+    if (newPassword !== newPassword2) {
+      setError("Les deux mots de passe ne sont pas identiques");
+      setLoading(false);
+      return;
+    }
+
+    const { error: updErr } = await supabase.auth.updateUser({ password: newPassword });
+    if (updErr) {
+      setError(
+        "Impossible d'enregistrer ce mot de passe. Le lien a peut-être expiré : " +
+        "demandez-en un nouveau depuis « Mot de passe oublié »."
+      );
+      setLoading(false);
+      return;
+    }
+
+    // On referme la session de récupération et on renvoie vers la connexion :
+    // l'utilisateur se reconnecte une fois avec son nouveau mot de passe, ce qui
+    // évite de le laisser dans un état à moitié authentifié.
+    await supabase.auth.signOut();
+    clearGrant();
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+    setRecovering(false);
+    setNewPassword("");
+    setNewPassword2("");
+    setPassword("");
+    setSession(null);
+    setTeacher(null);
+    setParent(null);
+    setMode("login");
+    setSuccess("Mot de passe modifié. Vous pouvez maintenant vous connecter.");
+    setLoading(false);
+  };
+
   const submit = (e) => {
     e.preventDefault();
     if (loading) return;
+    if (mode === "forgot") return handleForgot();
     mode === "login" ? handleLogin() : handleRegister();
   };
+
+  // Retour d'un lien de réinitialisation : choisir un nouveau mot de passe.
+  // CE BLOC DOIT RESTER AVANT tous les rendus de session ci-dessous. Le lien
+  // ouvre une session valide : si on laissait passer, l'utilisateur atterrirait
+  // sur son tableau de bord sans jamais pouvoir changer son mot de passe.
+  if (recovering) {
+    return (
+      <div style={{
+        minHeight: "100vh", background: COLORS.page,
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
+      }}>
+        <main style={{ width: "100%", maxWidth: 440 }}>
+          <div className="ec-card" style={{ padding: "26px 22px", borderRadius: 16 }}>
+            <h1 style={{ fontSize: FONT.xl, fontWeight: 800, letterSpacing: "-.03em", lineHeight: 1.2 }}>
+              Choisir un nouveau mot de passe
+            </h1>
+            <p style={{ fontSize: FONT.sm, color: COLORS.ink3, marginTop: 6, lineHeight: 1.5 }}>
+              Entrez le mot de passe que vous utiliserez désormais pour vous connecter.
+            </p>
+
+            {error && <Callout tone="crit" icon="⚠" style={{ marginTop: 16 }}>{error}</Callout>}
+
+            <form
+              onSubmit={(e) => { e.preventDefault(); if (!loading) handleSetNewPassword(); }}
+              style={{ marginTop: 18 }}
+            >
+              <PasswordField
+                label="Nouveau mot de passe"
+                required
+                placeholder="Minimum 6 caractères"
+                hint="Au moins 6 caractères."
+                autoComplete="new-password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+              />
+              <PasswordField
+                label="Confirmer le mot de passe"
+                required
+                placeholder="Saisissez-le une seconde fois"
+                autoComplete="new-password"
+                value={newPassword2}
+                onChange={(e) => setNewPassword2(e.target.value)}
+              />
+              <Button type="submit" block disabled={loading} style={{ marginTop: 6 }}>
+                {loading ? "Enregistrement…" : "Enregistrer le mot de passe"}
+              </Button>
+            </form>
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   // Brief boot screen while restoring a session (offline mode only).
   if (OFFLINE_ENABLED && booting) {
@@ -377,12 +556,18 @@ export default function Home() {
           </div>
 
           <h1 style={{ fontSize: FONT.xl, fontWeight: 800, letterSpacing: "-.03em", lineHeight: 1.2 }}>
-            {mode === "login" ? "Bienvenue sur EduCam" : "Créer votre compte"}
+            {mode === "login"
+              ? "Bienvenue sur EduCam"
+              : mode === "forgot"
+                ? "Mot de passe oublié"
+                : "Créer votre compte"}
           </h1>
           <p style={{ fontSize: FONT.sm, color: COLORS.ink3, marginTop: 6, lineHeight: 1.5 }}>
             {mode === "login"
               ? "Connectez-vous pour retrouver vos leçons et votre emploi du temps."
-              : "Quelques informations, et vous pourrez commencer."}
+              : mode === "forgot"
+                ? "Entrez votre adresse email : nous vous enverrons un lien pour choisir un nouveau mot de passe."
+                : "Quelques informations, et vous pourrez commencer."}
           </p>
 
           {!online && (
@@ -477,24 +662,63 @@ export default function Home() {
               onChange={(e) => setEmail(e.target.value)}
             />
 
-            <PasswordField
-              required
-              placeholder={mode === "register" ? "Minimum 6 caractères" : "••••••••"}
-              hint={mode === "register" ? "Au moins 6 caractères." : undefined}
-              autoComplete={mode === "register" ? "new-password" : "current-password"}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
+            {/* Téléphone — facultatif, et pour joindre la personne : ce n'est pas
+                un identifiant de connexion. On y tient quand même parce que c'est
+                le canal qui marche vraiment sur le terrain (WhatsApp). */}
+            {mode === "register" && (
+              <Field
+                label="Téléphone (WhatsApp)"
+                type="tel"
+                inputMode="tel"
+                placeholder="+237 6 90 00 00 00"
+                hint="Facultatif. Sert à vous joindre — vous vous connectez toujours avec votre email."
+                autoComplete="tel"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+              />
+            )}
+
+            {mode !== "forgot" && (
+              <PasswordField
+                required
+                placeholder={mode === "register" ? "Minimum 6 caractères" : "••••••••"}
+                hint={mode === "register" ? "Au moins 6 caractères." : undefined}
+                autoComplete={mode === "register" ? "new-password" : "current-password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            )}
+
+            {/* Le lien de récupération vit sous le mot de passe, là où l'on s'en
+                aperçoit — c'est-à-dire au moment où il ne rentre pas.
+                Derrière un drapeau : tant que les courriels ne partent pas
+                vraiment, mieux vaut pas de lien qu'un lien qui ne mène à rien. */}
+            {mode === "login" && PASSWORD_RESET_ENABLED && (
+              <div style={{ marginTop: -2, marginBottom: 10, textAlign: "right" }}>
+                <button
+                  type="button"
+                  className="ec-link"
+                  style={{ minHeight: 36, fontSize: FONT.sm }}
+                  onClick={() => { setMode("forgot"); setError(""); setSuccess(""); }}
+                >
+                  Mot de passe oublié ?
+                </button>
+              </div>
+            )}
 
             <Button type="submit" block disabled={loading} style={{ marginTop: 6 }}>
               {loading
-                ? (mode === "login" ? "Connexion…" : "Inscription…")
-                : (mode === "login" ? "Se connecter" : "Créer mon compte")}
+                ? (mode === "login" ? "Connexion…" : mode === "forgot" ? "Envoi…" : "Inscription…")
+                : (mode === "login" ? "Se connecter" : mode === "forgot" ? "Envoyer le lien" : "Créer mon compte")}
             </Button>
           </form>
 
           <div style={{ textAlign: "center", marginTop: 18, fontSize: FONT.sm, color: COLORS.ink3 }}>
-            {mode === "login" ? "Pas encore de compte ? " : "Vous avez déjà un compte ? "}
+            {mode === "login"
+              ? "Pas encore de compte ? "
+              : mode === "forgot"
+                ? "Vous vous en souvenez ? "
+                : "Vous avez déjà un compte ? "}
             <button
               type="button"
               className="ec-link"

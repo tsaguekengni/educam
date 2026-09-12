@@ -20,6 +20,7 @@ import { Button, Card, CardLabel, Badge, Callout, ListRow, IconButton, EmptyStat
 import { Sparkline, fr } from "../components/charts";
 import { useToasts } from "../components/overlays";
 import InstallPrompt from "../components/InstallPrompt";
+import { normalizePhone, formatPhone, isSuspectPhone } from "../lib/phone";
 
 const LEVELS = [
   { id: "ce1", name: "CE1", full: "Cours Élémentaire 1", primary: "Primary 3" },
@@ -27,6 +28,17 @@ const LEVELS = [
   { id: "cm1", name: "CM1", full: "Cours Moyen 1", primary: "Primary 5" },
   { id: "cm2", name: "CM2", full: "Cours Moyen 2", primary: "Primary 6" },
 ];
+
+// Libellés des rôles pour la console « Utilisateurs ». `referent` partage l'accès
+// du directeur mais reste un rôle DISTINCT (décision conservée) : on l'affiche
+// donc sous son propre nom, jamais fondu dans « directeur ».
+const ROLE_LABELS = {
+  teacher: "Enseignant",
+  school_admin: "Directeur",
+  referent: "Référent",
+  admin: "Superadmin",
+  parent: "Parent",
+};
 
 const SUBJECTS = [
   {
@@ -605,6 +617,21 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [adminSchoolMsg, setAdminSchoolMsg] = useState("");
   const [adminSchoolStudents, setAdminSchoolStudents] = useState([]); // students of the open school (act-as parent)
 
+  // ---- Console « Utilisateurs » (superadmin) : l'annuaire des comptes -------
+  // Un compte est soit une ligne `teachers` (enseignant / directeur / référent /
+  // superadmin), soit une ligne `parents`. Les deux tables portent `phone` et
+  // `contact_email` : des COORDONNÉES, pas des identifiants de connexion.
+  // L'adresse de connexion vit dans auth.users et n'est PAS modifiable ici —
+  // cela demanderait une clé de service (« lot 2 », volontairement reporté).
+  const [adminUsers, setAdminUsers] = useState(null);          // null = jamais chargé
+  const [adminUserSchools, setAdminUserSchools] = useState([]); // pour le sélecteur d'école
+  const [adminUsersLoading, setAdminUsersLoading] = useState(false);
+  const [adminUsersQuery, setAdminUsersQuery] = useState("");
+  const [adminUsersFilter, setAdminUsersFilter] = useState("all");
+  const [adminUserDraft, setAdminUserDraft] = useState(null);   // la ligne en cours d'édition
+  const [adminUserMsg, setAdminUserMsg] = useState("");
+  const [adminUserSaving, setAdminUserSaving] = useState(false);
+
   // Offline mode: network status, which lessons are downloaded, and download progress.
   const [online, setOnline] = useState(true);
   const [cachedIds, setCachedIds] = useState([]);
@@ -959,6 +986,117 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   };
   const openAdminSchool = (s, viewKey) => {
     setAdminSchool(s); setAdminSchoolView(viewKey || "gestion"); loadAdminSchoolStudents(s.id);
+  };
+
+  // ---- Console « Utilisateurs » : charger l'annuaire ----
+  // Deux tables lues en parallèle, fondues en UNE liste triée par nom : c'est la
+  // vue « par personne » qui manquait (jusqu'ici on ne pouvait voir les comptes
+  // qu'en passant par une école).
+  const loadAdminUsers = async () => {
+    setAdminUsersLoading(true);
+    setAdminUserMsg("");
+    const [{ data: ts, error: tErr }, { data: ps, error: pErr }, { data: sc }, { data: st }] =
+      await Promise.all([
+        supabase.from("teachers").select("id, full_name, role, school_id, class_label, level, phone, contact_email"),
+        supabase.from("parents").select("id, full_name, student_id, phone, contact_email"),
+        supabase.from("schools").select("id, name").order("name"),
+        supabase.from("students").select("id, full_name"),
+      ]);
+
+    // Si `phone` / `contact_email` n'existent pas encore, PostgREST rejette la
+    // requête ENTIÈRE (pas seulement la colonne absente) et la liste arrive
+    // vide. On le dit, plutôt que d'afficher un annuaire vide et trompeur.
+    const failed = tErr || pErr;
+    if (failed) {
+      setAdminUserMsg(
+        "Erreur : " + (failed.message || "chargement impossible") +
+        " — si le message parle d'une colonne inconnue, la migration claude-user-admin.sql n'a pas encore été exécutée."
+      );
+    }
+
+    const childName = {};
+    (st || []).forEach((s) => { childName[s.id] = s.full_name; });
+
+    const rows = [
+      ...(ts || []).map((t) => ({
+        kind: "teacher", id: t.id,
+        full_name: t.full_name || "", role: t.role || "teacher",
+        school_id: t.school_id || "", class_label: t.class_label || "",
+        level: t.level || "", phone: t.phone || "", contact_email: t.contact_email || "",
+      })),
+      ...(ps || []).map((p) => ({
+        kind: "parent", id: p.id,
+        full_name: p.full_name || "", role: "parent",
+        student_id: p.student_id || null, child: childName[p.student_id] || null,
+        phone: p.phone || "", contact_email: p.contact_email || "",
+      })),
+    ].sort((a, b) => (a.full_name || "").localeCompare(b.full_name || "", "fr"));
+
+    setAdminUserSchools(sc || []);
+    setAdminUsers(rows);
+    setAdminUsersLoading(false);
+  };
+
+  // ---- Console « Utilisateurs » : enregistrer une fiche ----
+  const saveAdminUser = async () => {
+    const d = adminUserDraft;
+    if (!d) return;
+    setAdminUserSaving(true);
+    setAdminUserMsg("");
+
+    // Le numéro est normalisé AVANT écriture, et un numéro non reconnu est
+    // REFUSÉ plutôt qu'enregistré tel quel : un numéro mal formé ne produit
+    // aucune erreur visible le jour de l'envoi — la notification est simplement
+    // refusée par Meta et le parent n'est jamais prévenu.
+    let phoneToSave = null;
+    if (String(d.phone || "").trim() !== "") {
+      phoneToSave = normalizePhone(d.phone);
+      if (!phoneToSave) {
+        setAdminUserMsg("Erreur : numéro non reconnu. Format attendu : +237 6 90 00 00 00, ou 690000000 pour un numéro camerounais.");
+        setAdminUserSaving(false);
+        return;
+      }
+    }
+
+    const patch = {
+      full_name: String(d.full_name || "").trim() || null,
+      phone: phoneToSave,
+      contact_email: String(d.contact_email || "").trim() || null,
+    };
+    // Les champs de scolarité n'existent que sur un compte du personnel.
+    if (d.kind === "teacher") {
+      patch.role = d.role || "teacher";
+      patch.school_id = d.school_id || null;
+      patch.class_label = String(d.class_label || "").trim() || null;
+      patch.level = d.level || null;
+    }
+
+    const { error } = await supabase
+      .from(d.kind === "teacher" ? "teachers" : "parents")
+      .update(patch)
+      .eq("id", d.id);
+
+    if (error) {
+      setAdminUserMsg("Erreur : " + (error.message || "enregistrement impossible"));
+      setAdminUserSaving(false);
+      return;
+    }
+
+    // Toute modification d'un compte par le superadmin laisse une trace : c'est
+    // une donnée d'enfant côté parent, et « qui a changé quoi, quand » doit
+    // pouvoir se répondre (Article 12 du protocole pilote).
+    logActivity({
+      actorId: teacher?.id,
+      actorRole: teacher?.role || "admin",
+      schoolId: patch.school_id || null,
+      eventType: "user_edit",
+      detail: (patch.full_name || d.id) + " · " + (ROLE_LABELS[patch.role || d.role] || d.role),
+    });
+
+    setAdminUserDraft(null);
+    setAdminUserSaving(false);
+    setAdminUserMsg("Modifications enregistrées ✓");
+    loadAdminUsers();
   };
   // ---- Stage 2: act as a teacher (class) or a pupil's parent ----
   const actAsTeacher = (t) => { if (onImpersonate) onImpersonate("teacher", t, t.full_name || "Enseignant"); };
@@ -1783,6 +1921,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         { sect: "Plateforme", items: [
           { key: "home", icon: "⌂", label: "Accueil", phone: true, onClick: go("home") },
           { key: "adminschools", icon: "⌗", label: "Écoles", phone: true, onClick: () => { setScreen("adminschools"); loadAdminSchools(); } },
+          { key: "adminusers", icon: "◍", label: "Utilisateurs", phone: true, onClick: () => { setScreen("adminusers"); loadAdminUsers(); } },
           { key: "admin", icon: "✎", label: "Gestion des leçons", phone: true, onClick: go("admin") },
         ] },
         { sect: "Contenu", items: [
@@ -4228,6 +4367,10 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             key: "adminschools", icon: "🏫", tint: "amber", title: "Écoles",
             meta: "Élèves, codes, emplois du temps",
             onClick: () => { setScreen("adminschools"); loadAdminSchools(); } });
+          if (isAdmin) quick.push({
+            key: "adminusers", icon: "◍", tint: "green", title: "Utilisateurs",
+            meta: "Noms, rôles, téléphones",
+            onClick: () => { setScreen("adminusers"); loadAdminUsers(); } });
           if (PROFILES_ENABLED && (isAdmin || isSchoolAdmin)) quick.push({
             key: "activitylog", icon: "◔", tint: "violet", title: "Activité",
             meta: "Qui utilise vraiment EduCam", onClick: () => setScreen("activitylog"),
@@ -4830,6 +4973,9 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                       { key: "adminschools", icon: "⌗", tint: "green", title: "Écoles",
                         meta: "Créer une école, ses classes, ses codes d'accès",
                         onClick: () => { setScreen("adminschools"); loadAdminSchools(); } },
+                      { key: "adminusers", icon: "◍", tint: "violet", title: "Utilisateurs",
+                        meta: "Corriger un nom, un rôle, un téléphone",
+                        onClick: () => { setScreen("adminusers"); loadAdminUsers(); } },
                       { key: "admin", icon: "✎", tint: "blue", title: "Gestion des leçons",
                         meta: "Créer, corriger et publier le contenu",
                         onClick: () => setScreen("admin") },
@@ -4998,6 +5144,228 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             </div>
           )
         )}
+        {/* ================= CONSOLE « UTILISATEURS » (superadmin) =================
+             La vue « par personne » qui manquait : jusqu'ici un compte ne se
+             voyait qu'en passant par son école. On corrige ici un nom mal saisi,
+             un rôle, un rattachement, un téléphone.
+             CE QUI N'EST PAS ICI, VOLONTAIREMENT : l'adresse de connexion et le
+             mot de passe. Ils vivent dans auth.users et demanderaient une clé de
+             service côté serveur (« lot 2 », reporté). L'utilisateur change son
+             mot de passe lui-même par « Mot de passe oublié ». */}
+        {screen === "adminusers" && isAdmin && (() => {
+          const q = adminUsersQuery.trim().toLowerCase();
+          const STAFF_ROLES = ["school_admin", "referent", "admin"];
+          const list = (adminUsers || []).filter((u) => {
+            if (adminUsersFilter === "teacher" && !(u.kind === "teacher" && u.role === "teacher")) return false;
+            if (adminUsersFilter === "staff" && !(u.kind === "teacher" && STAFF_ROLES.includes(u.role))) return false;
+            if (adminUsersFilter === "parent" && u.kind !== "parent") return false;
+            if (!q) return true;
+            return [u.full_name, u.phone, u.contact_email, u.child, u.class_label]
+              .filter(Boolean).some((v) => String(v).toLowerCase().includes(q));
+          });
+          const schoolNameOf = (id) => (adminUserSchools.find((s) => s.id === id) || {}).name || null;
+          const total = (adminUsers || []).length;
+
+          return (
+            <div>
+              <button type="button" className="ec-link" onClick={() => { setScreen("home"); setAdminUserDraft(null); }} style={{ marginBottom: 12, fontSize: FONT.sm }}>← Retour</button>
+              <h1 style={{ fontSize: FONT.xl, fontWeight: 800, color: COLORS.ink, margin: "0 0 4px" }}>Utilisateurs</h1>
+              <p style={{ color: COLORS.ink3, margin: "0 0 18px", fontSize: FONT.md }}>
+                Tous les comptes de la plateforme, personnel et parents. Corrigez un nom, un rôle, un rattachement ou un téléphone.
+                L'adresse de connexion et le mot de passe ne se changent pas ici : chacun renouvelle son mot de passe depuis « Mot de passe oublié » sur l'écran de connexion.
+              </p>
+
+              {adminUserMsg ? (
+                <Callout tone={adminUserMsg.startsWith("Erreur") ? "crit" : "brand"}
+                  icon={adminUserMsg.startsWith("Erreur") ? "⚠" : "✓"} style={{ marginBottom: 16 }}>
+                  {adminUserMsg}
+                </Callout>
+              ) : null}
+
+              <Card style={{ marginBottom: 18 }}>
+                <CardLabel>Rechercher</CardLabel>
+                <input
+                  className="ec-input"
+                  value={adminUsersQuery}
+                  onChange={(e) => setAdminUsersQuery(e.target.value)}
+                  placeholder="Nom, téléphone, courriel, ou nom de l'enfant"
+                  aria-label="Rechercher un utilisateur"
+                />
+                <div style={{ marginTop: 12 }}>
+                  <Tabs
+                    ariaLabel="Filtrer par type de compte"
+                    value={adminUsersFilter}
+                    onChange={(v) => { setAdminUsersFilter(v); setAdminUserDraft(null); }}
+                    items={[
+                      { key: "all", label: "Tous" },
+                      { key: "teacher", label: "Enseignants" },
+                      { key: "staff", label: "Direction" },
+                      { key: "parent", label: "Parents" },
+                    ]}
+                  />
+                </div>
+              </Card>
+
+              {adminUsersLoading ? (
+                <SkeletonRows rows={4} />
+              ) : adminUsers === null ? null : total === 0 ? (
+                <Card><EmptyState icon="◍" title="Aucun compte">Personne n'est encore inscrit sur la plateforme.</EmptyState></Card>
+              ) : list.length === 0 ? (
+                <Card><EmptyState icon="🔎" title="Aucun résultat">Aucun compte ne correspond à cette recherche.</EmptyState></Card>
+              ) : (
+                <>
+                  <CardLabel>{list.length} compte(s) sur {total}</CardLabel>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {list.map((u) => {
+                      const editing = adminUserDraft && adminUserDraft.id === u.id;
+                      const isSelf = u.id === teacher?.id;
+                      const d = adminUserDraft;
+                      const meta = [
+                        u.kind === "teacher" ? (schoolNameOf(u.school_id) || "Aucune école") : null,
+                        u.kind === "teacher" ? (u.class_label || null) : null,
+                        u.kind === "teacher" && u.level ? u.level.toUpperCase() : null,
+                        u.kind === "parent" ? (u.child ? "enfant : " + u.child : "aucun enfant rattaché") : null,
+                      ].filter(Boolean).join(" · ");
+
+                      return (
+                        <Card key={u.kind + u.id}>
+                          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                            <div style={{ minWidth: 0, flex: "1 1 220px" }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                <span style={{ fontSize: FONT.md, fontWeight: 700, color: COLORS.ink }}>
+                                  {u.full_name || "(sans nom)"}
+                                </span>
+                                <Badge tone={u.role === "admin" ? "crit" : STAFF_ROLES.includes(u.role) ? "brand" : "neutral"}>
+                                  {ROLE_LABELS[u.role] || u.role}
+                                </Badge>
+                                {isSelf ? <Badge tone="warn">vous</Badge> : null}
+                                {isSuspectPhone(u.phone) ? <Badge tone="warn">téléphone à vérifier</Badge> : null}
+                              </div>
+                              <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3, marginTop: 4 }}>{meta || "—"}</div>
+                              <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3, marginTop: 3 }}>
+                                {[u.phone ? formatPhone(u.phone) : null, u.contact_email || null].filter(Boolean).join(" · ") || "Aucune coordonnée"}
+                              </div>
+                            </div>
+                            <div style={{ display: "flex", gap: 8, flex: "none", flexWrap: "wrap" }}>
+                              <Button size="sm" variant={editing ? "ghost" : "primary"}
+                                onClick={() => { setAdminUserMsg(""); setAdminUserDraft(editing ? null : { ...u }); }}>
+                                {editing ? "Annuler" : "Modifier"}
+                              </Button>
+                              {onImpersonate && !isSelf ? (
+                                <Button size="sm" variant="ghost"
+                                  onClick={() => u.kind === "teacher"
+                                    ? actAsTeacherById(u.id, u.full_name)
+                                    : actAsParentById(u.id, u.child || u.full_name)}>
+                                  Agir en tant que
+                                </Button>
+                              ) : null}
+                            </div>
+                          </div>
+
+                          {editing ? (
+                            <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${COLORS.border}`, display: "grid", gap: 10 }}>
+                              <div>
+                                <label htmlFor={`nm-${u.id}`} style={{ display: "block", fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.ink2, marginBottom: 5 }}>Nom complet</label>
+                                <input id={`nm-${u.id}`} className="ec-input" value={d.full_name}
+                                  onChange={(e) => setAdminUserDraft({ ...d, full_name: e.target.value })} />
+                              </div>
+
+                              {u.kind === "teacher" ? (
+                                <>
+                                  <div>
+                                    <label htmlFor={`rl-${u.id}`} style={{ display: "block", fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.ink2, marginBottom: 5 }}>Rôle</label>
+                                    <select id={`rl-${u.id}`} className="ec-input" style={{ cursor: isSelf ? "not-allowed" : "pointer" }}
+                                      value={d.role} disabled={isSelf}
+                                      onChange={(e) => setAdminUserDraft({ ...d, role: e.target.value })}>
+                                      <option value="teacher">Enseignant</option>
+                                      <option value="school_admin">Directeur</option>
+                                      <option value="referent">Référent</option>
+                                      <option value="admin">Superadmin</option>
+                                    </select>
+                                    {/* Garde-fou : se retirer soi-même le rôle superadmin ferme la
+                                        console à clé, sans moyen de revenir depuis l'interface. */}
+                                    {isSelf ? (
+                                      <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3, marginTop: 5, lineHeight: 1.45 }}>
+                                        C'est votre propre compte : le rôle n'est pas modifiable ici, pour éviter de vous fermer la console.
+                                      </div>
+                                    ) : null}
+                                  </div>
+
+                                  <div>
+                                    <label htmlFor={`sc-${u.id}`} style={{ display: "block", fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.ink2, marginBottom: 5 }}>École</label>
+                                    <select id={`sc-${u.id}`} className="ec-input" style={{ cursor: "pointer" }}
+                                      value={d.school_id || ""}
+                                      onChange={(e) => setAdminUserDraft({ ...d, school_id: e.target.value })}>
+                                      <option value="">— Aucune école —</option>
+                                      {adminUserSchools.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                    </select>
+                                  </div>
+
+                                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                                    <div style={{ flex: "1 1 140px" }}>
+                                      <label htmlFor={`cl-${u.id}`} style={{ display: "block", fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.ink2, marginBottom: 5 }}>Classe</label>
+                                      <input id={`cl-${u.id}`} className="ec-input" value={d.class_label}
+                                        placeholder="Ex : CM1 A"
+                                        onChange={(e) => setAdminUserDraft({ ...d, class_label: e.target.value })} />
+                                    </div>
+                                    <div style={{ flex: "1 1 140px" }}>
+                                      <label htmlFor={`lv-${u.id}`} style={{ display: "block", fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.ink2, marginBottom: 5 }}>Niveau</label>
+                                      <select id={`lv-${u.id}`} className="ec-input" style={{ cursor: "pointer" }}
+                                        value={d.level || ""}
+                                        onChange={(e) => setAdminUserDraft({ ...d, level: e.target.value })}>
+                                        <option value="">— Aucun —</option>
+                                        {LEVELS.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                                      </select>
+                                    </div>
+                                  </div>
+                                </>
+                              ) : (
+                                <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3, lineHeight: 1.45 }}>
+                                  Enfant rattaché : <strong style={{ color: COLORS.ink2 }}>{u.child || "aucun"}</strong>.
+                                  Le rattachement se fait par le code personnel de l'élève, depuis la gestion de l'école — il ne se change pas ici.
+                                </div>
+                              )}
+
+                              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                                <div style={{ flex: "1 1 160px" }}>
+                                  <label htmlFor={`ph-${u.id}`} style={{ display: "block", fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.ink2, marginBottom: 5 }}>Téléphone (WhatsApp)</label>
+                                  <input id={`ph-${u.id}`} className="ec-input" type="tel" inputMode="tel" value={d.phone}
+                                    placeholder="+237 6 90 00 00 00"
+                                    onChange={(e) => setAdminUserDraft({ ...d, phone: e.target.value })} />
+                                  <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3, marginTop: 5, lineHeight: 1.45 }}>
+                                    Un numéro camerounais peut s'écrire 690000000 : l'indicatif +237 est ajouté à l'enregistrement.
+                                  </div>
+                                </div>
+                                <div style={{ flex: "1 1 160px" }}>
+                                  <label htmlFor={`em-${u.id}`} style={{ display: "block", fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.ink2, marginBottom: 5 }}>Courriel de contact</label>
+                                  <input id={`em-${u.id}`} className="ec-input" type="email" inputMode="email" value={d.contact_email}
+                                    placeholder="nom@exemple.cm"
+                                    onChange={(e) => setAdminUserDraft({ ...d, contact_email: e.target.value })} />
+                                  <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3, marginTop: 5, lineHeight: 1.45 }}>
+                                    Pour joindre la personne. Ce n'est pas son identifiant de connexion.
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 2 }}>
+                                <Button size="sm" onClick={saveAdminUser} disabled={adminUserSaving}>
+                                  {adminUserSaving ? "Enregistrement…" : "Enregistrer"}
+                                </Button>
+                                <Button size="sm" variant="ghost" onClick={() => setAdminUserDraft(null)} disabled={adminUserSaving}>
+                                  Annuler
+                                </Button>
+                              </div>
+                            </div>
+                          ) : null}
+                        </Card>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+          );
+        })()}
         {screen === "results" && PROFILES_ENABLED && !isAdmin && (
           isParent
             ? <Results parent={parent} student={parentStudent} results={parentResults} onOpenLesson={(id) => openLesson(id)} onBack={() => setScreen("home")} />
