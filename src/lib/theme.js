@@ -78,6 +78,27 @@ export const SUBJECT_COLORS = {
   eps:           "#5C6B1F",
 };
 
+/**
+ * Noms affichables des matières, indexés par `lessons.subject_id`.
+ *
+ * Placés ici plutôt que dans `dashboard.js` pour que l'écran Résultats puisse
+ * les utiliser sans importer un fichier de 280 Ko. ⚠️ Ces identifiants viennent
+ * de la colonne `lessons.subject_id` : c'est « maths », et non
+ * « mathematiques » comme dans SUBJECT_COLORS ci-dessus.
+ */
+export const SUBJECT_NAMES = {
+  francais: "Français et Littérature",
+  maths:    "Mathématiques",
+  sciences: "Sciences et Technologies",
+  english:  "English Language",
+  shs:      "Sciences humaines et sociales",
+  tic:      "TIC",
+  langues:  "Langues et cultures nationales",
+  arts:     "Éducation artistique",
+  eps:      "Éducation physique et sportive",
+  devperso: "Développement personnel",
+};
+
 /** Normalise un nom de matière vers une clé de SUBJECT_COLORS. */
 export function subjectKey(name) {
   const n = String(name || "")

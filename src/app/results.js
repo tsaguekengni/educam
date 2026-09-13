@@ -19,9 +19,9 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { supabase } from "../lib/supabase";
 import { logActivity } from "../lib/activity";
-import { enqueue } from "../lib/offline";
+import { enqueue, listQueue, cachedQuery } from "../lib/offline";
 import { RANK_TRANCHE_ENABLED } from "../lib/flags";
-import { COLORS, FONT } from "../lib/theme";
+import { COLORS, FONT, SUBJECT_NAMES } from "../lib/theme";
 import {
   Card, CardLabel, Badge, Button, EmptyState, SkeletonRows, ListRow,
   Tabs, StatTile, SubjectChip, Callout, Meter,
@@ -482,14 +482,23 @@ function TeacherResults({ teacher, school, backLink, initialTab }) {
   useEffect(() => { if (lessonId && resultDate && students.length) loadExisting(); /* eslint-disable-next-line */ }, [lessonId, resultDate, students.length]);
   useEffect(() => { if (tab === "class") loadSummary(); /* eslint-disable-next-line */ }, [tab, students.length]);
 
+  // ⚠️ Both reads go through the offline cache. Without this the whole screen is
+  // useless without a network: no pupils to grade and no lesson to pick, so the
+  // teacher could not enter anything at all — and the queue behind it would
+  // never even be reached.
   const load = async () => {
     setLoading(true);
     try {
-      const [{ data: st }, { data: lt }] = await Promise.all([
-        supabase.from("students").select("id, full_name").eq("teacher_id", teacher.id).order("full_name"),
-        supabase.from("lessons_taught")
-          .select("lesson_id, taught_at, lessons(id, title, unit_number, theme)")
-          .eq("teacher_id", teacher.id).order("taught_at", { ascending: false }),
+      const [st, lt] = await Promise.all([
+        cachedQuery(`results_students_${teacher.id}`, () =>
+          supabase.from("students").select("id, full_name")
+            .eq("teacher_id", teacher.id).order("full_name")),
+        // v2 key: the selected columns changed (subject_id added), so the old
+        // cached copy must not be reused.
+        cachedQuery(`results_taught_v2_${teacher.id}`, () =>
+          supabase.from("lessons_taught")
+            .select("lesson_id, taught_at, lessons(id, title, unit_number, theme, subject_id)")
+            .eq("teacher_id", teacher.id).order("taught_at", { ascending: false })),
       ]);
       setStudents(st || []);
       const seen = new Set(); const list = [];
@@ -503,19 +512,37 @@ function TeacherResults({ teacher, school, backLink, initialTab }) {
   };
 
   const loadExisting = async () => {
+    const map = {}; let t = null;
     try {
-      const { data } = await supabase.from("daily_results")
-        .select("student_id, score, total")
-        .eq("lesson_id", Number(lessonId)).eq("result_date", resultDate);
-      const map = {}; let t = null;
+      const data = await cachedQuery(`results_day_${lessonId}_${resultDate}`, () =>
+        supabase.from("daily_results")
+          .select("student_id, score, total")
+          .eq("lesson_id", Number(lessonId)).eq("result_date", resultDate));
       (data || []).forEach((r) => {
         const v = String(r.score ?? "");
         map[r.student_id] = { val: v, status: "saved", savedVal: v };
         if (r.total) t = r.total;
       });
-      setRows(map);
-      if (t) setTotal(t);
     } catch (_) { /* lecture non bloquante */ }
+
+    // Notes entered offline live in the outbox, not in the table above. Without
+    // this a teacher who grades 30 pupils offline, closes the app and comes
+    // back would find every field blank and would type them all again.
+    try {
+      const queued = await listQueue();
+      queued
+        .filter((q) => q.table === "daily_results"
+          && String(q.payload?.lesson_id) === String(lessonId)
+          && q.payload?.result_date === resultDate)
+        .forEach((q) => {
+          const v = String(q.payload.score ?? "");
+          map[q.payload.student_id] = { val: v, status: "queued", savedVal: v };
+          if (q.payload.total) t = q.payload.total;
+        });
+    } catch (_) { /* non bloquant */ }
+
+    setRows(map);
+    if (t) setTotal(t);
   };
 
   const rowOf = (id) => rows[id] || { val: "", status: "idle", savedVal: "" };
@@ -551,6 +578,13 @@ function TeacherResults({ teacher, school, backLink, initialTab }) {
       teacher_id: teacher.id, result_date: resultDate,
       score, total: tot, difficulty: tot > 0 ? score / tot < 0.5 : false,
       entered_by: teacher.id,
+      // ⚠️ The moment the teacher actually typed this note, sent explicitly.
+      // The column defaults to now(), so notes entered across a whole offline
+      // afternoon would otherwise all land at the instant they synced. Proven
+      // on 2026-09-13: three notes arrived 0.3 s apart with identical times.
+      // `result_date` says which school day the mark belongs to; this says when
+      // it was entered, which is what the anti-gaming checks read.
+      created_at: new Date().toISOString(),
     };
 
     // Hold the note locally instead of losing it. The queue replays it when the
@@ -728,7 +762,25 @@ function TeacherResults({ teacher, school, backLink, initialTab }) {
     [summary]
   );
 
-  const lessonLabel = (l) => `U${l.unit_number || "?"} · ${l.title}`;
+  // « U1 · Les adjectifs » ne suffisait pas : sans la matière ni le centre
+  // d'intérêt, l'enseignante ne reconnaissait pas la leçon qu'elle cherchait
+  // (retour Maxime, 2026-09-13). La matière devient l'en-tête d'un groupe dans
+  // la liste, et le centre d'intérêt rejoint l'intitulé.
+  const lessonLabel = (l) =>
+    [`U${l.unit_number || "?"}`, l.theme, l.title].filter(Boolean).join(" · ");
+
+  // Groupé par matière, en conservant l'ordre « enseignée le plus récemment
+  // d'abord » à l'intérieur de chaque groupe — c'est presque toujours la leçon
+  // du jour que l'on vient saisir.
+  const lessonsBySubject = useMemo(() => {
+    const groups = new Map();
+    (taughtLessons || []).forEach((l) => {
+      const key = l.subject_id || "autres";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(l);
+    });
+    return Array.from(groups.entries());
+  }, [taughtLessons]);
 
   /* --------------------------- Rendus ----------------------------------- */
 
@@ -800,7 +852,13 @@ function TeacherResults({ teacher, school, backLink, initialTab }) {
                   onChange={(e) => setLessonId(e.target.value)}
                 >
                   {taughtLessons.length === 0 && <option value="">Aucune leçon enseignée</option>}
-                  {taughtLessons.map((l) => <option key={l.id} value={String(l.id)}>{lessonLabel(l)}</option>)}
+                  {lessonsBySubject.map(([subjectId, lessons]) => (
+                    <optgroup key={subjectId} label={SUBJECT_NAMES[subjectId] || "Autres matières"}>
+                      {lessons.map((l) => (
+                        <option key={l.id} value={String(l.id)}>{lessonLabel(l)}</option>
+                      ))}
+                    </optgroup>
+                  ))}
                 </SelectField>
               </div>
               <Field label="Date" type="date" value={resultDate} onChange={(e) => setResultDate(e.target.value)} />
