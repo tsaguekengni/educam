@@ -178,19 +178,72 @@ export async function isShellCached() {
 
 // ---------- Cache-aside for list queries (timetable / topics / lessons) ----------
 // fetcher must return a Supabase query (thenable → {data, error}).
-export async function cachedQuery(key, fetcher) {
+/**
+ * Read a list, and say HOW OLD the answer is.
+ *
+ * Returns { data, cachedAt, fresh, offline?, failed? }.
+ *
+ * The old version always tried the network first and only fell back to the
+ * cache when the request FAILED. Offline that meant every pane sat waiting for
+ * a timeout before showing anything — and any pane not wired through here just
+ * spun on "chargement…" forever, which is a lie: it was not loading, it was
+ * dead. (Seen on a real machine, 2026-09-13: « Moyenne de classe » and
+ * « Élèves à suivre » never resolved.)
+ *
+ * Now:
+ *   · no network  → return the cached copy AT ONCE, no request, no waiting;
+ *   · network     → fetch with a hard ceiling, fall back to the cached copy;
+ *   · either way  → `cachedAt` lets the screen say « données au 11 sept. ».
+ *
+ * `fresh: false` means what you are looking at is a previous answer. The caller
+ * must show that honestly rather than pretending to still be working.
+ */
+export async function cachedQueryMeta(key, fetcher, { timeoutMs = 5000 } = {}) {
   if (!OFFLINE_ENABLED) {
     const { data } = await fetcher();
-    return data;
+    return { data, cachedAt: Date.now(), fresh: true };
   }
+
+  // Entries written before this change are the bare payload; newer ones are
+  // wrapped with their timestamp. Accept both so nothing has to be re-fetched.
+  const raw = await idbGet("kv", key);
+  const prev = (raw && typeof raw === "object" && !Array.isArray(raw) && "data" in raw && "cachedAt" in raw)
+    ? raw
+    : { data: raw, cachedAt: null };
+
+  if (typeof navigator !== "undefined" && !navigator.onLine) {
+    return { data: prev.data ?? null, cachedAt: prev.cachedAt, fresh: false, offline: true };
+  }
+
   try {
-    const { data, error } = await fetcher();
+    const { data, error } = await withTimeout(fetcher(), timeoutMs);
     if (error) throw error;
-    if (data) await idbSet("kv", key, data);
-    return data;
+    const at = Date.now();
+    if (data) await idbSet("kv", key, { data, cachedAt: at });
+    return { data, cachedAt: at, fresh: true };
   } catch (_) {
-    return await idbGet("kv", key);
+    return { data: prev.data ?? null, cachedAt: prev.cachedAt, fresh: false, failed: true };
   }
+}
+
+/** Same thing when the caller only wants the rows. */
+export async function cachedQuery(key, fetcher) {
+  const { data } = await cachedQueryMeta(key, fetcher);
+  return data;
+}
+
+/**
+ * « données au 11 sept. · 14 h 20 » — short, and today's data just says the
+ * time. Returns null when we have no timestamp, so callers can omit the line.
+ */
+export function freshnessLabel(ts) {
+  if (!ts) return null;
+  try {
+    const d = new Date(ts);
+    const time = d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+    if (d.toDateString() === new Date().toDateString()) return time;
+    return `${d.toLocaleDateString("fr-FR", { day: "numeric", month: "short" })} · ${time}`;
+  } catch (_) { return null; }
 }
 
 // ---------- Lesson content bundle (the cacheable part of a lesson) ----------
