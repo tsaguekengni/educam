@@ -14,7 +14,7 @@ import { notifyParentWhatsApp } from "../lib/whatsapp";
 import {
   cachedQuery, fetchLessonBundle, saveLessonBundle, loadLessonBundle,
   getCachedLessonIds, downloadWeek, getGrant,
-  enqueue, queueCount, isShellCached,
+  enqueue, queueCount, isShellCached, cachedQueryMeta, freshnessLabel,
 } from "../lib/offline";
 import { drainQueue } from "../lib/sync";
 import { COLORS, FONT, SHADOW, TINTS, subjectColor } from "../lib/theme";
@@ -344,7 +344,10 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         q = supabase.from("messages").select("*").eq("recipient_id", teacher.id);
       }
       if (!q) { if (!cancelled) setInbox([]); return; }
-      const { data } = await q.order("created_at", { ascending: false });
+      // Cached: the messagerie should still show what arrived before the
+      // network went, rather than looking like an empty mailbox.
+      const key = isParent ? `inbox_p_${parent?.id}` : `inbox_t_${teacher?.id}`;
+      const data = await cachedQuery(key, () => q.order("created_at", { ascending: false }));
       if (!cancelled) setInbox(data || []);
     })();
     return () => { cancelled = true; };
@@ -790,11 +793,18 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // une ligne par enseignant, au lieu des quelques milliers de `daily_results`
   // qu'il fallait tirer pour recalculer la même chose dans le navigateur.
   const [classStats, setClassStats] = useState(null);
+  // `null` alone could not tell "still loading" from "gave up", so the tiles
+  // showed « chargement… » forever once offline. These two say which it is, and
+  // when the numbers on screen were actually read.
+  const [classStatsAt, setClassStatsAt] = useState(null);
+  const [classStatsSettled, setClassStatsSettled] = useState(false);
   useEffect(() => {
-    if (!PROFILES_ENABLED || isParent || isAdmin || !teacher?.id) { setClassStats(null); return; }
+    if (!PROFILES_ENABLED || isParent || isAdmin || !teacher?.id) {
+      setClassStats(null); setClassStatsAt(null); setClassStatsSettled(false); return;
+    }
     let cancelled = false;
     (async () => {
-      try {
+      const meta = await cachedQueryMeta(`classstats_${teacher.id}`, async () => {
         const [agg, stu] = await Promise.all([
           supabase.from("educam_class_averages")
             .select("students_evaluated, average_20, below_pass")
@@ -802,18 +812,19 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           supabase.from("students").select("id", { count: "exact", head: true })
             .eq("teacher_id", teacher.id),
         ]);
-        if (cancelled) return;
-        if (agg.error) throw agg.error;
+        if (agg.error) return { error: agg.error };
         const r = agg.data;
-        setClassStats({
+        return { data: {
           students: stu.count || 0,
           evaluated: r?.students_evaluated || 0,
           avg20: r?.average_20 != null ? Number(r.average_20) : null,
           atRisk: r?.below_pass || 0,
-        });
-      } catch (_) {
-        if (!cancelled) setClassStats(null);   // l'accueil reste utilisable
-      }
+        } };
+      });
+      if (cancelled) return;
+      setClassStats(meta.data || null);
+      setClassStatsAt(meta.fresh ? null : meta.cachedAt); // only stamp stale data
+      setClassStatsSettled(true);
     })();
     return () => { cancelled = true; };
   }, [teacher?.id, isParent, isAdmin]);
@@ -1223,19 +1234,27 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     if (isParent || isAdmin || !heroLessonId) { setHeroPlan({ id: null, sections: [], taught: false }); return undefined; }
     let cancelled = false;
     (async () => {
-      const [sec, tgt] = await Promise.all([
-        supabase.from("lesson_sections").select("title, section_type")
-          .eq("lesson_id", heroLessonId).order("section_order").limit(4),
-        teacher?.id
-          ? supabase.from("lessons_taught").select("id")
-            .eq("teacher_id", teacher.id).eq("lesson_id", heroLessonId).maybeSingle()
-          : Promise.resolve({ data: null }),
-      ]);
+      // Cached so the home screen keeps its lesson plan without a network —
+      // this card is the first thing a teacher looks at in the morning.
+      const plan = await cachedQueryMeta(`heroplan_${teacher?.id || "x"}_${heroLessonId}`, async () => {
+        const [sec, tgt] = await Promise.all([
+          supabase.from("lesson_sections").select("title, section_type")
+            .eq("lesson_id", heroLessonId).order("section_order").limit(4),
+          teacher?.id
+            ? supabase.from("lessons_taught").select("id")
+              .eq("teacher_id", teacher.id).eq("lesson_id", heroLessonId).maybeSingle()
+            : Promise.resolve({ data: null }),
+        ]);
+        return { data: {
+          sections: sec.error ? [] : (sec.data || []),
+          taught: !!(tgt && tgt.data),
+        } };
+      });
       if (cancelled) return;
       setHeroPlan({
         id: heroLessonId,
-        sections: sec.error ? [] : (sec.data || []),
-        taught: !!(tgt && tgt.data),
+        sections: plan.data?.sections || [],
+        taught: !!plan.data?.taught,
       });
     })();
     return () => { cancelled = true; };
@@ -4386,19 +4405,29 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               label: "Moyenne de classe", tint: "blue",
               value: classStats?.avg20 != null ? fr(classStats.avg20) : "—",
               unit: classStats?.avg20 != null ? "/20" : "",
+              // Never « chargement… » once we have stopped trying: either the
+              // numbers with the date they were read, or a plain statement that
+              // they are unavailable. A tile that claims to be loading forever
+              // leaves the teacher waiting for something that is not coming.
               foot: classStats
-                ? (classStats.evaluated
-                    ? `${classStats.evaluated} élève${classStats.evaluated > 1 ? "s" : ""} évalué${classStats.evaluated > 1 ? "s" : ""} sur ${classStats.students}`
-                    : "aucun résultat saisi")
-                : "chargement…",
+                ? [
+                    classStats.evaluated
+                      ? `${classStats.evaluated} élève${classStats.evaluated > 1 ? "s" : ""} évalué${classStats.evaluated > 1 ? "s" : ""} sur ${classStats.students}`
+                      : "aucun résultat saisi",
+                    classStatsAt ? `· au ${freshnessLabel(classStatsAt)}` : null,
+                  ].filter(Boolean).join(" ")
+                : classStatsSettled ? "indisponible hors ligne" : "chargement…",
               onClick: () => openResults("class"),
             },
             {
               label: "Élèves à suivre", tint: "amber",
               value: classStats ? classStats.atRisk : "—",
               foot: classStats
-                ? (classStats.atRisk ? "moyenne sous 10 / 20" : "aucun élève sous 10 / 20")
-                : "chargement…",
+                ? [
+                    classStats.atRisk ? "moyenne sous 10 / 20" : "aucun élève sous 10 / 20",
+                    classStatsAt ? `· au ${freshnessLabel(classStatsAt)}` : null,
+                  ].filter(Boolean).join(" ")
+                : classStatsSettled ? "indisponible hors ligne" : "chargement…",
               onClick: () => openResults("class"),
             },
           ];
