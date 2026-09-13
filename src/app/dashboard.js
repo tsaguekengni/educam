@@ -14,7 +14,9 @@ import { notifyParentWhatsApp } from "../lib/whatsapp";
 import {
   cachedQuery, fetchLessonBundle, saveLessonBundle, loadLessonBundle,
   getCachedLessonIds, downloadWeek, getGrant,
+  enqueue, queueCount, isShellCached,
 } from "../lib/offline";
+import { drainQueue } from "../lib/sync";
 import { COLORS, FONT, SHADOW, TINTS, subjectColor } from "../lib/theme";
 import { Button, Card, CardLabel, Badge, Callout, ListRow, IconButton, EmptyState, Tabs, Breadcrumb, Meter, StatTile, Skeleton, SkeletonRows } from "../components/ui";
 import { Sparkline, fr } from "../components/charts";
@@ -636,6 +638,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [online, setOnline] = useState(true);
   const [cachedIds, setCachedIds] = useState([]);
   const [dl, setDl] = useState(null); // { done, total, bytes, finished } | null
+  // Has the service worker actually precached the app shell? Downloaded lessons
+  // are NOT the same thing: without the shell the app cannot open at all
+  // offline, so the "Hors ligne prêt" badge must wait for both.
+  const [shellReady, setShellReady] = useState(false);
+  // How many writes are sitting in the outbox waiting for a network.
+  const [pending, setPending] = useState(0);
+  const refreshPending = async () => {
+    try { setPending(await queueCount()); } catch (_) { /* never break the screen */ }
+  };
 
   // ---- Statistiques de la plateforme (accueil administrateur) -------------
   // Quatre compteurs seulement : `head: true` ne rapatrie aucune ligne.
@@ -818,6 +829,19 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   useEffect(() => {
     if (!OFFLINE_ENABLED || typeof navigator === "undefined") return;
     setOnline(navigator.onLine);
+
+    // Empty the outbox and say what happened. Silence after a teacher has been
+    // working offline is the one thing that would stop her trusting the queue.
+    const sync = async () => {
+      const res = await drainQueue();
+      await refreshPending();
+      if (res?.sent) {
+        pushToast(`${res.sent} saisie${res.sent > 1 ? "s" : ""} envoyée${res.sent > 1 ? "s" : ""} ✓`, "success");
+      } else if (res?.failed && !res.sent) {
+        pushToast("Vos saisies sont gardées — l'envoi a échoué, nouvel essai bientôt.", "error");
+      }
+    };
+
     const on = () => {
       setOnline(true);
       // Le réseau revient : on rafraîchit les listes — et on le DIT.
@@ -825,14 +849,21 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       Promise.all([fetchTimetable(), fetchTopics(), fetchAllLessons()])
         .then(() => pushToast("Connexion rétablie · contenu synchronisé", "success"))
         .catch(() => pushToast("Connexion rétablie, mais la synchronisation a échoué.", "error"));
+      sync();
     };
     const off = () => setOnline(false);
     window.addEventListener("online", on);
     window.addEventListener("offline", off);
+    window.addEventListener("educam:queued", refreshPending);
     getCachedLessonIds().then(setCachedIds);
+    isShellCached().then(setShellReady);
+    refreshPending();
+    // Anything left over from a previous session goes out now, on this load.
+    if (navigator.onLine) sync();
     return () => {
       window.removeEventListener("online", on);
       window.removeEventListener("offline", off);
+      window.removeEventListener("educam:queued", refreshPending);
     };
   }, [selectedLevel]);
 
@@ -907,6 +938,9 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     setDl({ done: 0, total: ids.length });
     const res = await downloadWeek(ids, (done, total) => setDl({ done, total }));
     setCachedIds(await getCachedLessonIds());
+    // Re-check the shell too: by now the worker has almost certainly finished
+    // precaching, and this is the moment the teacher looks at the badge.
+    setShellReady(await isShellCached());
     setDl({ done: res.total, total: res.total, finished: true, ...res });
   };
 
@@ -1627,33 +1661,58 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   };
 
   // Toggle "Leçon enseignée" for the current teacher + lesson.
+  //
+  // Offline this used to simply refuse ("Hors ligne : impossible d'enregistrer
+  // pour le moment"), which is exactly the wall we set out to remove. It now
+  // goes into the outbox and leaves with the next sync.
+  //
+  // ⚠️ `taught_at` is sent EXPLICITLY. The column defaults to now(), so a lesson
+  // taught on Monday and synced on Thursday would be recorded as Thursday.
   const toggleTaught = async () => {
     if (!teacher?.id || !currentLesson) return;
+    const offlineNow = typeof navigator !== "undefined" && !navigator.onLine;
     setTaughtSaving(true);
     try {
       if (lessonTaught) {
-        const { error } = await supabase.from("lessons_taught").delete()
-          .eq("teacher_id", teacher.id).eq("lesson_id", currentLesson.id);
-        if (error) throw error;
+        if (offlineNow) {
+          await enqueue({
+            kind: "untaught", table: "lessons_taught", op: "delete",
+            match: { teacher_id: teacher.id, lesson_id: currentLesson.id },
+          });
+        } else {
+          const { error } = await supabase.from("lessons_taught").delete()
+            .eq("teacher_id", teacher.id).eq("lesson_id", currentLesson.id);
+          if (error) throw error;
+        }
         setLessonTaught(false);
         setAvailableLessons((prev) => prev.map((l) => (l.id === currentLesson.id ? { ...l, taught: false } : l)));
         logActivity({ actorId: teacher.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "unmark_taught", lessonId: currentLesson.id, detail: currentLesson.title });
       } else {
-        const { error } = await supabase.from("lessons_taught")
-          .upsert({ teacher_id: teacher.id, lesson_id: currentLesson.id }, { onConflict: "teacher_id,lesson_id" });
-        if (error) throw error;
+        const payload = {
+          teacher_id: teacher.id, lesson_id: currentLesson.id,
+          taught_at: new Date().toISOString(),
+        };
+        if (offlineNow) {
+          await enqueue({
+            kind: "taught", table: "lessons_taught", op: "upsert",
+            onConflict: "teacher_id,lesson_id", payload,
+          });
+        } else {
+          const { error } = await supabase.from("lessons_taught")
+            .upsert(payload, { onConflict: "teacher_id,lesson_id" });
+          if (error) throw error;
+        }
         setLessonTaught(true);
         setAvailableLessons((prev) => prev.map((l) => (l.id === currentLesson.id ? { ...l, taught: true } : l)));
         logActivity({ actorId: teacher.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "mark_taught", lessonId: currentLesson.id, detail: currentLesson.title });
       }
+      if (offlineNow) {
+        pushToast("Enregistré hors ligne — partira au retour du réseau.", "success");
+        refreshPending();
+      }
     } catch (_) {
       // L'enseignante croyait sa leçon marquée alors que l'écriture avait échoué.
-      pushToast(
-        online
-          ? "Impossible d'enregistrer. Réessayez dans un instant."
-          : "Hors ligne : impossible d'enregistrer pour le moment.",
-        "error"
-      );
+      pushToast("Impossible d'enregistrer. Réessayez dans un instant.", "error");
     }
     setTaughtSaving(false);
   };
@@ -4021,7 +4080,9 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           fontSize: "var(--ec-fs-2)", fontWeight: 600, padding: "9px 12px",
           borderBottom: `1px solid ${COLORS.border}`,
         }}>
-          Hors ligne — les leçons téléchargées restent disponibles.
+          {pending > 0
+            ? `Hors ligne — ${pending} saisie${pending > 1 ? "s" : ""} gardée${pending > 1 ? "s" : ""}, elle${pending > 1 ? "s" : ""} partira${pending > 1 ? "ont" : ""} au retour du réseau.`
+            : "Hors ligne — les leçons téléchargées restent disponibles."}
         </div>
       )}
       <main className="ec-main">
@@ -4408,9 +4469,16 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                     width: 8, height: 8, borderRadius: "50%", flex: "none",
                     background: grantDaysLeft <= 1 ? COLORS.warn : COLORS.good,
                   }} />
-                  {cachedIds.length > 0
+                  {/* "Prêt" requires BOTH halves. Downloaded lessons alone are
+                      not readiness: without the precached shell the app will
+                      not even open without a network, and announcing "prêt"
+                      then is worse than saying nothing — it is exactly when
+                      the teacher stops checking. */}
+                  {cachedIds.length > 0 && shellReady
                     ? `Hors ligne prêt · ${grantDaysLeft} jour${grantDaysLeft > 1 ? "s" : ""}`
-                    : `Accès hors ligne · ${grantDaysLeft} jour${grantDaysLeft > 1 ? "s" : ""}`}
+                    : cachedIds.length > 0 && !shellReady
+                      ? "Préparation en cours…"
+                      : `Accès hors ligne · ${grantDaysLeft} jour${grantDaysLeft > 1 ? "s" : ""}`}
                 </span>
               )}
             </div>

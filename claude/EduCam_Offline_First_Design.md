@@ -25,7 +25,7 @@ Un enseignant ouvre l'application de bureau sans réseau et circule dans **tous 
 Lecture réelle de `src/lib/offline.js`, `public/sw.js`, `src/app/sw-register.js`, `src/app/results.js`, `src/app/dashboard.js`, `src/app/page.js` le 2026-09-12.
 
 **Ce qui est bon et ne bouge pas :**
-- **Le service worker (`public/sw.js`, `educam-v2`) est solide.** Document en réseau-d'abord (jamais de coquille périmée), ressources hachées en *stale-while-revalidate*, images de leçon en cache-d'abord. Aucun changement nécessaire.
+- **La *stratégie* du service worker (`public/sw.js`) est bonne** : document en réseau-d'abord (jamais de coquille périmée), ressources hachées en *stale-while-revalidate*, images de leçon en cache-d'abord. La stratégie ne change pas — mais il lui manquait une pièce, voir (d) ci-dessous.
 - **Les paquets de leçons** (`fetchLessonBundle` / `saveLessonBundle`) fonctionnent : contenu + images en IndexedDB.
 - **L'accès hors ligne de 7 jours** (`setGrant` / `getGrant`) fonctionne, et il couvre **déjà le référent** — le référent est une ligne de la table `teachers` (`role='referent'`), et `setGrant` est appelé pour toute ligne `teachers` trouvée. Rien à construire de ce côté, seulement à allonger la durée.
 
@@ -44,6 +44,26 @@ C'est exactement l'obstacle à supprimer. Même chose côté résultats (`result
 
 **b) Les lectures hors ligne sont lentes, pas instantanées.**
 `cachedQuery` essaie **toujours le réseau d'abord** et ne se rabat sur la copie locale que quand la requête **échoue**. Sans réseau, chaque panneau attend l'expiration du délai avant d'afficher quoi que ce soit. C'est ça, le « blocage » à supprimer.
+
+**d) 🔴 LE DÉFAUT LE PLUS GRAVE — rien n'était mis en cache au premier lancement. (Trouvé et corrigé le 2026-09-13.)**
+
+**Symptôme :** l'enseignant installe l'application, se connecte, coupe le réseau, ferme, rouvre → **« Impossible de se connecter »**, la page d'erreur du **navigateur**. L'application ne démarrait pas du tout.
+
+**Cause :** le service worker **ne préchargeait rien à l'installation**. Il ne gardait les pages qu'au fil de la navigation. Or, au tout premier chargement, le navigateur va chercher le document **avant** que le worker ne soit installé et actif : rien ne passe par lui, donc **rien n'est mis en cache**. Se connecter ne provoque aucune navigation (tout est côté client), donc le cache reste vide. **Le hors-ligne ne fonctionnait qu'à partir du DEUXIÈME lancement** — jamais remarqué, parce qu'une machine de développement recharge sans arrêt.
+
+**Vérifié sur le site en production, pas supposé (2026-09-13) :** état vierge → première visite → worker enregistré et actif, **0 cache**. Deuxième visite → coquille en cache, 10 entrées. Les deux moitiés de l'explication sont prouvées.
+
+**Correctif :** préchargement à l'installation. Le worker va chercher la coquille **et** en extrait les fichiers `/_next/static/*` qu'elle référence — une coquille sans son JavaScript ne démarre pas non plus. La liste est lue dans le HTML, donc elle **se tient à jour toute seule** : aucune étape de construction, aucune liste de noms de fichiers à maintenir. Essai à blanc sur le site réel : coquille + **13 ressources sur 13**, 0 échec. `SHELL_CACHE` passe à `educam-v3` ; le cache d'images reste en `v2` **exprès** (les images coûtent cher à retélécharger, et IndexedDB les croirait encore présentes).
+
+**e) 🟠 Le voyant « Hors ligne prêt » ment. (Trouvé le 2026-09-13, à corriger.)**
+
+Le premier essai de Maxime sur le deuxième portable a échoué, le second a réussi — « ça n'avait pas encore fini de se poser ». **Ce n'est pas une erreur de manipulation, c'est un défaut de conception.**
+
+Le préchargement de la coquille par le service worker prend quelques secondes. Pendant ce laps de temps, l'application **ne peut pas** démarrer hors ligne. Or le voyant en haut de l'écran affiche déjà « **Hors ligne prêt · 7 jours** » — et il se fonde **uniquement sur le nombre de leçons téléchargées** (`cachedIds.length > 0`, `dashboard.js` ~4411). Il **ignore complètement** si la coquille de l'application est en cache.
+
+Autrement dit : **le voyant peut annoncer « prêt » alors que l'application est incapable de s'ouvrir sans réseau.** C'est le pire genre d'indicateur — il donne confiance exactement quand il ne faut pas. Un enseignant qui prépare sa journée, voit « prêt », part en classe et n'a plus de réseau se retrouve devant la page d'erreur du navigateur.
+
+**Correctif :** « Hors ligne prêt » ne doit s'afficher que si **les deux** conditions sont vraies — leçons téléchargées **et** coquille en cache (vérifiable depuis la page : `caches.has('educam-v3-shell')` + présence de `/`). Tant que la coquille n'est pas prête : « Préparation en cours… », et le bouton de téléchargement ne se déclare pas terminé.
 
 **c) Presque rien n'est réellement mis en cache.**
 `cachedQuery` n'est utilisé qu'à **3 endroits** : emploi du temps, thèmes du programme, liste des leçons. Or `dashboard.js` compte à lui seul **37 lectures Supabase directes**, sans cache ni repli — auxquelles s'ajoutent `results.js`, `schooldashboard.js`, `activitylog.js`. **C'est le gros du chantier** : convertir ces lectures au modèle « cache d'abord ».
@@ -336,13 +356,26 @@ Chaque lot est utile seul et testable seul. On ne passe au suivant qu'une fois l
 
 ---
 
-## 10. Comment on teste
+## 10. Comment on teste — le modèle « deuxième portable »
 
-Reprend `EduCam_Local_Test_Runbook.md` §G, étendu aux écritures :
+> **Décision Maxime, 2026-09-13 : le hors-ligne se teste sur un SECOND portable, jamais sur la machine de développement.** Ce modèle a immédiatement prouvé sa valeur : il a révélé le défaut du §2 (d) que la machine de développement **ne pouvait structurellement pas voir**.
 
-1. `npm run build` puis `npm run start` (**jamais** `next dev`).
-2. Se connecter en ligne comme enseignant → « Préparer le travail hors ligne ».
-3. Passer hors ligne (DevTools → Network → Offline).
+**Pourquoi le poste de développement ment.** Il a visité le site des dizaines de fois, rechargé, ouvert les outils de développement. Son cache est donc **déjà chaud** — il contient une coquille d'application qu'un enseignant, lui, n'aura jamais reçue. Tester le hors-ligne là-bas, c'est tester une machine qui a déjà tout. **Le deuxième portable est le seul qui reproduise le premier jour d'un enseignant.**
+
+**Règles du banc d'essai :**
+
+1. **Le deuxième portable est l'enseignant.** On ne développe jamais dessus, on ne l'utilise que comme une école l'utiliserait.
+2. **On teste le site déployé** (`educam-eight.vercel.app`), pas un `npm run start` local — c'est ce que l'enseignant aura. Donc : **rien n'est testable tant que Maxime n'a pas commité et poussé**, et tant que Vercel n'a pas fini de construire.
+3. **⚠️ Repartir d'un état vierge avant chaque essai sérieux.** Sinon on re-teste un cache chaud et on ne voit rien. Sur le deuxième portable : outils de développement → **Application → Service Workers → Unregister**, puis **Storage → Clear site data**, puis désinstaller l'application de bureau si elle est installée. **C'est l'étape qu'on oubliera, et c'est celle qui compte.**
+4. **Couper le Wi-Fi pour de vrai**, pas seulement l'interrupteur des outils de développement — le deuxième portable n'a pas de pont avec Claude à préserver, donc autant reproduire la vraie coupure.
+5. **Noter ce qu'on voit, mot pour mot.** « Impossible de se connecter » (page du navigateur) et « Connexion indisponible » (notre application) désignent **deux pannes totalement différentes** — l'une est le service worker, l'autre le code de démarrage. Le libellé exact est le diagnostic.
+
+**Le déroulé, dans l'ordre :**
+
+1. Sur le deuxième portable, **repartir de zéro** (règle 3).
+2. Ouvrir le site déployé, **se connecter** comme enseignant, **installer l'application** sur le bureau.
+3. **« Préparer le travail hors ligne »** → attendre la fin.
+4. **Couper le Wi-Fi. Fermer l'application. La rouvrir.** ← *c'est le test que Maxime a fait le 2026-09-13, et qui échouait.*
 
 **Le test du démarrage — celui qui compte le plus (§5.5) :**
 
@@ -363,6 +396,8 @@ Reprend `EduCam_Local_Test_Runbook.md` §G, étendu aux écritures :
 
 ## Journal
 
+- **2026-09-13 (5)** — ✅ **LOT 0 VALIDÉ SUR APPAREIL RÉEL.** Deuxième portable, Wi-Fi réellement coupé, application de bureau fermée puis rouverte : ouverture **directe** sur « Bonjour Mme », sans écran de connexion, **instantanée**, voyant « Hors ligne », bandeau « les leçons téléchargées restent disponibles », 15 leçons prêtes, accès 7 jours. **Le préchargement du service worker et le démarrage en deux temps fonctionnent.** C'est le premier test hors ligne réussi de bout en bout du projet. Deux constats dans la même capture : (1) le voyant « Hors ligne prêt » ment tant que la coquille n'est pas préchargée — voir §2 (e), c'est ce qui a fait échouer le premier essai ; (2) les tuiles **« Moyenne de classe »** et **« Élèves à suivre »** restent bloquées sur « chargement… » — `classStats` vient de deux lectures directes non mises en cache (`educam_class_averages` + `students`), et l'échec repositionne la valeur à vide, que la tuile rend comme « chargement… » **indéfiniment**. Démonstration visible du §2 (b)+(c) : ce n'est pas lent, c'est mort, et ça prétend travailler.
+- **2026-09-13 (4)** — 🔴 **Cause racine trouvée : le service worker ne préchargeait rien.** Test de Maxime sur un **deuxième portable** : connexion, Wi-Fi coupé, application fermée puis rouverte → « Impossible de se connecter ». Le libellé a tout dit — c'est la page d'erreur du **navigateur**, pas un écran de l'application : elle ne démarrait pas du tout, donc le problème était **sous** le lot 0. Diagnostic mené sur le site en production, en deux mesures : première visite vierge → worker actif, **0 cache** ; deuxième visite → coquille en cache. Le hors-ligne n'a donc **jamais** fonctionné au premier lancement. Corrigé par un préchargement à l'installation (coquille + ses `/_next/static/*`, liste extraite du HTML donc auto-entretenue), validé à blanc sur le site réel : **13/13 ressources, 0 échec**. **Le modèle « deuxième portable » a payé dès le premier essai** — une machine de développement, au cache toujours chaud, ne pouvait structurellement pas voir ce défaut. §10 réécrit autour de ce banc d'essai.
 - **2026-09-13 (3)** — **Lot 0 construit** (`src/lib/offline.js`, `src/app/page.js`). Démarrage en deux temps : lecture de l'accès hors ligne sur le disque et affichage immédiat, puis vérification réseau en arrière-plan. Ajout de `requestPersistentStorage()`. **Deux délais de garde, pas un seul** — la nuance importe : quand l'accès hors ligne a déjà ouvert le tableau de bord, on abandonne vite (2,5 s) car rien n'attend à l'écran ; quand il n'y a **pas** d'accès (parent, ou accès expiré), abandonner revient à **afficher un écran de connexion à quelqu'un qui est peut-être déjà connecté** — on patiente donc beaucoup plus (8 s). Un délai unique et court aurait déconnecté les utilisateurs sur connexion lente : régression évitée de justesse. Vérifié : syntaxe des deux fichiers, correspondance imports/exports, et **aucun `await` avant le premier affichage**. Reste à vérifier par Maxime sur build de production.
 - **2026-09-13 (2)** — **Conflits : la saisie de l'enseignant l'emporte** (Maxime révise sa décision de la veille). Motif : il ne saisit à la place de quelqu'un que si c'est critique, si l'enseignant ne peut pas, si le poste est indisponible, ou pour une démonstration — donc dans le cours normal, la seule personne qui saisit est celle qui était en classe. Supprime le bandeau « À vérifier », l'état `conflict`, et **une requête réseau par note** au moment de la synchronisation. Garde-fou conservé : l'ancienne valeur écrasée est inscrite au journal (`result_overwritten`). La migration SQL passe de bloquante à recommandée.
 - **2026-09-13** — **Accès hors ligne maintenu à 7 jours** (pas 30) : le référent partage la connexion de son téléphone en fin de journée, donc les données montent chaque jour et les 7 jours se rechargent tout seuls à chaque ouverture en ligne. Le risque « jeton Supabase » tombe. **Nouveau lot 0, prioritaire : le démarrage instantané** — aujourd'hui l'application attend le réseau avant d'afficher, et `navigator.onLine` répond « en ligne » sur un Wi-Fi sans accès Internet, ce qui fige l'écran de démarrage. Ajout de `storage.persist()` pour que le système n'efface jamais une journée de résultats en attente. Défaut trouvé : le composeur de messages prend l'expéditeur via `auth.getUser()`, un appel **serveur** — hors ligne le message partirait sans expéditeur.
