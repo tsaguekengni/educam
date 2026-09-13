@@ -167,11 +167,24 @@ async function idbDel(store, key) {
 // and synced on Thursday would be recorded as Thursday, which would silently
 // corrupt the activity log and mis-fire the anti-gaming checks.
 
-function newId() {
+/**
+ * A UUID made on the device.
+ *
+ * Also used for the PRIMARY KEY of a message composed offline: `messages.id` is
+ * a uuid with a database default, so the row can be created here and inserted
+ * with that same id later. That is what lets the WhatsApp nudge — which has to
+ * name the message it refers to — be queued alongside the message itself,
+ * before the server has ever seen either.
+ */
+export function newId() {
   try {
     if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
   } catch (_) {}
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  // RFC-4122-shaped fallback for older engines.
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+  });
 }
 
 /** Add one write to the outbox. Returns the stored entry. */
