@@ -5,7 +5,10 @@ import { supabase } from "./supabase";
 
 // ---------- IndexedDB (lesson bundles + small key/value cache) ----------
 const DB_NAME = "educam-offline";
-const DB_VERSION = 1;
+// v1 → v2 (2026-09-13): adds the `outbox` store — the queue of writes made
+// while offline. Upgrades are additive and guarded by `contains()`, so an
+// existing database keeps its lessons and kv contents untouched.
+const DB_VERSION = 2;
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -15,6 +18,10 @@ function openDB() {
       const db = req.result;
       if (!db.objectStoreNames.contains("lessons")) db.createObjectStore("lessons");
       if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv");
+      // The outbox carries its own id, so the key lives inside the record.
+      if (!db.objectStoreNames.contains("outbox")) {
+        db.createObjectStore("outbox", { keyPath: "id" });
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -44,6 +51,129 @@ async function idbGet(store, key) {
       r.onerror = () => res(undefined);
     });
   } catch (_) { return undefined; }
+}
+
+// Keyed stores (outbox): the record carries its own key via keyPath.
+async function idbPut(store, val) {
+  try {
+    const db = await openDB();
+    await new Promise((res, rej) => {
+      const tx = db.transaction(store, "readwrite");
+      tx.objectStore(store).put(val);
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+    });
+    return true;
+  } catch (_) { return false; }
+}
+
+async function idbAll(store) {
+  try {
+    const db = await openDB();
+    return await new Promise((res) => {
+      const tx = db.transaction(store, "readonly");
+      const r = tx.objectStore(store).getAll();
+      r.onsuccess = () => res(r.result || []);
+      r.onerror = () => res([]);
+    });
+  } catch (_) { return []; }
+}
+
+async function idbDel(store, key) {
+  try {
+    const db = await openDB();
+    await new Promise((res, rej) => {
+      const tx = db.transaction(store, "readwrite");
+      tx.objectStore(store).delete(key);
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+    });
+    return true;
+  } catch (_) { return false; }
+}
+
+// ---------- The outbox: writes made while offline ----------
+//
+// Everything a teacher does offline lands here first and is replayed against
+// Supabase when the network comes back. This is what makes "you can work
+// without a signal" true rather than a slogan.
+//
+// Two properties make replay safe, both verified against the live schema:
+//   · `daily_results` is UNIQUE (student_id, lesson_id, result_date)
+//   · `lessons_taught` is UNIQUE (teacher_id, lesson_id)
+// so an upsert replayed twice produces the same row — never a duplicate.
+//
+// ⚠️ Every entry carries `clientTs`, the REAL moment of the action, and the
+// payload writes that time explicitly. Without it a lesson taught on Monday
+// and synced on Thursday would be recorded as Thursday, which would silently
+// corrupt the activity log and mis-fire the anti-gaming checks.
+
+function newId() {
+  try {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  } catch (_) {}
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+/** Add one write to the outbox. Returns the stored entry. */
+export async function enqueue(entry) {
+  const row = {
+    id: newId(),
+    createdAt: Date.now(),
+    clientTs: new Date().toISOString(),
+    attempts: 0,
+    lastError: null,
+    ...entry,
+  };
+  await idbPut("outbox", row);
+  // Let any screen showing a "N en attente" counter update immediately —
+  // results entry lives in a different component from the offline banner.
+  try {
+    if (typeof window !== "undefined") window.dispatchEvent(new Event("educam:queued"));
+  } catch (_) {}
+  return row;
+}
+
+/** Everything waiting, oldest first — the order the teacher did it in. */
+export async function listQueue() {
+  const all = await idbAll("outbox");
+  return all.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+}
+
+/** Remove one entry (after it has been accepted by the server). */
+export function dequeue(id) { return idbDel("outbox", id); }
+
+/** How many writes are still waiting — drives the "N en attente" indicator. */
+export async function queueCount() { return (await idbAll("outbox")).length; }
+
+/** Record a failed attempt so a poison entry cannot block the queue forever. */
+export async function markAttempt(entry, message) {
+  const next = { ...entry, attempts: (entry.attempts || 0) + 1, lastError: String(message || "") };
+  await idbPut("outbox", next);
+  return next;
+}
+
+// ---------- Is the app itself ready to open offline? ----------
+//
+// ⚠️ Must match SHELL_CACHE in public/sw.js. If you bump it there, bump it here.
+const SHELL_CACHE_NAME = "educam-v3-shell";
+
+/**
+ * True only when the service worker has actually precached the app shell.
+ *
+ * This exists because "Hors ligne prêt" used to be based ONLY on how many
+ * lessons were downloaded — so it could announce "ready" while the app was
+ * still incapable of opening without a network, which is the worst possible
+ * moment to inspire confidence. (Cost a failed test on 2026-09-13; would cost
+ * a teacher her first lesson in October.)
+ */
+export async function isShellCached() {
+  try {
+    if (typeof caches === "undefined") return false;
+    if (!(await caches.has(SHELL_CACHE_NAME))) return false;
+    const cache = await caches.open(SHELL_CACHE_NAME);
+    return !!(await cache.match("/"));
+  } catch (_) { return false; }
 }
 
 // ---------- Cache-aside for list queries (timetable / topics / lessons) ----------
@@ -142,10 +272,18 @@ export async function downloadWeek(lessonIds, onProgress) {
 
 // ---------- Durable storage + a ceiling on boot-path network calls ----------
 
-// How long any single network call on the BOOT path is allowed to take before
-// we give up on it. Short on purpose: this is a budget for the first paint,
-// not for the request. The request itself keeps running; we just stop waiting.
+// Two budgets, because giving up costs something different in each case.
+//
+// SHORT — used when a valid grant has ALREADY put the teacher on the dashboard.
+// Nothing on screen is waiting, so we only want to stop dangling. Cheap to hit.
 export const BOOT_NETWORK_TIMEOUT_MS = 2500;
+//
+// LONG — used when there is NO grant and the user is still looking at the
+// loading screen. Here, giving up means showing a LOGIN FORM to someone who may
+// well be validly signed in — so we must be far more patient than above. This
+// is deliberately generous: a slow connection is not a reason to log someone
+// out, and without a grant they cannot work offline anyway.
+export const SESSION_RESTORE_TIMEOUT_MS = 8000;
 
 /**
  * Ask the system to treat our storage as durable.

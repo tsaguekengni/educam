@@ -19,6 +19,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { supabase } from "../lib/supabase";
 import { logActivity } from "../lib/activity";
+import { enqueue } from "../lib/offline";
 import { RANK_TRANCHE_ENABLED } from "../lib/flags";
 import { COLORS, FONT } from "../lib/theme";
 import {
@@ -395,6 +396,8 @@ export function EntryRow({ name, value, status, total, inputRef, onChange, onCom
       <div aria-live="polite" style={{ minHeight: 16, marginTop: 6, textAlign: "right", fontSize: "var(--ec-fs-2)", fontWeight: 700 }}>
         {status === "saving" && <span style={{ color: COLORS.ink3 }}>Enregistrement…</span>}
         {status === "saved" && <span style={{ color: COLORS.good }}>✓ Enregistré</span>}
+        {/* Kept, not lost: says so plainly so the teacher moves on with confidence. */}
+        {status === "queued" && <span style={{ color: COLORS.warn }}>✓ Gardé · en attente de réseau</span>}
         {status === "dirty" && <span style={{ color: COLORS.ink3 }}>· à enregistrer</span>}
         {status === "error" && (
           <button type="button" onClick={() => onCommit()}
@@ -537,29 +540,65 @@ function TeacherResults({ teacher, school, backLink, initialTab }) {
       setRows((prev) => ({ ...prev, [id]: { ...prev[id], status: "error" } }));
       return;
     }
-    if (r.status === "saved" && r.val === r.savedVal) return;
+    // "queued" counts as settled too — otherwise tapping the same note again
+    // would stack a second identical entry in the outbox.
+    if ((r.status === "saved" || r.status === "queued") && r.val === r.savedVal) return;
 
     setRows((prev) => ({ ...prev, [id]: { ...prev[id], status: "saving" } }));
+
+    const payload = {
+      student_id: id, lesson_id: Number(lessonId), school_id: school?.id || null,
+      teacher_id: teacher.id, result_date: resultDate,
+      score, total: tot, difficulty: tot > 0 ? score / tot < 0.5 : false,
+      entered_by: teacher.id,
+    };
+
+    // Hold the note locally instead of losing it. The queue replays it when the
+    // network returns; the natural key (student + leçon + date) makes replaying
+    // it harmless even if it somehow happens twice.
+    const hold = async () => {
+      await enqueue({
+        kind: "result", table: "daily_results", op: "upsert",
+        onConflict: "student_id,lesson_id,result_date", payload,
+      });
+      setRows((prev) => ({ ...prev, [id]: { val: r.val, savedVal: r.val, status: "queued" } }));
+    };
+
+    const logOnce = () => {
+      const key = `${lessonId}·${resultDate}`;
+      if (loggedRef.current.has(key)) return;
+      loggedRef.current.add(key);
+      logActivity({
+        actorId: teacher.id, actorRole: teacher?.role || "teacher", schoolId: school?.id,
+        eventType: "results_entered", lessonId: Number(lessonId), detail: "saisie des résultats",
+      });
+    };
+
+    // No network: do not even attempt the write — queue it straight away so the
+    // teacher gets an instant, honest answer instead of waiting for a timeout.
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      try { await hold(); logOnce(); }
+      catch (_) {
+        setRows((prev) => ({ ...prev, [id]: { ...prev[id], status: "error" } }));
+        pushToast("Note non enregistrée. Elle reste à l'écran — réessayez.", "error");
+      }
+      return;
+    }
+
     try {
-      const { error } = await supabase.from("daily_results").upsert({
-        student_id: id, lesson_id: Number(lessonId), school_id: school?.id || null,
-        teacher_id: teacher.id, result_date: resultDate,
-        score, total: tot, difficulty: tot > 0 ? score / tot < 0.5 : false,
-        entered_by: teacher.id,
-      }, { onConflict: "student_id,lesson_id,result_date" });
+      const { error } = await supabase.from("daily_results")
+        .upsert(payload, { onConflict: "student_id,lesson_id,result_date" });
       if (error) throw error;
       setRows((prev) => ({ ...prev, [id]: { val: r.val, savedVal: r.val, status: "saved" } }));
-      const key = `${lessonId}·${resultDate}`;
-      if (!loggedRef.current.has(key)) {
-        loggedRef.current.add(key);
-        logActivity({
-          actorId: teacher.id, actorRole: teacher?.role || "teacher", schoolId: school?.id,
-          eventType: "results_entered", lessonId: Number(lessonId), detail: "saisie des résultats",
-        });
-      }
+      logOnce();
     } catch (_) {
-      setRows((prev) => ({ ...prev, [id]: { ...prev[id], status: "error" } }));
-      pushToast("Note non enregistrée. Elle reste à l'écran — réessayez.", "error");
+      // Online but the write did not land (flaky link, server hiccup). Queue it
+      // rather than telling the teacher to retype a note she already entered.
+      try { await hold(); logOnce(); }
+      catch (_) {
+        setRows((prev) => ({ ...prev, [id]: { ...prev[id], status: "error" } }));
+        pushToast("Note non enregistrée. Elle reste à l'écran — réessayez.", "error");
+      }
     }
   };
 
