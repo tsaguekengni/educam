@@ -3,7 +3,7 @@ import { useState, useEffect } from "react";
 import { supabase } from "../lib/supabase";
 import Dashboard from "./dashboard";
 import { OFFLINE_ENABLED, PROFILES_ENABLED, PASSWORD_RESET_ENABLED } from "../lib/flags";
-import { setGrant, getGrant, clearGrant } from "../lib/offline";
+import { setGrant, getGrant, clearGrant, requestPersistentStorage, withTimeout } from "../lib/offline";
 import { COLORS, FONT } from "../lib/theme";
 import { Button, Callout } from "../components/ui";
 import { Field, PasswordField, SelectField, ChoiceGroup } from "../components/forms";
@@ -89,43 +89,74 @@ export default function Home() {
 
   // Session restore (offline mode only). When the flag is off this never runs,
   // so behaviour is unchanged: the login form shows as before.
+  //
+  // ⚠️ THE NETWORK IS NEVER ON THE PATH TO THE FIRST PAINT.
+  //
+  // The teacher's morning has to be: open the laptop, open the app, be in it —
+  // whatever the network is doing. The case that used to break this is not "no
+  // wifi"; it is a school router that is UP with a DEAD uplink, which is the
+  // common failure on site. There, `navigator.onLine` reports true, so the old
+  // code took the online branch and awaited two Supabase calls that never
+  // answered. They do not fail fast, they HANG — and the teacher sat looking at
+  // "Chargement…" with no way forward.
+  //
+  // Boot therefore happens in two phases:
+  //   PHASE 1 — synchronous, no network: read the grant off the disk and show
+  //             the dashboard straight away.
+  //   PHASE 2 — background and time-boxed: confirm the real session and
+  //             recharge the grant. If it is slow or fails, the teacher is
+  //             already working and nothing on screen changes.
   useEffect(() => {
     if (!OFFLINE_ENABLED) return;
     let cancelled = false;
+
+    // Ask the system never to evict our storage. The cached lessons — and soon
+    // the queue of unsent results — depend on this. Fire-and-forget.
+    requestPersistentStorage();
+
+    // ---- PHASE 1: in, immediately, from disk. No await, no network. ----
+    const granted = getGrant();
+    if (granted?.teacher) {
+      setSession({ offline: true });
+      setTeacher(granted.teacher);
+      setBooting(false);
+    }
+
+    // ---- PHASE 2: verify behind the scenes. Never blocks what is on screen. ----
     (async () => {
       try {
-        const isOnline = typeof navigator === "undefined" ? true : navigator.onLine;
-        if (isOnline) {
-          const { data } = await supabase.auth.getSession();
-          const s = data?.session;
-          if (s) {
-            const { data: t } = await supabase.from("teachers").select("*").eq("id", s.user.id).maybeSingle();
-            if (t && !cancelled) {
-              setGrant(t);
-              setSession(s);
-              setTeacher(t);
-              setBooting(false);
-              return;
-            }
-            // Parent profile?
-            const { data: p } = await supabase.from("parents").select("*").eq("id", s.user.id).maybeSingle();
-            if (p && !cancelled) {
-              setSession(s);
-              setParent(p);
-              setBooting(false);
-              return;
-            }
-          }
+        const { data } = await withTimeout(supabase.auth.getSession());
+        const s = data?.session;
+        // No live session: a still-valid grant (if any) stands on its own.
+        if (!s) return;
+
+        const { data: t } = await withTimeout(
+          supabase.from("teachers").select("*").eq("id", s.user.id).maybeSingle()
+        );
+        if (t && !cancelled) {
+          setGrant(t); // online again → recharge the 7 days
+          setSession(s);
+          setTeacher(t);
+          return;
         }
-      } catch (_) { /* fall through to offline grant */ }
-      // Offline (or no live session): trust a still-valid 7-day grant.
-      const g = getGrant();
-      if (g && g.teacher && !cancelled) {
-        setSession({ offline: true });
-        setTeacher(g.teacher);
+
+        // Parent profile? (Parents are online-required by design — no grant.)
+        const { data: p } = await withTimeout(
+          supabase.from("parents").select("*").eq("id", s.user.id).maybeSingle()
+        );
+        if (p && !cancelled) {
+          setSession(s);
+          setParent(p);
+        }
+      } catch (_) {
+        // Unreachable, or slower than the boot budget. If Phase 1 let the
+        // teacher in, this is a non-event; if it did not, the login form shows.
+      } finally {
+        // Safe to repeat: Phase 1 may already have cleared this.
+        if (!cancelled) setBooting(false);
       }
-      if (!cancelled) setBooting(false);
     })();
+
     return () => { cancelled = true; };
   }, []);
 

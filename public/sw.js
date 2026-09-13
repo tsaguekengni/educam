@@ -14,23 +14,80 @@
  *  - Leaves Supabase data (lessons/timetable/auth) to the app's IndexedDB layer;
  *    the SW does NOT intercept those API calls.
  *
- * Versioning: bump CACHE_VERSION on any SW change. `activate` deletes old caches
- * and takes control immediately, so a new deploy never gets stuck behind a stale
- * worker.
+ *  - PRECACHES the app shell and its hashed JS/CSS at install time, so offline
+ *    works from the FIRST launch rather than the second. See the install
+ *    handler for why this is not optional.
+ *
+ * Versioning: bump SHELL_CACHE on any change to the shell handling. `activate`
+ * deletes any educam-* cache no longer listed in CURRENT_CACHES and takes
+ * control immediately, so a new deploy never gets stuck behind a stale worker.
  */
-const CACHE_VERSION = "educam-v2";
-const SHELL_CACHE = CACHE_VERSION + "-shell";
-const IMG_CACHE = CACHE_VERSION + "-img";
+// Cache names are versioned INDEPENDENTLY, on purpose.
+//
+// Bumping the shell forces a clean rebuild of the app code. The image cache is
+// deliberately NOT bumped with it: lesson images are expensive to re-download
+// on a weak line, and IndexedDB still lists those lessons as "downloaded" — so
+// silently dropping the images would leave a teacher with a lesson that claims
+// to be available offline and renders blank.
+const SHELL_CACHE = "educam-v3-shell";
+const IMG_CACHE = "educam-v2-img";
+const CURRENT_CACHES = [SHELL_CACHE, IMG_CACHE];
 
-self.addEventListener("install", () => {
-  self.skipWaiting();
+// The app shell. Kept as a constant so the fallback below and the precache
+// below agree on exactly one URL (the manifest's start_url is "/", scope "/").
+const SHELL_URL = "/";
+
+/**
+ * ⚠️ PRECACHE AT INSTALL — do not remove this.
+ *
+ * Without it, offline only ever worked from the SECOND launch onward, and that
+ * was never noticed because testing always reloaded at least once.
+ *
+ * Why: on a first visit the browser fetches the document BEFORE this worker is
+ * installed and controlling. Nothing passes through `fetch` below, so nothing
+ * is cached. A teacher who installs the app, logs in, and closes it has an
+ * EMPTY cache — and reopening it offline shows the browser's own "cannot
+ * connect" error page, because there is no shell to fall back to.
+ * (Verified on the live site, 2026-09-13: first visit → 0 caches; second
+ * visit → shell cached.)
+ *
+ * Caching the HTML alone is not enough either: a shell whose JavaScript is
+ * missing cannot boot. So we read the shell we just fetched, pull out the
+ * hashed `/_next/static/*` files it references, and cache those too. Reading
+ * them out of the HTML keeps this self-maintaining — no build step, and no
+ * hand-written list of filenames to fall out of date.
+ */
+self.addEventListener("install", (event) => {
+  event.waitUntil((async () => {
+    try {
+      const cache = await caches.open(SHELL_CACHE);
+      const res = await fetch(SHELL_URL, { cache: "reload" });
+      if (res && res.ok) {
+        await cache.put(SHELL_URL, res.clone());
+        const html = await res.text();
+        const assets = [...new Set(html.match(/\/_next\/static\/[^"'\s)]+/g) || [])];
+        await Promise.all(assets.map(async (url) => {
+          try {
+            const r = await fetch(url, { cache: "reload" });
+            if (r && r.ok) await cache.put(url, r.clone());
+          } catch (_) { /* one missing asset must not fail the install */ }
+        }));
+      }
+    } catch (_) {
+      // Precaching is best-effort: a failure here must NEVER block activation,
+      // or a bad network on first run would leave the app with no worker at all.
+    }
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener("activate", (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
     await Promise.all(
-      keys.filter((k) => !k.startsWith(CACHE_VERSION)).map((k) => caches.delete(k))
+      keys
+        .filter((k) => k.startsWith("educam-") && !CURRENT_CACHES.includes(k))
+        .map((k) => caches.delete(k))
     );
     await self.clients.claim();
   })());
@@ -82,7 +139,7 @@ async function networkFirst(req, cacheName) {
     }
     return res;
   } catch (_) {
-    return (await cache.match(req)) || (await cache.match("/")) || Response.error();
+    return (await cache.match(req)) || (await cache.match(SHELL_URL)) || Response.error();
   }
 }
 
