@@ -140,7 +140,59 @@ export async function downloadWeek(lessonIds, onProgress) {
   return { total: lessonIds.length, fresh, updated, uptodate, failed };
 }
 
+// ---------- Durable storage + a ceiling on boot-path network calls ----------
+
+// How long any single network call on the BOOT path is allowed to take before
+// we give up on it. Short on purpose: this is a budget for the first paint,
+// not for the request. The request itself keeps running; we just stop waiting.
+export const BOOT_NETWORK_TIMEOUT_MS = 2500;
+
+/**
+ * Ask the system to treat our storage as durable.
+ *
+ * By default a browser may EVICT a site's IndexedDB and localStorage when the
+ * disk fills up. Today that would cost the cached lessons — irritating. Once
+ * the write queue exists it would cost a teacher's whole day of unsent results.
+ * An installed desktop app is usually granted persistence automatically;
+ * asking explicitly is the difference between "usually" and "yes".
+ *
+ * Fire-and-forget: never throws, never blocks, safe to call on every boot.
+ */
+export async function requestPersistentStorage() {
+  try {
+    if (typeof navigator === "undefined" || !navigator.storage?.persist) return false;
+    if (await navigator.storage.persisted()) return true;
+    return await navigator.storage.persist();
+  } catch (_) { return false; }
+}
+
+/**
+ * Race a promise against a short timer.
+ *
+ * ⚠️ This exists because `navigator.onLine` LIES. It reports only that a
+ * network interface is up — NOT that the internet is reachable. A school
+ * router that is powered on with a dead uplink answers "online", and requests
+ * made in that state do not fail fast: they HANG. Any such call left on the
+ * path to the first paint freezes the app on its loading screen.
+ *
+ * So every boot-time network call is time-boxed. Rejecting here does not
+ * cancel the underlying request — it just means we stop waiting for it.
+ */
+export function withTimeout(promise, ms = BOOT_NETWORK_TIMEOUT_MS) {
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms)),
+  ]);
+}
+
 // ---------- 7-day offline unlock (localStorage) ----------
+//
+// NOTE ON THE 7 DAYS (décision Maxime, 2026-09-13): this is a SAFETY NET, not
+// the normal mode of operation. The referent tethers the teacher's machine to
+// their phone at the end of each day, so data goes up daily — and because
+// `setGrant` is called again on every ONLINE boot, that daily sync silently
+// recharges the grant to a full 7 days. The countdown only ever starts during
+// a real outage.
 const GRANT_KEY = "educam_offline_grant";
 
 export function setGrant(teacher) {
