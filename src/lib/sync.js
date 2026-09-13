@@ -46,6 +46,25 @@ async function applyOne(entry) {
     return;
   }
 
+  if (op === "update") {
+    let q = supabase.from(table).update(payload);
+    for (const [col, val] of Object.entries(match || {})) q = q.eq(col, val);
+    const { error } = await q;
+    if (error) throw new Error(error.message || "update failed");
+    return;
+  }
+
+  // Calling an Edge Function rather than writing a table — used for the parent
+  // WhatsApp nudge, which can only run once the message row it refers to
+  // actually exists. The queue drains oldest-first and one at a time, so the
+  // insert that created that row has already been applied by the time we get
+  // here. That ordering is the whole reason this works.
+  if (op === "invoke") {
+    const { error } = await supabase.functions.invoke(entry.fn, { body: entry.body });
+    if (error) throw new Error(error.message || "invoke failed");
+    return;
+  }
+
   if (op === "delete") {
     let q = supabase.from(table).delete();
     for (const [col, val] of Object.entries(match || {})) q = q.eq(col, val);
@@ -101,6 +120,12 @@ export async function drainQueue(onProgress) {
         if (onProgress) onProgress(sent, total);
       } catch (err) {
         failed++;
+        // A "best effort" entry must never hold up the queue behind it. The
+        // WhatsApp nudge is the case: the in-app message has already arrived,
+        // the nudge is an extra. Losing it is a far smaller harm than stalling
+        // a teacher's marks because a notification provider is misconfigured.
+        if (entry.bestEffort) { await dequeue(entry.id); continue; }
+
         const updated = await markAttempt(entry, err?.message);
         // Repeated failure = probably this record, not the network: park it and
         // keep going. Otherwise assume the network and retry the rest later.

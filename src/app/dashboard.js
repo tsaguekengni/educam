@@ -8,13 +8,13 @@ import SchoolDashboard from "./schooldashboard";
 import Results from "./results";
 import ActivityLog from "./activitylog";
 import ReadinessQuiz from "./readiness";
-import { OFFLINE_ENABLED, PROFILES_ENABLED, PARENT_TIP_ENABLED } from "../lib/flags";
+import { OFFLINE_ENABLED, PROFILES_ENABLED, PARENT_TIP_ENABLED, WHATSAPP_ENABLED } from "../lib/flags";
 import { logActivity } from "../lib/activity";
 import { notifyParentWhatsApp } from "../lib/whatsapp";
 import {
   cachedQuery, fetchLessonBundle, saveLessonBundle, loadLessonBundle,
   getCachedLessonIds, downloadWeek, getGrant,
-  enqueue, queueCount, isShellCached, cachedQueryMeta, freshnessLabel,
+  enqueue, queueCount, isShellCached, cachedQueryMeta, freshnessLabel, newId,
 } from "../lib/offline";
 import { drainQueue } from "../lib/sync";
 import { COLORS, FONT, SHADOW, TINTS, subjectColor } from "../lib/theme";
@@ -358,7 +358,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     setOpenMsg(m);
     if (m && !m.read_at) {
       const now = new Date().toISOString();
-      supabase.from("messages").update({ read_at: now }).eq("id", m.id);
+      // Offline this used to fail silently, so the message looked read on this
+      // machine and stayed unread everywhere else — and the director's
+      // "parents à relancer" list would keep flagging a parent who had read it.
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        enqueue({ kind: "read", table: "messages", op: "update",
+                  payload: { read_at: now }, match: { id: m.id } }).then(refreshPending).catch(() => {});
+      } else {
+        supabase.from("messages").update({ read_at: now }).eq("id", m.id);
+      }
       setInbox((prev) => prev.map((x) => (x.id === m.id ? { ...x, read_at: now } : x)));
     }
   };
@@ -375,18 +383,40 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     setCMsg(""); setCRecipient("");
     setCAudience("parent");
     if (isParent) return;
-    // Pupils the sender may write a parent about.
-    let sq = supabase.from("students").select("id, full_name, teacher_id, school_id");
-    if (isAdmin) { /* every school */ }
-    else if (isSchoolAdmin) sq = sq.eq("school_id", teacher?.school_id || "");
-    else sq = sq.eq("teacher_id", teacher?.id || ""); // plain teacher: own class only
-    const { data: st } = await sq;
+    const scope = isAdmin ? "all" : isSchoolAdmin ? `s${teacher?.school_id}` : `t${teacher?.id}`;
+
+    // ⚠️ All three reads are cached. Without this the composer is unusable
+    // offline: the lists of pupils and colleagues come back empty, so there is
+    // nobody to address a message to.
+    const st = await cachedQuery(`compose_students_${scope}`, () => {
+      let sq = supabase.from("students").select("id, full_name, teacher_id, school_id");
+      if (isAdmin) { /* every school */ }
+      else if (isSchoolAdmin) sq = sq.eq("school_id", teacher?.school_id || "");
+      else sq = sq.eq("teacher_id", teacher?.id || ""); // plain teacher: own class only
+      return sq;
+    });
     setCStudents(st || []);
+
+    // Which parent account belongs to which pupil. Resolved HERE, while we can,
+    // because the send path needs it and cannot look it up without a network.
+    const ids = (st || []).map((s) => s.id);
+    if (ids.length) {
+      const par = await cachedQuery(`compose_parents_${scope}`, () =>
+        supabase.from("parents").select("id, student_id").in("student_id", ids));
+      const map = {};
+      (par || []).forEach((p) => { if (p.student_id && !map[p.student_id]) map[p.student_id] = p.id; });
+      setCParentByStudent(map);
+    } else {
+      setCParentByStudent({});
+    }
+
     // Staff the sender may write to (directors/referents + admin only).
     if (isSchoolAdmin || isAdmin) {
-      let tq = supabase.from("teachers").select("id, full_name, role, school_id");
-      if (isSchoolAdmin && !isAdmin) tq = tq.eq("school_id", teacher?.school_id || "");
-      const { data: stf } = await tq;
+      const stf = await cachedQuery(`compose_staff_${scope}`, () => {
+        let tq = supabase.from("teachers").select("id, full_name, role, school_id");
+        if (isSchoolAdmin && !isAdmin) tq = tq.eq("school_id", teacher?.school_id || "");
+        return tq;
+      });
       setCStaff((stf || []).filter((t) => t.role !== "admin" && t.id !== teacher?.id));
     } else {
       setCStaff([]);
@@ -396,19 +426,30 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const sendNewMessage = async () => {
     if (!cSubject.trim() || !cBody.trim() || !cRecipient) return;
     setCSending(true); setCMsg("");
-    const { data: u } = await supabase.auth.getUser();
-    const senderId = u?.user?.id || null;
+
+    // ⚠️ The sender used to come from `supabase.auth.getUser()` — which is a
+    // SERVER call, not a local read. Offline it returned nothing and the
+    // message would have been saved with NO SENDER at all. The signed-in
+    // profile is already in hand, and `teachers.id` IS the auth user id.
+    const senderId = (isParent ? parent?.id : teacher?.id) || null;
+    if (!senderId) { setCMsg("Session introuvable. Reconnectez-vous."); setCSending(false); return; }
+
+    // The row is fully formed here, id included, so it can be written now or
+    // replayed later without anything further from the server.
+    const messageId = newId();
     const base = {
+      id: messageId,
       sender_id: senderId, subject: cSubject.trim(), body: cBody.trim(),
       link_url: cLink.trim() || null,
+      created_at: new Date().toISOString(), // when it was written, not when it synced
     };
     let row;
     if (cAudience === "parent") {
       const stu = cStudents.find((s) => s.id === cRecipient);
-      const { data: p } = await supabase.from("parents").select("id").eq("student_id", cRecipient).limit(1);
       row = {
         ...base, audience: "parent", student_id: cRecipient,
-        recipient_id: p && p.length ? p[0].id : null,
+        // Resolved when the composer opened, so this works without a network.
+        recipient_id: cParentByStudent[cRecipient] || null,
         school_id: stu?.school_id || teacher?.school_id || null,
       };
     } else {
@@ -420,18 +461,47 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         school_id: st?.school_id || teacher?.school_id || null,
       };
     }
-    const { data: ins, error } = await supabase.from("messages").insert(row).select("id").single();
-    if (error) { setCMsg("Erreur lors de l'envoi. Réessayez."); setCSending(false); return; }
-    if (row.audience === "parent") {
-      notifyParentWhatsApp({ studentId: cRecipient, messageId: ins?.id, kind: "message" });
+
+    const offlineNow = typeof navigator !== "undefined" && !navigator.onLine;
+
+    // Queue the message, and the parent nudge behind it. Order matters: the
+    // queue drains oldest-first, so the row exists before the Edge Function is
+    // asked to notify anyone about it.
+    const hold = async () => {
+      await enqueue({ kind: "message", table: "messages", op: "insert", payload: row });
+      if (row.audience === "parent" && WHATSAPP_ENABLED) {
+        await enqueue({
+          kind: "notify", op: "invoke", fn: "send-whatsapp",
+          body: { student_id: cRecipient, message_id: messageId, kind: "message" },
+          bestEffort: true, // a nudge must never hold up a teacher's marks
+        });
+      }
+      refreshPending();
+    };
+
+    if (offlineNow) {
+      try { await hold(); }
+      catch (_) { setCMsg("Erreur lors de l'envoi. Réessayez."); setCSending(false); return; }
+    } else {
+      const { error } = await supabase.from("messages").insert(row);
+      if (error) {
+        // Online but it did not land — keep it rather than lose what was typed.
+        try { await hold(); }
+        catch (_) { setCMsg("Erreur lors de l'envoi. Réessayez."); setCSending(false); return; }
+      } else if (row.audience === "parent") {
+        notifyParentWhatsApp({ studentId: cRecipient, messageId, kind: "message" });
+      }
     }
+
     logActivity({
       actorId: senderId, actorRole: teacher?.role || "teacher",
       schoolId: row.school_id, eventType: "message_sent", detail: row.subject,
     });
-    setCMsg(row.audience === "parent" && !row.recipient_id
-      ? "Message enregistré ✓ — le parent le verra dès son inscription."
-      : "Message envoyé ✓");
+    setCMsg(offlineNow
+      ? "Message gardé ✓ — il partira au retour du réseau."
+      : row.audience === "parent" && !row.recipient_id
+        ? "Message enregistré ✓ — le parent le verra dès son inscription."
+        : "Message envoyé ✓");
     setCSubject(""); setCBody(""); setCLink(""); setCRecipient("");
     setCSending(false);
   };
@@ -601,6 +671,9 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [cMsg, setCMsg] = useState("");
   const [cStudents, setCStudents] = useState([]);       // pupils the sender may write about
   const [cStaff, setCStaff] = useState([]);             // teachers/directors the sender may write to
+  // pupil id → parent account id. Resolved while the composer opens (online) so
+  // a message written later without a network can still name its recipient.
+  const [cParentByStudent, setCParentByStudent] = useState({});
 
   useEffect(() => {
     if (!PROFILES_ENABLED || !teacher?.school_id) { setSchoolContext(null); return; }
