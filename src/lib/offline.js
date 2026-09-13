@@ -10,10 +10,51 @@ const DB_NAME = "educam-offline";
 // existing database keeps its lessons and kv contents untouched.
 const DB_VERSION = 2;
 
+/**
+ * ONE shared connection, and it must never hang.
+ *
+ * ⚠️ Two hazards were unhandled here, and together they froze the Accueil on a
+ * real machine (2026-09-13):
+ *
+ *  1. `onblocked` — if ANOTHER tab or window still holds this database open at
+ *     an older version, the upgrade is blocked and `indexedDB.open` fires
+ *     neither success nor error. The promise simply NEVER SETTLES. Every read
+ *     built on it waits forever, and the screen sits there looking busy. This
+ *     is easy to hit in normal use: the installed app in one window and the
+ *     site in a browser tab, one of them on a older build.
+ *  2. `onversionchange` — without it, THIS connection is the one blocking
+ *     somebody else's upgrade. Closing on request is how a tab stops being the
+ *     problem for its neighbour.
+ *
+ * Plus: every call used to open a brand-new connection and never close it.
+ * One cached connection is both lighter and far less likely to block anyone.
+ *
+ * Anything that fails here falls back to "no cache" rather than hanging — the
+ * callers all treat a rejection as "no local copy", which is recoverable.
+ */
+let dbPromise = null;
+const DB_OPEN_TIMEOUT_MS = 4000;
+
 function openDB() {
-  return new Promise((resolve, reject) => {
-    if (typeof indexedDB === "undefined") return reject(new Error("no-idb"));
+  if (dbPromise) return dbPromise;
+
+  dbPromise = new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") { dbPromise = null; return reject(new Error("no-idb")); }
+
+    let settled = false;
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      dbPromise = null;      // let the next call try again
+      reject(err);
+    };
+
+    // Last-resort ceiling: even if the browser never calls any handler, no
+    // caller is left waiting indefinitely.
+    const guard = setTimeout(() => fail(new Error("idb-open-timeout")), DB_OPEN_TIMEOUT_MS);
+
     const req = indexedDB.open(DB_NAME, DB_VERSION);
+
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains("lessons")) db.createObjectStore("lessons");
@@ -23,9 +64,27 @@ function openDB() {
         db.createObjectStore("outbox", { keyPath: "id" });
       }
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+
+    // Another window is holding the old version open. Give up quickly instead
+    // of waiting on a person to close a tab they do not know is the problem.
+    req.onblocked = () => fail(new Error("idb-blocked"));
+
+    req.onsuccess = () => {
+      if (settled) { try { req.result.close(); } catch (_) {} return; }
+      settled = true;
+      clearTimeout(guard);
+      const db = req.result;
+      // Step aside so another window can upgrade, and forget the connection so
+      // the next call opens a fresh one.
+      db.onversionchange = () => { try { db.close(); } catch (_) {} dbPromise = null; };
+      db.onclose = () => { dbPromise = null; };
+      resolve(db);
+    };
+
+    req.onerror = () => { clearTimeout(guard); fail(req.error || new Error("idb-error")); };
   });
+
+  return dbPromise;
 }
 
 async function idbSet(store, key, val) {
