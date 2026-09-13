@@ -1243,19 +1243,38 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
 
   /** Marque la leçon du prochain cours comme enseignée, sans passer par le
    *  lecteur — c'est le geste qui suit immédiatement le cours. */
+  // ⚠️ SECOND mark-as-taught path — the one teachers actually reach for, since
+  // it is right there on the dashboard after the lesson. It must queue offline
+  // exactly like `toggleTaught` below; fixing only that one left this refusing
+  // (caught 2026-09-13 by scanning the deployed bundle for the old message).
   const markHeroTaught = async (lesson) => {
     if (!teacher?.id || !lesson?.id || heroPlan.taught) return;
-    const { error } = await supabase.from("lessons_taught")
-      .upsert({ teacher_id: teacher.id, lesson_id: lesson.id }, { onConflict: "teacher_id,lesson_id" });
-    if (error) {
-      pushToast(online
-        ? "Impossible d'enregistrer. Réessayez dans un instant."
-        : "Hors ligne : impossible d'enregistrer pour le moment.", "error");
+    const offlineNow = typeof navigator !== "undefined" && !navigator.onLine;
+    const payload = {
+      teacher_id: teacher.id, lesson_id: lesson.id,
+      taught_at: new Date().toISOString(), // real time, not sync time
+    };
+    try {
+      if (offlineNow) {
+        await enqueue({
+          kind: "taught", table: "lessons_taught", op: "upsert",
+          onConflict: "teacher_id,lesson_id", payload,
+        });
+        refreshPending();
+      } else {
+        const { error } = await supabase.from("lessons_taught")
+          .upsert(payload, { onConflict: "teacher_id,lesson_id" });
+        if (error) throw error;
+      }
+    } catch (_) {
+      pushToast("Impossible d'enregistrer. Réessayez dans un instant.", "error");
       return;
     }
     setHeroPlan((p) => ({ ...p, taught: true }));
     setAvailableLessons((prev) => prev.map((l) => (l.id === lesson.id ? { ...l, taught: true } : l)));
-    pushToast("Leçon marquée enseignée", "success");
+    pushToast(offlineNow
+      ? "Leçon marquée enseignée — partira au retour du réseau."
+      : "Leçon marquée enseignée", "success");
     logActivity({
       actorId: teacher.id, actorRole: teacher?.role || "teacher",
       schoolId: teacher?.school_id || schoolContext?.id,
