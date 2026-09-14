@@ -1036,6 +1036,55 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     setDl({ done: res.total, total: res.total, finished: true, ...res });
   };
 
+  /* ------------------------------------------------------------------------
+     TOP-UP SILENCIEUX — les leçons de la semaine se téléchargent toutes seules.
+
+     Le bouton « Télécharger » reste, mais il ne doit plus être la seule voie :
+     une enseignante qui oublie d'appuyer dessus arrive en classe sans réseau
+     avec RIEN. Le geste le plus important de la plateforme ne peut pas dépendre
+     d'une mémoire.
+
+     Économe par construction : `downloadWeek` compare la signature du contenu
+     et ne retélécharge les images que des leçons NOUVELLES ou MODIFIÉES. Après
+     la première fois, un passage ne coûte que quelques petites requêtes.
+
+     Ne s'exécute qu'une fois par (niveau · unité · semaine) et par session, et
+     jamais pendant un téléchargement manuel. En cas d'échec on relâche le
+     verrou : le prochain retour de réseau réessaiera.
+     ------------------------------------------------------------------------ */
+  const autoTopUpRef = useRef("");
+  useEffect(() => {
+    if (!OFFLINE_ENABLED || isParent || isAdmin) return;
+    if (!online) return;
+    if (dl && !dl.finished) return;                 // a manual download is running
+    if (!teacher?.id || !(timetable || []).length) return;
+
+    const key = `${selectedLevel?.id}·${selectedUnit}·${selectedWeek}`;
+    if (autoTopUpRef.current === key) return;
+    autoTopUpRef.current = key;
+
+    const ids = Array.from(new Set(
+      (timetable || [])
+        .map((s) => getLessonForTopic(s.subject_id, s.component_id, selectedUnit, selectedWeek))
+        .filter(Boolean)
+        .map((l) => l.id)
+    ));
+    if (ids.length === 0) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        await downloadWeek(ids);                    // no progress UI: this is silent
+        if (cancelled) return;
+        setCachedIds(await getCachedLessonIds());
+        setShellReady(await isShellCached());
+      } catch (_) {
+        autoTopUpRef.current = "";                  // let a later reconnect retry
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [online, timetable, selectedUnit, selectedWeek, selectedLevel?.id, teacher?.id, isParent, isAdmin, dl]);
+
   const getTopic = (unitNum, weekNum, subjectId, componentId) => {
     return topics.find(t => t.unit_number === unitNum && t.week_number === weekNum && t.subject_id === subjectId && t.component_id === componentId)
       || topics.find(t => t.unit_number === unitNum && t.week_number <= weekNum && t.subject_id === subjectId && t.component_id === componentId);
