@@ -117,9 +117,17 @@ Deno.serve(async (req) => {
   }
 
   // --- Send the template via Meta Cloud API ---
-  // Template body has two variables: {{1}} = child's name, {{2}} = link.
+  // Template `educam_parent_alert` (production WABA, fr_CA) has THREE variables
+  // split across two components — header and body are numbered INDEPENDENTLY:
+  //   HEADER : "Suivi Scolaire de {{1}}"                      → {{1}} = child's name
+  //   BODY   : "… concernant {{1}} …  votre enfant : {{2}}"   → {{1}} = child's name, {{2}} = link
+  //   FOOTER : "Equipe Educam"                                 → static, takes no parameter
+  // Sending the body only (or collapsing the two components) returns
+  // `(#132000) Number of parameters does not match the expected number of params`.
+  // If the template is ever re-edited, the parameter count here must follow it.
   const to = digits(student.parent_phone);
   const link = APP_URL || "https://educam.app";
+  const childName = student.full_name || "votre enfant";
   const body = {
     messaging_product: "whatsapp",
     to,
@@ -129,9 +137,15 @@ Deno.serve(async (req) => {
       language: { code: LANG },
       components: [
         {
+          type: "header",
+          parameters: [
+            { type: "text", text: childName },
+          ],
+        },
+        {
           type: "body",
           parameters: [
-            { type: "text", text: student.full_name || "votre enfant" },
+            { type: "text", text: childName },
             { type: "text", text: link },
           ],
         },
