@@ -26,6 +26,7 @@
 
 import { useState, useEffect } from "react";
 import { supabase } from "../lib/supabase";
+import { cachedQueryMeta, freshnessLabel } from "../lib/offline";
 import { COLORS, FONT } from "../lib/theme";
 import { Card, Badge, Button, EmptyState, SkeletonRows, ListRow, Meter, StatTile } from "../components/ui";
 import { LineChart, BarList, Histogram, Heatmap, Sparkline, fr } from "../components/charts";
@@ -44,6 +45,9 @@ const weeksFromRatio = (taught, expected) => {
 export default function SchoolDashboard({ school, onBack, onOpenTab }) {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  // Set when the figures on screen come from the local copy rather than a live
+  // read — so the référent is never left thinking stale numbers are today's.
+  const [staleAt, setStaleAt] = useState(null);
 
   const [classes, setClasses] = useState([]);   // educam_class_averages
   const [bands, setBands] = useState([]);       // educam_score_bands
@@ -87,7 +91,12 @@ export default function SchoolDashboard({ school, onBack, onOpenTab }) {
     (async () => {
       setLoading(true);
       setErr("");
-      try {
+
+      // ⚠️ The whole screen is cached as ONE entry. The référent works on site,
+      // with the same network as the teachers, and without this every panel
+      // here came back empty the moment the connection dropped — seven reads,
+      // and the first failure threw away all of them.
+      const meta = await cachedQueryMeta(`schooldash_${school.id}`, async () => {
         const scoped = (view, cols) =>
           supabase.from(view).select(cols).eq("school_id", school.id);
 
@@ -110,24 +119,40 @@ export default function SchoolDashboard({ school, onBack, onOpenTab }) {
         ]);
 
         const firstError = [cls, bnd, trd, cov, risk].find((r) => r.error);
-        if (firstError) throw firstError.error;
-        if (cancelled) return;
+        if (firstError) return { error: firstError.error };
 
-        setClasses(cls.data || []);
-        setBands(bnd.data || []);
-        setTrendRows(trd.data || []);
-        setCoverage(cov.data || []);
-        setAtRisk(risk.data || []);
-        setStudentCount(stu.count || 0);
-        setClassLabels(new Map((tch?.data || []).map((t) => [t.id, t])));
+        return { data: {
+          classes: cls.data || [],
+          bands: bnd.data || [],
+          trendRows: trd.data || [],
+          coverage: cov.data || [],
+          atRisk: risk.data || [],
+          studentCount: stu.count || 0,
+          // A Map cannot be stored in IndexedDB, so keep the plain rows and
+          // rebuild the Map when rendering.
+          teachers: tch?.data || [],
+        } };
+      });
+
+      if (cancelled) return;
+
+      const d = meta.data;
+      if (d) {
+        setClasses(d.classes || []);
+        setBands(d.bands || []);
+        setTrendRows(d.trendRows || []);
+        setCoverage(d.coverage || []);
+        setAtRisk(d.atRisk || []);
+        setStudentCount(d.studentCount || 0);
+        setClassLabels(new Map((d.teachers || []).map((t) => [t.id, t])));
         setRowsRead(
-          (cls.data?.length || 0) + (bnd.data?.length || 0) + (trd.data?.length || 0) +
-          (cov.data?.length || 0) + (risk.data?.length || 0)
+          (d.classes?.length || 0) + (d.bands?.length || 0) + (d.trendRows?.length || 0) +
+          (d.coverage?.length || 0) + (d.atRisk?.length || 0)
         );
-      } catch (e) {
-        if (!cancelled) {
-          setErr("Impossible de charger les données de l'école. Vérifiez votre connexion.");
-        }
+        // Say plainly that these are previous figures rather than today's.
+        setStaleAt(meta.fresh ? null : meta.cachedAt);
+      } else {
+        setErr("Impossible de charger les données de l'école. Vérifiez votre connexion.");
       }
       if (!cancelled) setLoading(false);
     })();
@@ -305,6 +330,15 @@ export default function SchoolDashboard({ school, onBack, onOpenTab }) {
           background: COLORS.critBg, color: COLORS.crit, borderRadius: 10,
           padding: "11px 12px", fontSize: FONT.sm, marginTop: 16,
         }}>{err}</div>
+      )}
+
+      {staleAt && !err && (
+        <div role="status" style={{
+          background: COLORS.warnBg, color: COLORS.warn, borderRadius: 10,
+          padding: "9px 12px", fontSize: FONT.sm, marginTop: 16, fontWeight: 600,
+        }}>
+          Chiffres au {freshnessLabel(staleAt)} — dernière lecture avant la coupure.
+        </div>
       )}
 
       {loading ? (
