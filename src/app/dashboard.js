@@ -720,6 +720,9 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [shellReady, setShellReady] = useState(false);
   // How many writes are sitting in the outbox waiting for a network.
   const [pending, setPending] = useState(0);
+  // True when the queue cannot go out because the login has expired — network
+  // or not. Distinct from being offline, and it needs a different message.
+  const [syncBlocked, setSyncBlocked] = useState(false);
   const refreshPending = async () => {
     try { setPending(await queueCount()); } catch (_) { /* never break the screen */ }
   };
@@ -919,6 +922,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const sync = async () => {
       const res = await drainQueue();
       await refreshPending();
+      // The offline access (7 days) and the Supabase login are two different
+      // clocks: the first can outlive the second. When that happens the queue
+      // CANNOT go out, however good the network — and the banner promising
+      // "elle partira au retour du réseau" becomes a promise we cannot keep.
+      setSyncBlocked(!!res?.noSession);
       if (res?.sent) {
         pushToast(`${res.sent} saisie${res.sent > 1 ? "s" : ""} envoyée${res.sent > 1 ? "s" : ""} ✓`, "success");
       } else if (res?.failed && !res.sent) {
@@ -4194,6 +4202,18 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           {pending > 0
             ? `Hors ligne — ${pending} saisie${pending > 1 ? "s" : ""} gardée${pending > 1 ? "s" : ""}, elle${pending > 1 ? "s" : ""} partira${pending > 1 ? "ont" : ""} au retour du réseau.`
             : "Hors ligne — les leçons téléchargées restent disponibles."}
+        </div>
+      )}
+      {/* Connected, work waiting, but the login has expired: the queue is stuck
+          and only a re-login frees it. Saying "it will go when the network
+          returns" here would be false — the network is already back. */}
+      {OFFLINE_ENABLED && online && pending > 0 && syncBlocked && (
+        <div role="alert" style={{
+          background: COLORS.critBg, color: COLORS.crit, textAlign: "center",
+          fontSize: "var(--ec-fs-2)", fontWeight: 600, padding: "9px 12px",
+          borderBottom: `1px solid ${COLORS.border}`,
+        }}>
+          Reconnectez-vous pour envoyer vos {pending} saisie{pending > 1 ? "s" : ""} en attente — elles sont gardées en sécurité.
         </div>
       )}
       <main className="ec-main">
