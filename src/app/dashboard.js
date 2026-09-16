@@ -10,11 +10,12 @@ import ActivityLog from "./activitylog";
 import ReadinessQuiz from "./readiness";
 import { OFFLINE_ENABLED, PROFILES_ENABLED, PARENT_TIP_ENABLED, WHATSAPP_ENABLED } from "../lib/flags";
 import { logActivity } from "../lib/activity";
-import { notifyParentWhatsApp } from "../lib/whatsapp";
+import { notifyDirectMessage } from "../lib/whatsapp";
 import {
   cachedQuery, fetchLessonBundle, saveLessonBundle, loadLessonBundle,
   getCachedLessonIds, downloadWeek, getGrant,
   enqueue, queueCount, isShellCached, cachedQueryMeta, freshnessLabel, newId,
+  loadMediaBlob, isDownloadableMedia,
 } from "../lib/offline";
 import { drainQueue } from "../lib/sync";
 import { COLORS, FONT, SHADOW, TINTS, subjectColor } from "../lib/theme";
@@ -238,6 +239,116 @@ function isEmbeddable(url) {
 // Raster photos (png/jpg) are NOT upscaled, to avoid blur.
 function isSvg(url) {
   return !!url && /\.svg(\?|#|$)/i.test(url);
+}
+
+/**
+ * A lesson video, played from the copy stored on this device whenever there is
+ * one.
+ *
+ * ⚠️ DEFINED AT MODULE LEVEL ON PURPOSE. A component declared inside a render
+ * and mounted as <Component/> is a NEW type on every render, so React unmounts
+ * and remounts it — which in this codebase has already cost three separate
+ * focus-loss bugs (see the Index: « piège React récurrent »). Declared here, it
+ * keeps its state, and the video keeps playing when the screen re-renders.
+ *
+ * The order of preference, and why:
+ *  1. the file on this device — costs no data, works with no signal;
+ *  2. a YouTube/Vimeo player — needs the network, nothing we can store;
+ *  3. the direct URL over the network — works, but spends data every play;
+ *  4. an honest notice — only when there is genuinely nothing to show.
+ *
+ * `ready` exists so that step 4 is never shown while we are still looking in
+ * the local store. Announcing « online only » to a teacher who does have the
+ * file, for the half-second the lookup takes, is exactly the kind of small lie
+ * that destroys trust in the offline mode.
+ */
+function LessonVideo({ url, caption, online, variant = "reader", baseFontVw = 1 }) {
+  const [localUrl, setLocalUrl] = useState(null);
+  const [ready, setReady] = useState(false);
+  // The projector is what the class actually looks at: wider, rounder, bigger
+  // caption. Same logic, two skins — so a fix can never again land on one view
+  // and miss the other.
+  const proj = variant === "projector";
+
+  useEffect(() => {
+    let cancelled = false;
+    let made = null;
+    (async () => {
+      if (OFFLINE_ENABLED && isDownloadableMedia(url)) {
+        try {
+          const blob = await loadMediaBlob(url);
+          if (blob && !cancelled) {
+            made = URL.createObjectURL(blob);
+            setLocalUrl(made);
+          }
+        } catch (_) { /* no local copy is a normal state, not an error */ }
+      }
+      if (!cancelled) setReady(true);
+    })();
+    return () => {
+      cancelled = true;
+      // Object URLs hold the whole file in memory until revoked.
+      if (made) URL.revokeObjectURL(made);
+    };
+  }, [url]);
+
+  const radius = proj ? 16 : 10;
+  const shadow = proj ? "0 4px 24px rgba(0,0,0,0.1)" : "0 2px 12px rgba(0,0,0,0.08)";
+  const videoStyle = { width: "100%", borderRadius: radius, display: "block", boxShadow: shadow };
+  const captionStyle = proj
+    ? { fontSize: `max(14px, ${baseFontVw * 0.7}vw)`, color: "#6B7280", marginTop: 12, textAlign: "center" }
+    : { fontSize: "var(--ec-fs-3)", color: "#6B7280", marginTop: 6, textAlign: "center" };
+
+  const frame = (inner) => (
+    <div style={proj ? { width: "100%", maxWidth: 1000, margin: "0 auto" } : undefined}>
+      {inner}
+      {caption && <div style={captionStyle}>{caption}</div>}
+    </div>
+  );
+
+  const unavailable = () => (
+    <div style={{
+      background: "#F3F4F6", border: "1px dashed #D1D5DB", borderRadius: radius,
+      padding: proj ? "40px 20px" : "24px 16px", textAlign: "center", color: "#6B7280",
+    }}>
+      <div style={{ fontSize: proj ? 40 : "var(--ec-fs-6)", marginBottom: proj ? 8 : 6 }} aria-hidden="true">🎬</div>
+      <div style={{ fontSize: proj ? `max(16px, ${baseFontVw * 0.8}vw)` : "var(--ec-fs-3)", fontWeight: 700 }}>
+        Vidéo disponible uniquement en ligne
+      </div>
+      <div style={{ fontSize: proj ? `max(13px, ${baseFontVw * 0.6}vw)` : "var(--ec-fs-2)", marginTop: 4, fontWeight: 400 }}>
+        Téléchargez les leçons de la semaine pour l&apos;avoir hors ligne.
+      </div>
+    </div>
+  );
+
+  // Reserve the space rather than jumping the layout once the lookup lands.
+  if (!ready) {
+    return frame(
+      <div style={{ background: "#F3F4F6", borderRadius: radius, height: proj ? 320 : 180 }} aria-hidden="true" />
+    );
+  }
+
+  if (localUrl) {
+    return frame(<video src={localUrl} controls playsInline style={videoStyle} />);
+  }
+
+  if (isEmbeddable(url)) {
+    if (OFFLINE_ENABLED && !online) return frame(unavailable());
+    return frame(
+      <div style={{ position: "relative", paddingBottom: "56.25%", height: 0, borderRadius: radius, overflow: "hidden", boxShadow: shadow }}>
+        <iframe
+          src={getEmbedUrl(url)}
+          style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: "none" }}
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+          allowFullScreen
+        />
+      </div>
+    );
+  }
+
+  if (OFFLINE_ENABLED && !online) return frame(unavailable());
+
+  return frame(<video src={url} controls playsInline style={videoStyle} />);
 }
 
 // Renders **bold** segments (markdown-style) inside otherwise plain text.
@@ -469,10 +580,14 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     // asked to notify anyone about it.
     const hold = async () => {
       await enqueue({ kind: "message", table: "messages", op: "insert", payload: row });
-      if (row.audience === "parent" && WHATSAPP_ENABLED) {
+      // Notify whoever it was written to — parent OR colleague. Staff used to
+      // get nothing at all, because the old path could only address a pupil's
+      // parent. Uses the DIRECT template, which names the sender, so a message
+      // a person wrote never arrives looking like an automatic lesson notice.
+      if (WHATSAPP_ENABLED) {
         await enqueue({
-          kind: "notify", op: "invoke", fn: "send-whatsapp",
-          body: { student_id: cRecipient, message_id: messageId, kind: "message" },
+          kind: "notify", op: "invoke", fn: "send-direct-message",
+          body: { message_id: messageId },
           bestEffort: true, // a nudge must never hold up a teacher's marks
         });
       }
@@ -488,8 +603,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         // Online but it did not land — keep it rather than lose what was typed.
         try { await hold(); }
         catch (_) { setCMsg("Erreur lors de l'envoi. Réessayez."); setCSending(false); return; }
-      } else if (row.audience === "parent") {
-        notifyParentWhatsApp({ studentId: cRecipient, messageId, kind: "message" });
+      } else {
+        notifyDirectMessage({ messageId });
       }
     }
 
@@ -3768,40 +3883,16 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                               );
                             }
                             if (block.block_type === "video" && block.media_url) {
-                              if (OFFLINE_ENABLED && !online) {
-                                return (
-                                  <div key={k} style={{ background: "#F3F4F6", border: "1px dashed #D1D5DB", borderRadius: 10, padding: "24px 16px", textAlign: "center", color: "#6B7280" }}>
-                                    <div style={{ fontSize: "var(--ec-fs-6)", marginBottom: 6 }}>🎬</div>
-                                    <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 600 }}>Vidéo disponible uniquement en ligne</div>
-                                    {block.caption && <div style={{ fontSize: "var(--ec-fs-2)", marginTop: 4 }}>{block.caption}</div>}
-                                  </div>
-                                );
-                              }
+                              // The device copy is preferred inside LessonVideo,
+                              // so a downloaded video plays with no signal and
+                              // costs nothing to replay.
                               return (
-                                <div key={k}>
-                                  {isEmbeddable(block.media_url) ? (
-                                    <div style={{ position: "relative", paddingBottom: "56.25%", height: 0, borderRadius: 10, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.08)" }}>
-                                      <iframe
-                                        src={getEmbedUrl(block.media_url)}
-                                        style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: "none" }}
-                                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                                        allowFullScreen
-                                      />
-                                    </div>
-                                  ) : (
-                                    <video
-                                      src={block.media_url}
-                                      controls
-                                      playsInline
-                                      style={{ width: "100%", borderRadius: 10, display: "block", boxShadow: "0 2px 12px rgba(0,0,0,0.08)" }}
-                                    />
-                                  )}
-                                  {block.caption && (
-                                    <div style={{ fontSize: "var(--ec-fs-3)", color: "#6B7280", marginTop: 6, textAlign: "center" }}>
-                                      {block.caption}
-                                    </div>
-                                  )}
-                                </div>
+                                <LessonVideo
+                                  key={k}
+                                  url={block.media_url}
+                                  caption={block.caption}
+                                  online={online}
+                                />
                               );
                             }
                             return null;
@@ -4139,49 +4230,18 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                           );
                         }
                         if (block.block_type === "video" && block.media_url) {
-                          if (OFFLINE_ENABLED && !online) {
-                            return (
-                              <div key={k} style={{ width: "100%", maxWidth: 1000, margin: "0 auto", background: "#F3F4F6", border: "1px dashed #D1D5DB", borderRadius: 16, padding: "40px 20px", textAlign: "center", color: "#6B7280" }}>
-                                <div style={{ fontSize: 40, marginBottom: 8 }}>🎬</div>
-                                <div style={{ fontSize: `max(16px, ${baseFontVw * 0.8}vw)`, fontWeight: 700 }}>Vidéo disponible uniquement en ligne</div>
-                              </div>
-                            );
-                          }
+                          // Projector skin, same offline-first logic as the
+                          // reading view — one component, so a fix cannot land
+                          // on one screen and miss the other.
                           return (
-                            <div key={k} style={{ width: "100%", maxWidth: 1000, margin: "0 auto" }}>
-                              {isEmbeddable(block.media_url) ? (
-                                <div style={{
-                                  position: "relative", paddingBottom: "56.25%", height: 0,
-                                  borderRadius: 16, overflow: "hidden",
-                                  boxShadow: "0 4px 24px rgba(0,0,0,0.1)"
-                                }}>
-                                  <iframe
-                                    src={getEmbedUrl(block.media_url)}
-                                    style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: "none" }}
-                                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                                    allowFullScreen
-                                  />
-                                </div>
-                              ) : (
-                                <video
-                                  src={block.media_url}
-                                  controls
-                                  playsInline
-                                  style={{
-                                    width: "100%", borderRadius: 16, display: "block",
-                                    boxShadow: "0 4px 24px rgba(0,0,0,0.1)"
-                                  }}
-                                />
-                              )}
-                              {block.caption && (
-                                <div style={{
-                                  fontSize: `max(14px, ${baseFontVw * 0.7}vw)`,
-                                  color: "#6B7280", marginTop: 12, textAlign: "center"
-                                }}>
-                                  {block.caption}
-                                </div>
-                              )}
-                            </div>
+                            <LessonVideo
+                              key={k}
+                              url={block.media_url}
+                              caption={block.caption}
+                              online={online}
+                              variant="projector"
+                              baseFontVw={baseFontVw}
+                            />
                           );
                         }
                         return null;

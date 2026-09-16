@@ -348,6 +348,75 @@ export async function getCachedLessonIds() {
   return (await idbGet("kv", "cachedLessonIds")) || [];
 }
 
+// ---------- Lesson media kept on the device (videos) ----------
+//
+// ⚠️ WHY VIDEOS ARE NOT HANDLED LIKE IMAGES — this is the whole point of this
+// section, and the reason "just add video to the image loop" does not work.
+//
+// Images are warmed by `fetch(url, { mode: "no-cors" })`, which lands an
+// OPAQUE response in the service worker's image cache. That is fine for <img>:
+// the browser will happily paint a response it cannot read.
+//
+// A <video> element does not fetch a file in one piece. It asks for byte
+// RANGES so it can start playing before the end has arrived, and so the
+// teacher can scrub. A range request cannot be answered from an opaque cache
+// entry, and the Cache API refuses to store a partial (206) response at all.
+// So a video "cached" the image way downloads, appears to succeed, and then
+// fails to play in the classroom — the worst possible outcome.
+//
+// So videos take a different route: fetch normally (the bucket is public and
+// sends CORS headers), keep the real file in IndexedDB, and hand the player a
+// local object URL at render time. Range requests never enter the picture.
+//
+// A second benefit, worth keeping in mind: files held here are OUT OF REACH of
+// the service worker's cache-name versioning. Bumping a cache name in sw.js
+// can wipe the image cache; it cannot touch these.
+//
+// Storage note: these live in the existing `lessons` store under a prefixed
+// key, DELIBERATELY, to avoid bumping DB_VERSION. A version bump blocks while
+// another window holds the old version open — a hazard that already froze the
+// Accueil once (see openDB above). No new store, no upgrade, no hazard.
+const MEDIA_PREFIX = "media:";
+
+/**
+ * Can we actually download this?
+ *
+ * Two things must be excluded, and both exist in the live data today:
+ *  · authoring placeholders like `[[sp-u2-s1/cycle-eau.mp4]]` — 5 of the 6
+ *    video blocks in production are still these, and fetching one throws;
+ *  · YouTube/Vimeo links, which are players, not files.
+ */
+export function isDownloadableMedia(url) {
+  if (!url || typeof url !== "string") return false;
+  if (!/^https?:\/\//i.test(url)) return false;
+  return !/youtube\.com|youtu\.be|vimeo\.com|dailymotion\.com/i.test(url);
+}
+
+/** Small index of what is stored, so we can check without reading a whole file. */
+async function getMediaIndex() { return (await idbGet("kv", "mediaIndex")) || {}; }
+
+/** The stored file, or undefined. */
+export function loadMediaBlob(url) { return idbGet("lessons", MEDIA_PREFIX + url); }
+
+/** Total bytes of device-held media — for an honest "N Mo sur cet appareil". */
+export async function mediaBytesStored() {
+  const ix = await getMediaIndex();
+  return Object.values(ix).reduce((sum, m) => sum + (m && m.size ? m.size : 0), 0);
+}
+
+/**
+ * Fetch one media file and keep it. Returns the number of bytes stored.
+ * Throws on network failure so the caller can count it as a failure rather
+ * than silently reporting success.
+ */
+export async function downloadMedia(url) {
+  const res = await fetch(url, { cache: "reload" }); // CORS, readable — not no-cors
+  if (!res || !res.ok) throw new Error("media-http-" + (res ? res.status : "0"));
+  const blob = await res.blob();
+  await idbSet("lessons", MEDIA_PREFIX + url, blob);
+  return blob.size;
+}
+
 // A content signature so re-download can skip lessons that haven't changed.
 // (There's no updated_at on lessons, so we compare the actual content.)
 function bundleSignature(b) {
@@ -361,12 +430,21 @@ function bundleSignature(b) {
   } catch (_) { return String(Date.now()); }
 }
 
-// ---------- Download this week's lessons (videos excluded) ----------
+// ---------- Download this week's lessons (images AND videos) ----------
 // "Refresh only what changed": fetch the (small) lesson JSON, compare its
 // signature to what's cached; only NEW or CHANGED lessons re-download images.
+//
+// Videos are handled on a SEPARATE rule, and the difference matters: a video is
+// downloaded whenever it is missing from the device, even if the lesson text is
+// unchanged. Without that, every lesson downloaded before video support existed
+// would stay permanently video-less — the signature would say "nothing changed"
+// and the file would never arrive.
 export async function downloadWeek(lessonIds, onProgress) {
   let done = 0, fresh = 0, updated = 0, uptodate = 0, failed = 0;
+  let videos = 0, videoBytes = 0, videoFailed = 0;
   const cached = [];
+  const mediaIndex = await getMediaIndex();
+
   for (const id of lessonIds) {
     try {
       const bundle = await fetchLessonBundle(id);
@@ -374,7 +452,7 @@ export async function downloadWeek(lessonIds, onProgress) {
       const changed = !prev || bundleSignature(prev) !== bundleSignature(bundle);
       if (changed) {
         await saveLessonBundle(id, bundle);
-        // (Re)download images for new/changed lessons; skip video media.
+        // (Re)download images for new/changed lessons.
         for (const b of bundle.blocks) {
           if (b.block_type === "image" && b.media_url) {
             try { await fetch(b.media_url, { mode: "no-cors", cache: "reload" }); } catch (_) {}
@@ -384,15 +462,30 @@ export async function downloadWeek(lessonIds, onProgress) {
       } else {
         uptodate++; // unchanged → no image re-download, no data spent
       }
+
+      // Videos: fetch any we do not already hold. Idempotent — a second run
+      // over the same week costs nothing.
+      for (const b of bundle.blocks) {
+        if (b.block_type !== "video" || !isDownloadableMedia(b.media_url)) continue;
+        if (mediaIndex[b.media_url]) continue; // already on the device
+        try {
+          const size = await downloadMedia(b.media_url);
+          mediaIndex[b.media_url] = { size, storedAt: Date.now() };
+          videos++; videoBytes += size;
+        } catch (_) { videoFailed++; }
+      }
+
       cached.push(id);
     } catch (_) { failed++; }
     done++;
     if (onProgress) onProgress(done, lessonIds.length);
   }
+
+  await idbSet("kv", "mediaIndex", mediaIndex);
   const prevIds = (await idbGet("kv", "cachedLessonIds")) || [];
   const merged = Array.from(new Set(prevIds.concat(cached)));
   await idbSet("kv", "cachedLessonIds", merged);
-  return { total: lessonIds.length, fresh, updated, uptodate, failed };
+  return { total: lessonIds.length, fresh, updated, uptodate, failed, videos, videoBytes, videoFailed };
 }
 
 // ---------- Durable storage + a ceiling on boot-path network calls ----------
