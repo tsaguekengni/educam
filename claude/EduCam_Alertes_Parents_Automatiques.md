@@ -155,15 +155,26 @@ select status, error, created_at from whatsapp_notifications order by created_at
 
 **Portée élargie, à assumer :** la règle retenue est « **écrit par une personne** » et non « écrit par l'admin ». Une enseignante qui écrit à la main à un parent déclenchait elle aussi le modèle de leçon, ce qui était tout aussi faux. Le modèle nommant l'expéditeur, la règle se généralise naturellement.
 
-**Le modèle à créer dans Meta** (nom exact : `educam_direct_message`) :
+**Le modèle à créer dans Meta** — nom exact `educam_direct_message`, texte arrêté par Maxime (2026-09-16) :
 
+```
+Bonjour
+{{1}} vous a écrit : « {{2}} ».
+Ouvrez EduCam {{3}}
+Pour lire le message complet et répondre.
+Merci
+```
+
+- **{{1}}** = nom de l'expéditeur · **{{2}}** = extrait (objet du message) · **{{3}}** = lien vers la plateforme
 - **Catégorie : Utility** — surtout pas Marketing (mélanger les catégories sur un même numéro fait chuter la note de qualité).
-- **Langue : la MÊME que `educam_parent_alert`.** Les deux fonctions lisent la même variable `WHATSAPP_TEMPLATE_LANG` ; un écart redonne l'erreur `#132001 Template name does not exist in the translation`.
-- **En-tête : aucun.**
-- **Corps :** `{{1}} vous a écrit : « {{2}} ». Ouvrez EduCam pour lire le message complet et répondre.`
-- **Pied de page :** `Équipe EduCam` (fixe) · **Boutons : aucun.**
+- **Langue : français (Canada), la MÊME entrée que `educam_parent_alert`.**
+- **En-tête : aucun. Boutons : aucun.**
 
-⚠️ **Exactement deux paramètres de corps, aucun d'en-tête.** Le compte doit correspondre au code déployé, sinon Meta répond `#132000`.
+⚠️ **Exactement TROIS paramètres de corps, aucun d'en-tête.** Le compte doit correspondre au code déployé (`send-direct-message` v2), sinon Meta répond `#132000`.
+
+⚠️ **Ne pas choisir la langue « au nom » dans la liste de Meta — reprendre celle du modèle qui fonctionne.** Les trois fonctions lisent la même variable `WHATSAPP_TEMPLATE_LANG` ; toute divergence redonne `#132001 Template name does not exist in the translation`, l'erreur déjà rencontrée le 2026-09-13.
+
+Le lien est fourni par le secret `APP_URL` (repli : `https://educam-eight.vercel.app`) — le même que celui utilisé par les alertes automatiques.
 
 ## 12. Points ouverts
 
@@ -174,6 +185,7 @@ select status, error, created_at from whatsapp_notifications order by created_at
 
 ## Journal
 
+- **2026-09-16 (2)** — **Texte du modèle arrêté par Maxime** : trois variables, la troisième étant le **lien vers la plateforme**. `send-direct-message` redéployée en **v2** — trois paramètres de corps et lecture du secret `APP_URL`. Le compte de paramètres est la chose à ne pas rater : deux au lieu de trois donnerait `#132000`.
 - **2026-09-16** — **Séparation des deux canaux (§13).** Nouvelle fonction **`send-direct-message`** déployée + `notifyDirectMessage()` côté client ; le composeur l'appelle désormais pour **toute** audience. Deux trouvailles en lisant le code : le **personnel ne recevait aucune notification** (le composeur ne déclenchait que pour les parents, et `send-whatsapp` n'accepte qu'un identifiant d'élève), et **tout** utilisait le modèle centré sur l'enfant — absurde pour un message à une enseignante. `send-whatsapp` laissée **intacte** : elle marche, elle est éprouvée, et la séparation des fonctions sert la séparation demandée. Reste : faire approuver `educam_direct_message` chez Meta (spécification en §13). ⚠️ Rappel : **0 membre du personnel sur 22 et 0 compte parent sur 16 ont un téléphone enregistré** — le canal restera inerte tant que les numéros ne seront pas collectés.
 - **2026-09-14 (2)** — ✅ **VÉRIFIÉ DE BOUT EN BOUT EN PRODUCTION.** Exécution réelle : `{"ok":true, considered:1, created:1, pushed:0, skipped:1}`. Une alerte créée pour **Alice EBALE** (2/5, « Les classes d'aliments », 2026-09-13), message **« Leçon à revoir : Les classes d'aliments »** avec `link_url = "3"` — numérique, donc la boîte de réception affiche bien le bouton **« Ouvrir la leçon »**. WhatsApp **correctement ignoré** et **journalisé** (`skipped / no_parent_phone`) plutôt que perdu en silence. Chemin parcouru avant d'y arriver : 403 diagnostique → essai à blanc 200 → exécution réelle 200. Deux pièges d'authentification rencontrés et documentés en §5.
 - **2026-09-14** — Conçu, construit et déployé. Table `result_alerts` + fonction `daily-parent-alerts` (v2). Deux décisions structurantes : **traitement du soir** (une note se corrige ; un message parti ne se reprend pas) et **fenêtre de 7 jours** (les notes hors ligne arrivent en retard, toujours datées du bon jour — un traitement « aujourd'hui seulement » les aurait ignorées). Reste : la programmation `pg_cron`, qui exige la clé `service_role`.
