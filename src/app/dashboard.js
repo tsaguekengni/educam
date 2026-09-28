@@ -5320,14 +5320,31 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           </div>
         )}
 
-        {screen === "calendar" && <CalendarView />}
-        {screen === "programme" && <ProgrammeView />}
+        {/* ⚠️ THESE SCREENS ARE CALLED AS FUNCTIONS, NOT MOUNTED AS ELEMENTS.
+            `CalendarView`, `ProgrammeView`, `LessonScreen` and `ProjectorView`
+            are all defined INSIDE Dashboard, so each render creates a brand-new
+            function identity. Written as <ProgrammeView />, React sees a
+            different component type every time and therefore UNMOUNTS the whole
+            subtree and builds a fresh one — which destroys the focused input.
+            Called as ProgrammeView(), the output is simply inlined into this
+            tree and the DOM survives.
+
+            This is the project's recurring React trap, and it has now been paid
+            for FOUR times: the feedback comment box, the Retours panel, the
+            Programme search (fixed INSIDE ProgrammeView on 2026-09-11 — the
+            inline SearchBar was removed and the input given a stable branch),
+            and then the Programme search AGAIN on 2026-09-28, because the inner
+            fix could never work while the OUTER mount still remounted
+            everything. Fixing the input's surroundings is not enough: whatever
+            contains it must not be remounted either.
+
+            None of these four use hooks — verified — which is what makes calling
+            them safe despite the call being conditional. If one ever gains a
+            hook, it must be lifted to module level instead, NOT switched back to
+            <Element /> form. */}
+        {screen === "calendar" && CalendarView()}
+        {screen === "programme" && ProgrammeView()}
         {screen === "readiness" && currentLesson && <ReadinessQuiz lesson={currentLesson} teacherId={teacher?.id} onPass={() => { setLessonPassed(true); setScreen("lesson"); }} onBack={() => setScreen("lesson")} />}
-        {/* Call LessonScreen() as a function instead of <LessonScreen /> so its
-            output is inlined into this render tree. Rendering it as an element
-            remounted the whole subtree on every Dashboard state change (it's an
-            inline-defined component with a fresh identity each render), which
-            made the feedback comment box lose focus after each keystroke. */}
         {screen === "lesson" && LessonScreen()}
         {screen === "admin" && isAdmin && <Admin onBack={goBack} />}
         {screen === "schooldash" && isSchoolAdmin && (
