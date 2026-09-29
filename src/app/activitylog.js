@@ -14,6 +14,7 @@
 
 import { useState, useEffect } from "react";
 import { supabase } from "../lib/supabase";
+import { cachedQueryMeta, freshnessLabel } from "../lib/offline";
 import { COLORS, FONT } from "../lib/theme";
 import { Card, CardLabel, Badge, Button, EmptyState, SkeletonRows, StatTile } from "../components/ui";
 import { SelectField, Field } from "../components/forms";
@@ -58,6 +59,17 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
   const [jLoading, setJLoading] = useState(false);
   const [nameMap, setNameMap] = useState({});
 
+  // ---- Hors ligne (directeur / référent) ----
+  // Cet écran est en LECTURE SEULE, donc il se met en cache sans réserve : la
+  // seule chose à dire honnêtement, c'est DE QUAND datent les chiffres.
+  // `staleAt` non nul = on affiche la dernière lecture faite avant la coupure.
+  const [staleAt, setStaleAt] = useState(null);
+  // Le journal filtré, lui, ne peut pas être servi depuis le cache : chaque
+  // combinaison de filtres est une requête différente. On garde la PREMIÈRE
+  // page non filtrée, et on le dit quand un filtre demande le réseau.
+  const [jNeedsNetwork, setJNeedsNetwork] = useState(false);
+  const isOffline = () => typeof navigator !== "undefined" && !navigator.onLine;
+
   useEffect(() => { loadData(); /* eslint-disable-next-line */ }, [school?.id, isAdmin]);
   useEffect(() => { if (tab === "journal") loadJournal(); /* eslint-disable-next-line */ }, [tab, jEvent, jRole, jFrom, jTo, jPage, school?.id, isAdmin]);
   useEffect(() => { setJPage(0); }, [jEvent, jRole, jFrom, jTo]);
@@ -66,7 +78,16 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
 
   const loadData = async () => {
     setLoading(true);
-    try {
+    // ⚠️ Tout l'écran tient dans UNE entrée de cache, et c'est le RÉSULTAT
+    // CALCULÉ qu'on garde, pas les 4 000 lignes brutes du journal : le directeur
+    // a besoin de relire « qui n'a rien fait cette semaine », pas de recalculer.
+    // L'histogramme des 14 jours est donc figé à la date de lecture — ce que le
+    // bandeau annonce, plutôt que de laisser croire qu'il s'agit d'aujourd'hui.
+    const scopeKey = isAdmin ? "all" : (school?.id || "none");
+    // Plafond relevé : cette lecture ramène jusqu'à STATS_CAP lignes, ce que les
+    // 5 s par défaut ne couvrent pas sur une connexion lente — on retomberait
+    // sur le cache en se croyant hors ligne.
+    const meta = await cachedQueryMeta(`activity_${scopeKey}`, async () => {
       const [{ data: teachers }, { data: students }] = await Promise.all([
         scoped(supabase.from("teachers").select("id, full_name, role")),
         scoped(supabase.from("students").select("id, full_name, teacher_id")),
@@ -132,7 +153,6 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
       const nm = {};
       teacherList.forEach((t) => { nm[t.id] = t.full_name || "Enseignant"; });
       parentsData.forEach((p) => { nm[p.id] = `Parent · ${studentName[p.student_id] || "élève"}`; });
-      setNameMap(nm);
 
       // Activité par jour sur 14 jours (pour la synthèse).
       const dayCounts = new Map();
@@ -155,15 +175,29 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
         .map(([k, v]) => ({ label: EVENT_LABEL[k] || k, value: v }))
         .sort((a, b) => b.value - a.value).slice(0, 6);
 
-      setData({
+      return { data: {
+        nameMap: nm,
         teacherStats, parentStats, days, byEvent,
         totalEvents: (acts || []).length,
         cappedStats: (acts || []).length >= STATS_CAP,
         followUp: parentStats.filter((p) => p.flags.length > 0).length,
         flaggedTeachers: teacherStats.filter((t) => t.flags.length > 0).length,
-      });
-    } catch (_) {
-      pushToast("Impossible de charger l'activité. Vérifiez votre connexion.", "error");
+      } };
+    }, { timeoutMs: 15000 });
+
+    const d = meta.data;
+    if (d) {
+      setNameMap(d.nameMap || {});
+      setData(d);
+      setStaleAt(meta.fresh ? null : meta.cachedAt);
+    } else {
+      // Rien en cache ET pas de réseau : l'écran n'a jamais été ouvert connecté.
+      pushToast(
+        isOffline()
+          ? "Activité jamais consultée en ligne — rien à afficher hors connexion."
+          : "Impossible de charger l'activité. Vérifiez votre connexion.",
+        "error"
+      );
     }
     setLoading(false);
   };
@@ -180,14 +214,39 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
     return q;
   };
 
+  // La vue « par défaut » du journal : première page, aucun filtre. C'est la
+  // seule qu'on puisse honnêtement servir depuis le cache — filtrer ou paginer,
+  // c'est interroger la base, pas relire ce qu'on avait déjà.
+  const journalIsDefault =
+    jPage === 0 && jEvent === "all" && jRole === "all" && !jFrom && !jTo;
+
   const loadJournal = async () => {
+    const scopeKey = isAdmin ? "all" : (school?.id || "none");
+
+    if (!journalIsDefault && isOffline()) {
+      setJNeedsNetwork(true);
+      setJRows([]); setJCount(0); setJLoading(false);
+      return;
+    }
+    setJNeedsNetwork(false);
     setJLoading(true);
-    try {
+
+    const run = async () => {
       const q = journalQuery("actor_id, actor_role, event_type, detail, created_at", { count: "exact" });
       const from = jPage * PAGE;
       const { data: rows, count } = await q.range(from, from + PAGE - 1);
-      setJRows(rows || []);
-      setJCount(count || 0);
+      return { data: { rows: rows || [], count: count || 0 } };
+    };
+
+    try {
+      if (journalIsDefault) {
+        const meta = await cachedQueryMeta(`activity_journal_${scopeKey}`, run);
+        setJRows(meta.data?.rows || []);
+        setJCount(meta.data?.count || 0);
+      } else {
+        const { data: d } = await run();
+        setJRows(d.rows); setJCount(d.count);
+      }
     } catch (_) {
       pushToast("Impossible de charger le journal.", "error");
     }
@@ -202,6 +261,12 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
    */
   const EXPORT_CAP = 5000;
   const exportCsv = async () => {
+    // L'export relit la base sur toute la plage : sans réseau il n'y a rien à
+    // exporter, et un fichier vide se lit comme un journal vide.
+    if (isOffline()) {
+      pushToast("L'export du journal nécessite une connexion.", "error");
+      return;
+    }
     setJExporting(true);
     try {
       const { data: rows } = await journalQuery(
@@ -266,6 +331,15 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
       {backLink}
       <h1 className="ec-h1">Activité de la plateforme</h1>
       <p className="ec-sub">{isAdmin ? "Toutes les écoles" : (school?.name || "votre école")}</p>
+
+      {staleAt && (
+        <div role="status" style={{
+          background: COLORS.warnBg, color: COLORS.warn, borderRadius: 10,
+          padding: "9px 12px", fontSize: FONT.sm, marginTop: 16, fontWeight: 600,
+        }}>
+          Activité au {freshnessLabel(staleAt)} — dernière lecture réussie.
+        </div>
+      )}
 
       {loading || !data ? (
         <div style={{ marginTop: 20 }}><SkeletonRows rows={5} /></div>
@@ -433,7 +507,14 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
                 </span>
               </div>
 
-              {jLoading ? (
+              {jNeedsNetwork ? (
+                <Card>
+                  <EmptyState icon="📶" title="Filtres indisponibles hors connexion">
+                    Sans réseau, le journal n'affiche que sa première page, sans filtre.
+                    Retirez les filtres pour relire ce qui a été chargé, ou reconnectez-vous.
+                  </EmptyState>
+                </Card>
+              ) : jLoading ? (
                 <SkeletonRows rows={5} />
               ) : jRows.length === 0 ? (
                 <Card><EmptyState icon="📋" title="Aucune action" >Aucune action ne correspond à ce filtre.</EmptyState></Card>

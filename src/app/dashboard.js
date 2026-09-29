@@ -799,11 +799,21 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // a message written later without a network can still name its recipient.
   const [cParentByStudent, setCParentByStudent] = useState({});
 
+  // ⚠️ RACINE DE TOUT L'ÉCRAN DIRECTEUR / RÉFÉRENT.
+  // Cette lecture d'UNE ligne décide si `schoolContext` existe, et tous les
+  // panneaux de l'école reçoivent ensuite `school={schoolContext}`. Sans réseau,
+  // la requête ne se résolvait jamais : `schoolContext` restait null, et le
+  // tableau de bord de l'école, « Gestion de l'école » et « Activité » se
+  // gardaient derrière leur `if (!school?.id) return` — écran vide, alors que
+  // leurs propres données étaient bel et bien en cache. Un cache ne sert à rien
+  // si personne ne va le chercher. (Trouvé le 2026-09-29 en étendant le mode
+  // hors ligne à la direction.)
   useEffect(() => {
     if (!PROFILES_ENABLED || !teacher?.school_id) { setSchoolContext(null); return; }
     let cancelled = false;
-    supabase.from("schools").select("id, name, staff_code").eq("id", teacher.school_id).maybeSingle()
-      .then(({ data }) => { if (!cancelled) setSchoolContext(data || null); });
+    cachedQueryMeta(`school_${teacher.school_id}`, () =>
+      supabase.from("schools").select("id, name, staff_code").eq("id", teacher.school_id).maybeSingle()
+    ).then(({ data }) => { if (!cancelled) setSchoolContext(data || null); });
     return () => { cancelled = true; };
   }, [teacher?.school_id]);
 
@@ -4370,7 +4380,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         }}>
           {pending > 0
             ? `Hors ligne — ${pending} saisie${pending > 1 ? "s" : ""} gardée${pending > 1 ? "s" : ""}, elle${pending > 1 ? "s" : ""} partira${pending > 1 ? "ont" : ""} au retour du réseau.`
-            : "Hors ligne — les leçons téléchargées restent disponibles."}
+            : isSchoolAdmin
+              // La direction ne « télécharge » pas de leçons : ce qu'elle doit
+              // savoir, c'est que les écrans restent lisibles mais figés.
+              ? "Hors ligne — consultation seule. Les chiffres affichés datent de la dernière connexion."
+              : "Hors ligne — les leçons téléchargées restent disponibles."}
         </div>
       )}
       {/* Connected, work waiting, but the login has expired: the queue is stuck

@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect } from "react";
 import { supabase } from "../lib/supabase";
+import { cachedQueryMeta, freshnessLabel } from "../lib/offline";
 import { ConfirmDialog } from "../components/overlays";
 import { Button, Card, CardLabel, ListRow, IconButton, EmptyState, SkeletonRows } from "../components/ui";
 import { Field } from "../components/forms";
@@ -10,6 +11,26 @@ import { notifyParentWhatsApp } from "../lib/whatsapp";
 // School-admin timetable editor. Rendered only when PROFILES_ENABLED and the
 // logged-in user is a school_admin. Edits each class's (= teacher's) weekly
 // timetable, scoped by school_id + owner_teacher_id.
+//
+// ─── HORS LIGNE (décision Maxime, 2026-09-29) ────────────────────────────────
+// Le directeur et le référent travaillent sur le même réseau que les
+// enseignants, donc ils subissent les mêmes coupures. Cet écran se scinde en
+// deux :
+//
+//   · LECTURE  — classes, élèves, codes parents, emploi du temps, tableau de
+//     bord : tout est mis en cache et reste consultable sans réseau, avec la
+//     date de la dernière lecture affichée en tête.
+//
+//   · ÉCRITURE — ajouter ou retirer un élève, régénérer un code, enregistrer un
+//     emploi du temps : REFUSÉ hors ligne, franchement, avant d'être tenté.
+//
+// Pourquoi ne pas les mettre en file d'attente comme les notes des enseignants ?
+// Parce qu'une note a une clé naturelle — (élève, leçon, date) — donc la
+// rejouer est sans danger et « la saisie de l'enseignant gagne » a un sens. Un
+// changement d'inscription ou de rôle n'a pas cette clé : rejoué trois jours
+// plus tard, il écraserait en silence ce qui s'est passé entre-temps, sans que
+// personne puisse dire quelle version était voulue. Mieux vaut un bouton qui
+// dit non qu'une modification qui part de travers.
 
 const DAY_NAMES = ["", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi"];
 
@@ -111,17 +132,45 @@ export default function SchoolAdmin({ school, onBack }) {
   const [composeSending, setComposeSending] = useState(false);
   const [composeMsg, setComposeMsg] = useState("");
 
+  // ---- Hors ligne ----
+  // `online` est un ÉTAT (et pas seulement `navigator.onLine` lu au vol) parce
+  // qu'il faut réafficher les boutons au moment où le réseau revient.
+  const [online, setOnline] = useState(true);
+  const [staleAt, setStaleAt] = useState(null);
+  useEffect(() => {
+    if (typeof navigator === "undefined") return;
+    setOnline(navigator.onLine);
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
+  }, []);
+
+  // Un seul garde-fou pour toutes les écritures : il refuse et il DIT pourquoi.
+  // Renvoie true quand l'action doit s'arrêter là.
+  const blockedOffline = () => {
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      setMsg({ t: "Modification impossible hors connexion — reconnectez-vous pour enregistrer.", tone: "err" });
+      return true;
+    }
+    return false;
+  };
+
   useEffect(() => { loadClasses(); /* eslint-disable-next-line */ }, [school?.id]);
   useEffect(() => { if (!selected && view === "dashboard" && classes.length >= 0) loadDashboard(); /* eslint-disable-next-line */ }, [view, selected, classes.length, school?.id]);
 
   const loadClasses = async () => {
     setLoading(true);
-    const { data } = await supabase.from("teachers")
-      .select("id, full_name, level, class_label, parent_passcode, role")
-      .eq("school_id", school.id).order("full_name");
+    const meta = await cachedQueryMeta(`schooladmin_classes_${school.id}`, () =>
+      supabase.from("teachers")
+        .select("id, full_name, level, class_label, parent_passcode, role")
+        .eq("school_id", school.id).order("full_name")
+    );
     // Classes = actual teachers. Exclude the technician (admin) and the school's
     // director/referent accounts — they are staff, not a class/timetable.
-    setClasses((data || []).filter((t) => t.role !== "admin" && t.role !== "school_admin" && t.role !== "referent"));
+    setClasses((meta.data || []).filter((t) => t.role !== "admin" && t.role !== "school_admin" && t.role !== "referent"));
+    setStaleAt(meta.fresh ? null : meta.cachedAt);
     setLoading(false);
   };
 
@@ -133,22 +182,29 @@ export default function SchoolAdmin({ school, onBack }) {
   const openClass = async (t) => {
     setSelected(t); setClassLabel(t.class_label || ""); setPasscode(t.parent_passcode || ""); setMsg(null);
     setNewName(""); setNewEmail(""); setNewPhone(""); setStudents([]);
-    const { data } = await supabase.from("timetable_slots").select("*")
-      .eq("owner_teacher_id", t.id).order("day_of_week").order("slot_order");
+    const { data } = await cachedQueryMeta(`schooladmin_slots_${t.id}`, () =>
+      supabase.from("timetable_slots").select("*")
+        .eq("owner_teacher_id", t.id).order("day_of_week").order("slot_order")
+    );
     setSlots(mapSlots(data));
     loadStudents(t.id);
   };
 
   const loadStudents = async (teacherId) => {
-    const { data } = await supabase.from("students")
-      .select("id, full_name, access_code, parent_email, parent_phone, created_at")
-      .eq("teacher_id", teacherId).order("full_name");
+    // Mis en cache par CLASSE : c'est la liste que le directeur vient relire
+    // quand il cherche le code parent d'un élève, coupure ou pas.
+    const { data } = await cachedQueryMeta(`schooladmin_students_${teacherId}`, () =>
+      supabase.from("students")
+        .select("id, full_name, access_code, parent_email, parent_phone, created_at")
+        .eq("teacher_id", teacherId).order("full_name")
+    );
     setStudents(data || []);
   };
 
   // Insert a student with a unique parent code (retry on the rare code collision).
   const addStudent = async () => {
     if (!selected || !newName.trim()) return;
+    if (blockedOffline()) return;
     setStuSaving(true); setMsg(null);
     let ok = false;
     for (let attempt = 0; attempt < 4 && !ok; attempt++) {
@@ -167,11 +223,13 @@ export default function SchoolAdmin({ school, onBack }) {
   };
 
   const removeStudent = async (id) => {
+    if (blockedOffline()) return;
     await supabase.from("students").delete().eq("id", id);
     await loadStudents(selected.id);
   };
 
   const regenerateCode = async (id) => {
+    if (blockedOffline()) return;
     setStuSaving(true);
     let ok = false;
     for (let attempt = 0; attempt < 4 && !ok; attempt++) {
@@ -194,8 +252,12 @@ export default function SchoolAdmin({ school, onBack }) {
 
   const adoptStandard = async () => {
     if (!selected) return;
-    const { data } = await supabase.from("timetable_slots").select("*")
-      .eq("level", selected.level).is("owner_teacher_id", null).order("day_of_week").order("slot_order");
+    // Lecture seule : charge le modèle dans l'écran, n'écrit rien. Donc mis en
+    // cache comme le reste — c'est « Enregistrer » qui exige le réseau.
+    const { data } = await cachedQueryMeta(`schooladmin_standard_${selected.level}`, () =>
+      supabase.from("timetable_slots").select("*")
+        .eq("level", selected.level).is("owner_teacher_id", null).order("day_of_week").order("slot_order")
+    );
     setSlots(mapSlots(data));
     setMsg((data && data.length) ? { t: "Emploi du temps standard chargé — ajustez puis enregistrez.", tone: "ok" } : { t: "Aucun emploi du temps standard pour ce niveau.", tone: "err" });
   };
@@ -226,6 +288,10 @@ export default function SchoolAdmin({ school, onBack }) {
 
   const save = async () => {
     if (!selected) return;
+    // ⚠️ Cet enregistrement SUPPRIME puis réinsère tous les créneaux de la
+    // classe. Rejoué après plusieurs jours hors ligne, il effacerait un emploi
+    // du temps modifié entre-temps. Il exige donc le réseau, sans exception.
+    if (blockedOffline()) return;
     setSaving(true); setMsg(null);
     try {
       await supabase.from("teachers").update({
@@ -259,15 +325,29 @@ export default function SchoolAdmin({ school, onBack }) {
   const loadDashboard = async () => {
     setDashLoading(true);
     const teacherIds = classes.map((c) => c.id);
-    const [{ data: studs }, { data: results }, taughtRes, { data: observations }] = await Promise.all([
-      supabase.from("students").select("id, full_name, teacher_id").eq("school_id", school.id),
-      supabase.from("daily_results").select("student_id, teacher_id, score, total, difficulty").eq("school_id", school.id),
-      teacherIds.length
-        ? supabase.from("lessons_taught").select("teacher_id, lesson_id").in("teacher_id", teacherIds)
-        : Promise.resolve({ data: [] }),
-      supabase.from("school_observations").select("*").eq("school_id", school.id).order("created_at", { ascending: false }),
-    ]);
-    const taught = taughtRes?.data || [];
+    // Quatre lectures, UNE entrée de cache : sans cela la première qui échoue
+    // vide tout le panneau, exactement le défaut corrigé sur le tableau de bord
+    // de l'école. On garde les LIGNES BRUTES, les agrégats se recalculent ici.
+    const meta = await cachedQueryMeta(`schooladmin_dash_${school.id}`, async () => {
+      const [{ data: studs }, { data: results }, taughtRes, { data: observations }] = await Promise.all([
+        supabase.from("students").select("id, full_name, teacher_id").eq("school_id", school.id),
+        supabase.from("daily_results").select("student_id, teacher_id, score, total, difficulty").eq("school_id", school.id),
+        teacherIds.length
+          ? supabase.from("lessons_taught").select("teacher_id, lesson_id").in("teacher_id", teacherIds)
+          : Promise.resolve({ data: [] }),
+        supabase.from("school_observations").select("*").eq("school_id", school.id).order("created_at", { ascending: false }),
+      ]);
+      return { data: {
+        studs: studs || [], results: results || [],
+        taught: taughtRes?.data || [], observations: observations || [],
+      } };
+    }, { timeoutMs: 12000 });
+
+    const studs = meta.data?.studs || [];
+    const results = meta.data?.results || [];
+    const taught = meta.data?.taught || [];
+    const observations = meta.data?.observations || [];
+    if (meta.data) setStaleAt(meta.fresh ? null : meta.cachedAt);
 
     const perStu = {};
     (results || []).forEach((r) => {
@@ -306,6 +386,13 @@ export default function SchoolAdmin({ school, onBack }) {
 
   const sendMessage = async () => {
     if (!composeFor || !composeSubject.trim() || !composeBody.trim()) return;
+    // Ce compositeur n'est plus branché à l'écran (la messagerie du directeur
+    // vit dans « Messages », qui sait déjà mettre en file d'attente). Le garde
+    // reste pour qu'un rebranchement futur ne parte pas en silence hors ligne.
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      setComposeMsg("Envoi impossible hors connexion — utilisez l'écran « Messages ».");
+      return;
+    }
     setComposeSending(true); setComposeMsg("");
     // Address the message to the STUDENT. Whoever is linked as that child's
     // parent will receive it. We resolve a parent id if one exists (for the
@@ -332,6 +419,10 @@ export default function SchoolAdmin({ school, onBack }) {
 
   const addObservation = async () => {
     if (!obsText.trim()) return;
+    // Les observations ont été explicitement exclues des écritures hors ligne
+    // dès la conception (Maxime, 2026-09-12) : ce sont des appréciations, pas
+    // des relevés, et rien ne permet de les dédoublonner à la reconnexion.
+    if (blockedOffline()) return;
     setObsSaving(true);
     const { data: u } = await supabase.auth.getUser();
     const { error } = await supabase.from("school_observations").insert({
@@ -356,6 +447,10 @@ export default function SchoolAdmin({ school, onBack }) {
 
   const runConfirm = async () => {
     if (!confirm) return;
+    // Un créneau retiré n'existe que dans l'écran tant qu'on n'a pas enregistré :
+    // celui-là reste permis hors ligne, c'est « Enregistrer » qui bloquera.
+    // Les deux autres suppriment en base — refusées sans réseau.
+    if (confirm.kind !== "slot" && blockedOffline()) { setConfirm(null); return; }
     setConfirmBusy(true);
     try {
       if (confirm.kind === "student") {
@@ -378,6 +473,7 @@ export default function SchoolAdmin({ school, onBack }) {
   };
 
   const deleteObservation = async (id) => {
+    if (blockedOffline()) return;
     await supabase.from("school_observations").delete().eq("id", id);
     setObs((prev) => prev.filter((o) => o.id !== id));
   };
@@ -395,6 +491,29 @@ export default function SchoolAdmin({ school, onBack }) {
 
         <h1 className="ec-h1">Gestion de l'école</h1>
         <p className="ec-sub">{school?.name}</p>
+
+        {/* Hors ligne : on annonce les DEUX choses en une fois — ce qu'on peut
+            encore consulter, et ce qui attendra le réseau. Un écran qui se
+            contente de désactiver des boutons laisse chercher pourquoi. */}
+        {!online && (
+          <div role="status" style={{
+            background: COLORS.warnBg, color: COLORS.warn, borderRadius: 10,
+            padding: "10px 12px", fontSize: FONT.sm, marginTop: 14, fontWeight: 600, lineHeight: 1.5,
+          }}>
+            Hors connexion — consultation seule.
+            {staleAt ? ` Données au ${freshnessLabel(staleAt)}.` : ""}
+            {" "}Ajouts, suppressions, codes et emplois du temps reprendront dès le retour du réseau.
+          </div>
+        )}
+
+        {online && staleAt && (
+          <div role="status" style={{
+            background: COLORS.warnBg, color: COLORS.warn, borderRadius: 10,
+            padding: "9px 12px", fontSize: FONT.sm, marginTop: 14, fontWeight: 600,
+          }}>
+            Données au {freshnessLabel(staleAt)} — dernière lecture réussie.
+          </div>
+        )}
 
         {!selected ? (
           <div className="ec-grid" style={{ marginTop: 18 }}>
@@ -440,9 +559,18 @@ export default function SchoolAdmin({ school, onBack }) {
               {loading ? (
                 <SkeletonRows rows={3} />
               ) : classes.length === 0 ? (
-                <EmptyState icon="🧑‍🏫" title="Aucun enseignant n'a rejoint l'école">
-                  Partagez le code <strong>{school?.staff_code}</strong> pour qu'ils s'inscrivent.
-                </EmptyState>
+                // Une liste vide ne veut pas dire la même chose selon qu'on ait
+                // pu la lire ou non : hors ligne et sans cache, « aucun
+                // enseignant » serait un mensonge.
+                !online ? (
+                  <EmptyState icon="📶" title="Liste jamais consultée hors connexion">
+                    Ouvrez cet écran une fois connecté : il restera ensuite lisible sans réseau.
+                  </EmptyState>
+                ) : (
+                  <EmptyState icon="🧑‍🏫" title="Aucun enseignant n'a rejoint l'école">
+                    Partagez le code <strong>{school?.staff_code}</strong> pour qu'ils s'inscrivent.
+                  </EmptyState>
+                )
               ) : (
                 <div style={{ display: "grid", gap: 8 }}>
                   {classes.map((t) => (
@@ -523,7 +651,7 @@ export default function SchoolAdmin({ school, onBack }) {
                     aria-label="E-mail du parent (optionnel)" placeholder="E-mail du parent (optionnel)" style={{ flex: "2 1 150px" }} />
                   <input className="ec-input" type="tel" value={newPhone} onChange={(e) => setNewPhone(e.target.value)}
                     aria-label="Téléphone WhatsApp du parent (optionnel)" placeholder="Tél. WhatsApp (+237…)" style={{ flex: "2 1 150px" }} />
-                  <Button onClick={addStudent} disabled={stuSaving || !newName.trim()}>+ Ajouter</Button>
+                  <Button onClick={addStudent} disabled={stuSaving || !newName.trim() || !online}>+ Ajouter</Button>
                 </div>
 
                 {students.length > 8 && (
@@ -538,9 +666,15 @@ export default function SchoolAdmin({ school, onBack }) {
 
               {students.length === 0 ? (
                 <div style={{ padding: "0 18px 18px" }}>
-                  <EmptyState icon="👥" title="Aucun élève enregistré">
-                    Ajoutez vos élèves ci-dessus ; leur code parent sera généré automatiquement.
-                  </EmptyState>
+                  {!online ? (
+                    <EmptyState icon="📶" title="Élèves jamais consultés hors connexion">
+                      Ouvrez cette classe une fois connecté : la liste et les codes parents resteront ensuite lisibles sans réseau.
+                    </EmptyState>
+                  ) : (
+                    <EmptyState icon="👥" title="Aucun élève enregistré">
+                      Ajoutez vos élèves ci-dessus ; leur code parent sera généré automatiquement.
+                    </EmptyState>
+                  )}
                 </div>
               ) : (
                 <div style={{ overflowX: "auto" }}>
@@ -585,7 +719,7 @@ export default function SchoolAdmin({ school, onBack }) {
                             <td>
                               <span style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                                 <IconButton label={`Régénérer le code de ${s.full_name}`}
-                                  onClick={() => regenerateCode(s.id)} disabled={stuSaving}>↻</IconButton>
+                                  onClick={() => regenerateCode(s.id)} disabled={stuSaving || !online}>↻</IconButton>
                                 <IconButton label={`Retirer ${s.full_name} de la classe`}
                                   onClick={() => setConfirm({ kind: "student", id: s.id, label: s.full_name })}>
                                   <span style={{ color: COLORS.crit, fontWeight: 700 }}>✕</span>
@@ -692,8 +826,8 @@ export default function SchoolAdmin({ school, onBack }) {
                 </div>
               )}
               <div style={{ display: "flex", gap: 10 }}>
-                <Button onClick={save} disabled={saving}>
-                  {saving ? "Enregistrement…" : "Enregistrer"}
+                <Button onClick={save} disabled={saving || !online}>
+                  {saving ? "Enregistrement…" : !online ? "Enregistrer — hors connexion" : "Enregistrer"}
                 </Button>
                 <Button variant="ghost" onClick={() => setSelected(null)}>Retour aux classes</Button>
               </div>
