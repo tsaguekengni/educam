@@ -145,15 +145,35 @@ async function networkFirst(req, cacheName) {
 
 async function cacheFirst(req, cacheName) {
   const cache = await caches.open(cacheName);
-  const hit = await cache.match(req);
+
+  // ⚠️ LOT 13 — « cache d'abord » doit accepter qu'on lui dise NON.
+  //
+  // Une image remplacée sur le serveur SOUS LE MÊME NOM garde la même adresse.
+  // Tant que ce handler renvoyait systématiquement l'entrée en cache, l'appel
+  // `fetch(url, { cache: "reload" })` de `downloadWeek` était intercepté ici et
+  // se voyait rendre... exactement l'image périmée qu'il cherchait à remplacer.
+  // Détecter le remplacement côté registre n'aurait donc servi à rien : le
+  // fichier neuf n'atteignait jamais l'appareil.
+  //
+  // `req.cache` conserve l'intention du demandeur jusqu'ici. « reload » et
+  // « no-store » veulent dire « je sais ce que j'ai, je veux la version du
+  // serveur » — c'est une demande délibérée de l'application, jamais un simple
+  // affichage de leçon, qui passe en mode « default » et reste servi
+  // instantanément depuis le cache.
+  const wantsFresh = req.cache === "reload" || req.cache === "no-store";
+
+  const hit = wantsFresh ? null : await cache.match(req);
   if (hit) return hit;
   try {
     const res = await fetch(req);
     // Cache normal (200) and opaque cross-origin (no-cors <img>) responses.
+    // `cache.put` remplace l'entrée existante : c'est la mise à jour en place.
     if (res && (res.ok || res.type === "opaque")) cache.put(req, res.clone());
     return res;
   } catch (_) {
-    return hit || Response.error();
+    // Réseau absent : on retombe sur ce qu'on a, MÊME quand on demandait du
+    // frais — mieux vaut l'image de l'an dernier que pas d'image en classe.
+    return (await cache.match(req)) || Response.error();
   }
 }
 

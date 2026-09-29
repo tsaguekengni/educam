@@ -179,6 +179,8 @@ const MONTH_NAMES = ["janvier","février","mars","avril","mai","juin","juillet",
 const WEEKDAY_NAMES = ["dimanche","lundi","mardi","mercredi","jeudi","vendredi","samedi"];
 /** « mardi 14 octobre » — sans dépendance à la locale du navigateur. */
 const dateLabel = (d) => `${WEEKDAY_NAMES[d.getDay()]} ${d.getDate()} ${MONTH_NAMES[d.getMonth()]}`;
+/** « 23 septembre » — une DATE, pas un décompte. Voir le voyant hors ligne. */
+const dayMonth = (d) => `${d.getDate()} ${MONTH_NAMES[d.getMonth()]}`;
 const capitalize = (t) => (t ? t.charAt(0).toUpperCase() + t.slice(1) : t);
 const DAY_NAMES_SHORT = ["", "Lun", "Mar", "Mer", "Jeu", "Ven"];
 
@@ -1574,13 +1576,56 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     });
   };
 
-  // Jours restants sur l'accès hors ligne de 7 jours (null si non applicable).
-  const grantDaysLeft = (() => {
+  /* ------------------------------------------------------------------------
+     LOT 14 — DEUX HORLOGES DIFFÉRENTES, ET IL FAUT ARRÊTER DE LES MÉLANGER.
+
+     Le voyant affichait un seul décompte — « Hors ligne prêt · 5 jours » —
+     posé à côté du nombre de leçons téléchargées. Lu naturellement, cela dit
+     que les leçons expirent dans cinq jours. C'est faux :
+
+       · les LEÇONS téléchargées ne périment JAMAIS (aucune purge n'existe,
+         et c'est une décision assumée — voir le §9.7 de la conception) ;
+       · l'ACCÈS hors ligne, lui, périme au bout de 7 jours — et se recharge
+         tout seul à chaque ouverture en ligne.
+
+     On affiche donc deux phrases distinctes, et une DATE plutôt qu'un
+     décompte : « jusqu'au 23 septembre » ne se périme pas entre le moment où
+     l'écran est rendu et celui où l'enseignante le lit.
+     ------------------------------------------------------------------------ */
+  const grantUntil = (() => {
     if (!OFFLINE_ENABLED) return null;
     const g = getGrant();
     if (!g || !g.until) return null;
-    return Math.max(0, Math.ceil((g.until - Date.now()) / 86400000));
+    return new Date(g.until);
   })();
+  // Toujours utile pour l'alerte de fin d'accès — mais plus pour le voyant.
+  const grantDaysLeft = grantUntil == null
+    ? null
+    : Math.max(0, Math.ceil((grantUntil.getTime() - Date.now()) / 86400000));
+
+  // Jusqu'où va la couverture hors ligne, en (unité · semaine) : le plus loin
+  // qu'on ait téléchargé. Calculé sur `availableLessons`, qui est lui-même en
+  // cache — donc lisible sans réseau, comme le reste de cet écran.
+  const offlineCoverage = (() => {
+    if (!OFFLINE_ENABLED || !cachedIds.length || !availableLessons.length) return null;
+    const have = new Set(cachedIds);
+    let best = null;
+    for (const l of availableLessons) {
+      if (!have.has(l.id)) continue;
+      const u = l.unit_number || 0;
+      const w = l.week_number || 0;
+      if (!best || u > best.unit || (u === best.unit && w > best.week)) best = { unit: u, week: w };
+    }
+    if (!best || !best.unit) return null;
+    return { ...best, month: MONTH_UNIT_MAP[best.unit - 1]?.month || null };
+  })();
+
+  /** « jusqu'à la semaine 2 de Novembre » — ou null si on ne sait pas le dire. */
+  const coverageLabel = offlineCoverage
+    ? (offlineCoverage.month
+        ? `jusqu'à la semaine ${offlineCoverage.week || 1} de ${offlineCoverage.month}`
+        : `jusqu'à l'unité ${offlineCoverage.unit}, semaine ${offlineCoverage.week || 1}`)
+    : null;
 
   // ============ INLINE EDIT FUNCTIONS ============
   const startInlineEdit = async () => {
@@ -2704,7 +2749,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                   {/* Le poids exact n'est connu qu'au téléchargement : on annonce un
                       ordre de grandeur pour que l'enseignante décide en connaissance
                       de cause, sur des données payantes. */}
-                  Estimation : environ {(Math.max(toDownload, 0) * 0.35).toFixed(1).replace(".", ",")} Mo à télécharger · vidéos exclues
+                  Estimation : environ {(Math.max(toDownload, 0) * 0.35).toFixed(1).replace(".", ",")} Mo à télécharger · vidéos comprises
                 </p>
                 <Button
                   block
@@ -2732,6 +2777,16 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                     {" "}{dl.updated || 0} mise{(dl.updated || 0) > 1 ? "s" : ""} à jour,
                     {" "}{dl.uptodate || 0} déjà à jour
                     {dl.failed ? `, ${dl.failed} échec${dl.failed > 1 ? "s" : ""}` : ""}.
+                    {/* Un fichier remplacé sous le même nom est le cas qu'on ne
+                        voyait pas passer : on le NOMME quand il se produit. */}
+                    {dl.mediaReplaced ? ` ${dl.mediaReplaced} vidéo${dl.mediaReplaced > 1 ? "s" : ""} remplacée${dl.mediaReplaced > 1 ? "s" : ""} par une version plus récente.` : ""}
+                  </Callout>
+                )}
+                {dl && dl.finished && !dl.empty && dl.registryOff && (
+                  <Callout tone="warn" icon="⚠" style={{ marginTop: 11 }}>
+                    Les textes sont à jour, mais le registre des médias n'a pas répondu :
+                    impossible de vérifier si une image ou une vidéo a été remplacée depuis.
+                    Relancez le téléchargement une fois la connexion stable.
                   </Callout>
                 )}
                 {!online && (
@@ -4709,10 +4764,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           ];
           if (OFFLINE_ENABLED) {
             tiles.push({
-              label: "Hors ligne", value: cachedIds.length, tint: "violet",
-              foot: grantDaysLeft != null
-                ? `leçons prêtes · accès ${grantDaysLeft} j`
-                : "leçons prêtes sans réseau",
+              label: "Leçons hors ligne", value: cachedIds.length, tint: "violet",
+              // LOT 14 — cette tuile compte des LEÇONS : son sous-titre doit
+              // parler de leçons. Le décompte d'accès vivait ici uniquement
+              // parce qu'il n'avait pas d'autre place ; il en a une maintenant.
+              foot: coverageLabel || "prêtes sans réseau · ne périment pas",
               onClick: () => { setTab("calendar"); setScreen("calendar"); },
             });
           }
@@ -4777,8 +4833,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               </div>
 
               {/* L'expiration du droit hors ligne n'était affichée nulle part :
-                  la découvrir en pleine classe est le pire des scénarios. */}
-              {OFFLINE_ENABLED && grantDaysLeft != null && (
+                  la découvrir en pleine classe est le pire des scénarios.
+
+                  LOT 14 — ce voyant ne parle plus QUE de l'accès, et il en
+                  donne la DATE. Ce que couvrent les leçons téléchargées se dit
+                  ailleurs, dans la carte « Hors ligne », parce que c'est une
+                  autre horloge : celle-là ne s'arrête jamais. */}
+              {OFFLINE_ENABLED && grantUntil != null && (
                 <span
                   className="ec-btn ec-btn--sm"
                   style={{
@@ -4788,6 +4849,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                     color: grantDaysLeft <= 1 ? COLORS.warn : COLORS.g800,
                     fontWeight: 700, gap: 8,
                   }}
+                  title={`L'accès sans réseau est valable jusqu'au ${dayMonth(grantUntil)}. Il repart à 7 jours à chaque fois que vous ouvrez l'application connectée. Les leçons déjà téléchargées, elles, restent disponibles sans limite de temps.`}
                 >
                   <i aria-hidden="true" style={{
                     width: 8, height: 8, borderRadius: "50%", flex: "none",
@@ -4798,11 +4860,9 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                       not even open without a network, and announcing "prêt"
                       then is worse than saying nothing — it is exactly when
                       the teacher stops checking. */}
-                  {cachedIds.length > 0 && shellReady
-                    ? `Hors ligne prêt · ${grantDaysLeft} jour${grantDaysLeft > 1 ? "s" : ""}`
-                    : cachedIds.length > 0 && !shellReady
-                      ? "Préparation en cours…"
-                      : `Accès hors ligne · ${grantDaysLeft} jour${grantDaysLeft > 1 ? "s" : ""}`}
+                  {cachedIds.length > 0 && !shellReady
+                    ? "Préparation en cours…"
+                    : `Accès hors ligne jusqu'au ${dayMonth(grantUntil)}`}
                 </span>
               )}
             </div>
@@ -5094,10 +5154,16 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                           ? `${cachedIds.length} leçon${cachedIds.length > 1 ? "s" : ""} téléchargée${cachedIds.length > 1 ? "s" : ""}`
                           : "Aucune leçon téléchargée"}
                       </div>
-                      <div style={{ fontSize: FONT.sm, color: COLORS.ink3, marginTop: 3 }}>
-                        {cachedIds.length > 0
-                          ? "Disponibles même sans réseau."
-                          : "Téléchargez la semaine pour faire cours sans réseau."}
+                      {/* LOT 14 — la phrase qui manquait : jusqu'OÙ va la
+                          couverture, et le fait qu'elle ne périme pas. Sans
+                          elle, le décompte d'accès voisin laissait croire que
+                          les leçons expiraient aussi. */}
+                      <div style={{ fontSize: FONT.sm, color: COLORS.ink3, marginTop: 3, lineHeight: 1.5 }}>
+                        {cachedIds.length === 0
+                          ? "Téléchargez la semaine pour faire cours sans réseau."
+                          : coverageLabel
+                            ? `Programme couvert ${coverageLabel}. Ces leçons ne périment pas.`
+                            : "Disponibles même sans réseau — elles ne périment pas."}
                       </div>
                     </div>
                     <Button
@@ -5109,10 +5175,14 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                       Gérer
                     </Button>
                   </div>
-                  {grantDaysLeft != null && grantDaysLeft <= 2 && (
+                  {/* L'autre horloge, nommée comme telle : c'est l'ACCÈS qui
+                      expire, pas les leçons — et on le redit ici, au moment
+                      précis où la confusion serait la plus coûteuse. */}
+                  {grantUntil != null && grantDaysLeft <= 2 && (
                     <Callout tone="warn" icon="⏳" style={{ marginTop: 11 }}>
-                      Votre accès hors ligne expire {grantDaysLeft === 0 ? "aujourd'hui" : `dans ${grantDaysLeft} jour${grantDaysLeft > 1 ? "s" : ""}`}.
+                      Votre <strong>accès</strong> hors ligne expire {grantDaysLeft === 0 ? "aujourd'hui" : `le ${dayMonth(grantUntil)}`}.
                       Connectez-vous une fois en ligne pour repartir sur 7 jours.
+                      {cachedIds.length > 0 ? " Vos leçons téléchargées, elles, restent en place." : ""}
                     </Callout>
                   )}
                 </Card>

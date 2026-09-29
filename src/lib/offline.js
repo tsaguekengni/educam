@@ -395,6 +395,84 @@ export function isDownloadableMedia(url) {
 /** Small index of what is stored, so we can check without reading a whole file. */
 async function getMediaIndex() { return (await idbGet("kv", "mediaIndex")) || {}; }
 
+/* ---------------------------------------------------------------------------
+   LE REGISTRE DES MÉDIAS (lot 13) — comment on détecte un fichier REMPLACÉ.
+
+   Le défaut : `bundleSignature()` compare l'ADRESSE d'un média, pas son
+   contenu. Remplacer `cycle-eau.mp4` par une meilleure version SOUS LE MÊME
+   NOM — c'est-à-dire exactement ce qu'est une mise à jour de rentrée — ne
+   change donc rien à la signature. Rien n'est retéléchargé. Chaque enseignant
+   garde la version de l'an dernier, EN SILENCE, et personne ne s'en aperçoit.
+
+   Le remède ne coûte rien, parce que Supabase tient déjà le registre : chaque
+   objet stocké porte sa TAILLE et sa DATE de dernière modification. La vue
+   `educam_media_registry` les expose, et une seule lecture (648 objets
+   aujourd'hui, ~50 Ko) suffit pour toute la médiathèque.
+
+   Ces deux valeurs entrent ensuite dans la signature. Un fichier remplacé
+   change de date — donc de signature — donc il redescend.
+   --------------------------------------------------------------------------- */
+const MEDIA_BUCKET = "lesson-images";
+
+/** `…/object/public/lesson-images/sv-u3-s1/digestion.mp4` → `sv-u3-s1/digestion.mp4` */
+export function mediaPathFromUrl(url) {
+  if (!url || typeof url !== "string") return null;
+  const m = url.match(new RegExp(`/storage/v1/object/(?:public/)?${MEDIA_BUCKET}/(.+)$`));
+  if (!m) return null;
+  const raw = m[1].split("?")[0];
+  try { return decodeURIComponent(raw); } catch (_) { return raw; }
+}
+
+/**
+ * Taille + date de chaque média du compartiment, indexées PAR URL.
+ *
+ * Renvoie `null` — et non un objet vide — quand la lecture échoue (hors ligne,
+ * vue absente, droits). La nuance est importante : « je ne sais pas » ne doit
+ * surtout pas se lire comme « aucun fichier n'a changé », sinon une panne de
+ * registre déclencherait le retéléchargement de toute la semaine.
+ */
+export async function fetchMediaRegistry() {
+  try {
+    const { data, error } = await withTimeout(
+      supabase.from("educam_media_registry").select("path, size, updated_at"),
+      8000
+    );
+    if (error || !data) return null;
+    const out = {};
+    data.forEach((r) => {
+      if (!r || !r.path) return;
+      out[r.path] = { size: Number(r.size) || 0, updatedAt: r.updated_at || null };
+    });
+    return out;
+  } catch (_) { return null; }
+}
+
+/**
+ * L'empreinte des médias d'une leçon, telle qu'elle sera RANGÉE AVEC la leçon.
+ *
+ * ⚠️ Le point délicat de tout ce lot : l'empreinte doit être **stockée** avec
+ * le paquet, pas recalculée des deux côtés au moment de comparer. Si on
+ * appliquait le registre du jour à la fois à l'ancienne et à la nouvelle
+ * version, la partie « médias » serait identique des deux côtés et
+ * s'annulerait — on ne détecterait jamais rien.
+ *
+ * Tableau TRIÉ et non objet : l'ordre des clés d'un objet se retrouve dans son
+ * JSON, et deux ordres différents donneraient deux signatures différentes pour
+ * un contenu identique.
+ */
+function mediaFingerprint(bundle, registry) {
+  if (!registry) return null;
+  const rows = [];
+  (bundle.blocks || []).forEach((b) => {
+    if (!b || !b.media_url) return;
+    const p = mediaPathFromUrl(b.media_url);
+    const r = p ? registry[p] : null;
+    if (r) rows.push([p, r.size, r.updatedAt]);
+  });
+  rows.sort((a, z) => String(a[0]).localeCompare(String(z[0])));
+  return rows;
+}
+
 /** The stored file, or undefined. */
 export function loadMediaBlob(url) { return idbGet("lessons", MEDIA_PREFIX + url); }
 
@@ -419,6 +497,10 @@ export async function downloadMedia(url) {
 
 // A content signature so re-download can skip lessons that haven't changed.
 // (There's no updated_at on lessons, so we compare the actual content.)
+//
+// `m` est l'empreinte des MÉDIAS (lot 13) : elle voyage avec le paquet, sous
+// `__media`, posée au moment de l'enregistrement. C'est elle qui fait qu'une
+// image ou une vidéo remplacée sous le même nom finit par redescendre.
 function bundleSignature(b) {
   try {
     return JSON.stringify({
@@ -426,6 +508,7 @@ function bundleSignature(b) {
       s: (b.sections || []).map((x) => [x.section_type, x.title, x.icon, x.section_order]),
       b: (b.blocks || []).map((x) => [x.block_type, x.text_content, x.media_url, x.caption, x.block_order]),
       e: (b.exercises || []).map((x) => [x.question, x.answer, x.options, x.exercise_type, x.exercise_order]),
+      m: b.__media || null,
     });
   } catch (_) { return String(Date.now()); }
 }
@@ -442,17 +525,44 @@ function bundleSignature(b) {
 export async function downloadWeek(lessonIds, onProgress) {
   let done = 0, fresh = 0, updated = 0, uptodate = 0, failed = 0;
   let videos = 0, videoBytes = 0, videoFailed = 0;
+  let mediaReplaced = 0;
   const cached = [];
   const mediaIndex = await getMediaIndex();
+
+  // UNE lecture pour toute la médiathèque (lot 13). `null` = registre
+  // indisponible : on retombe alors exactement sur l'ancien comportement,
+  // jamais sur un retéléchargement massif.
+  const registry = await fetchMediaRegistry();
 
   for (const id of lessonIds) {
     try {
       const bundle = await fetchLessonBundle(id);
       const prev = await loadLessonBundle(id);
-      const changed = !prev || bundleSignature(prev) !== bundleSignature(bundle);
+
+      // Sans registre, on REPREND l'empreinte déjà stockée : la partie
+      // « médias » de la signature reste alors neutre, et la comparaison se
+      // fait sur le contenu seul, comme avant ce lot.
+      bundle.__media = registry ? mediaFingerprint(bundle, registry) : (prev ? prev.__media || null : null);
+
+      // ⚠️ PREMIÈRE RENCONTRE avec une leçon téléchargée AVANT ce lot : elle
+      // n'a pas d'empreinte. Comparer brut la déclarerait « modifiée », et la
+      // toute première exécution retéléchargerait les images de TOUTE la
+      // semaine — sur des données payantes, pour n'apprendre strictement rien,
+      // puisqu'on n'a aucune version de référence à laquelle les comparer.
+      //
+      // On pose donc simplement la référence : l'empreinte est enregistrée
+      // sans rien redescendre, et c'est à partir de la PROCHAINE fois que tout
+      // remplacement est détecté. C'est le but recherché — pas de rattrapage
+      // du passé, mais plus jamais de remplacement silencieux ensuite.
+      const firstFingerprint = !!prev && registry && (prev.__media == null);
+      const baseline = firstFingerprint ? { ...prev, __media: bundle.__media } : prev;
+
+      const changed = !prev || bundleSignature(baseline) !== bundleSignature(bundle);
       if (changed) {
         await saveLessonBundle(id, bundle);
         // (Re)download images for new/changed lessons.
+        // `cache: "reload"` traverse le « cache d'abord » du service worker —
+        // sans quoi il rendrait l'ancienne image (voir cacheFirst dans sw.js).
         for (const b of bundle.blocks) {
           if (b.block_type === "image" && b.media_url) {
             try { await fetch(b.media_url, { mode: "no-cors", cache: "reload" }); } catch (_) {}
@@ -460,18 +570,45 @@ export async function downloadWeek(lessonIds, onProgress) {
         }
         if (prev) updated++; else fresh++;
       } else {
-        uptodate++; // unchanged → no image re-download, no data spent
+        // Inchangée : aucune image redescendue, aucune donnée dépensée. On
+        // réenregistre quand même quand on vient de poser l'empreinte, sinon
+        // elle serait perdue et on recommencerait à zéro au prochain passage.
+        if (firstFingerprint) await saveLessonBundle(id, bundle);
+        uptodate++;
       }
 
-      // Videos: fetch any we do not already hold. Idempotent — a second run
-      // over the same week costs nothing.
+      // Videos: fetch any we do not already hold — OR any that have been
+      // replaced on the server since we stored them (lot 13).
+      //
+      // The signature above already forces a lesson to be re-saved when its
+      // media changed, but a video is NOT re-fetched by that path: it is
+      // never in the image loop. It needs its own comparison, here.
       for (const b of bundle.blocks) {
         if (b.block_type !== "video" || !isDownloadableMedia(b.media_url)) continue;
-        if (mediaIndex[b.media_url]) continue; // already on the device
+
+        const held = mediaIndex[b.media_url];
+        const reg = registry ? registry[mediaPathFromUrl(b.media_url) || ""] : null;
+
+        let mustFetch = !held;
+        let isReplacement = false;
+        if (held && reg) {
+          if (held.updatedAt == null) {
+            // Entrée écrite avant ce lot : pas de date. Si la TAILLE coïncide,
+            // c'est le même fichier — on complète la fiche sans redescendre
+            // 2,5 Mo pour rien. Sinon, le fichier a bougé.
+            if (held.size === reg.size) { mediaIndex[b.media_url] = { ...held, updatedAt: reg.updatedAt }; }
+            else { mustFetch = true; isReplacement = true; }
+          } else if (held.updatedAt !== reg.updatedAt || held.size !== reg.size) {
+            mustFetch = true; isReplacement = true;
+          }
+        }
+        if (!mustFetch) continue;
+
         try {
           const size = await downloadMedia(b.media_url);
-          mediaIndex[b.media_url] = { size, storedAt: Date.now() };
+          mediaIndex[b.media_url] = { size, storedAt: Date.now(), updatedAt: reg ? reg.updatedAt : null };
           videos++; videoBytes += size;
+          if (isReplacement) mediaReplaced++;
         } catch (_) { videoFailed++; }
       }
 
@@ -485,7 +622,13 @@ export async function downloadWeek(lessonIds, onProgress) {
   const prevIds = (await idbGet("kv", "cachedLessonIds")) || [];
   const merged = Array.from(new Set(prevIds.concat(cached)));
   await idbSet("kv", "cachedLessonIds", merged);
-  return { total: lessonIds.length, fresh, updated, uptodate, failed, videos, videoBytes, videoFailed };
+  return {
+    total: lessonIds.length, fresh, updated, uptodate, failed,
+    videos, videoBytes, videoFailed,
+    // `registryOff` permet à l'écran de dire la vérité : sans registre, on ne
+    // peut PAS affirmer que les médias sont à jour, seulement que le texte l'est.
+    mediaReplaced, registryOff: registry === null,
+  };
 }
 
 // ---------- Durable storage + a ceiling on boot-path network calls ----------
