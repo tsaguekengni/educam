@@ -771,6 +771,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [timetable, setTimetable] = useState([]);
   const [topics, setTopics] = useState([]);
   const [availableLessons, setAvailableLessons] = useState([]);
+  // Couverture par matière : 'covered' (leçons sur la plateforme) vs
+  // 'teacher_taught' (conçue et enseignée directement par l'enseignant·e).
+  // Une matière teacher_taught masque ses sous-sections et affiche un message,
+  // pour ne pas laisser croire que des leçons sont « à venir ».
+  const [coverage, setCoverage] = useState({}); // { [subject_id]: { status, message } }
+  const isTeacherTaught = (subjectId) => coverage[subjectId]?.status === "teacher_taught";
+  const coverageMessage = (subjectId) =>
+    coverage[subjectId]?.message ||
+    "Cette matière n'est pas encore couverte par la plateforme. Elle est conçue et enseignée directement par l'enseignant(e).";
 
   // Profiles mode: the teacher's school (name/role), resolved on load.
   const [schoolContext, setSchoolContext] = useState(null);
@@ -1023,7 +1032,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   useEffect(() => {
     let cancelled = false;
     setLoadingData(true);
-    Promise.all([fetchTimetable(), fetchTopics(), fetchAllLessons()])
+    Promise.all([fetchTimetable(), fetchTopics(), fetchAllLessons(), fetchCoverage()])
       .finally(() => { if (!cancelled) setLoadingData(false); });
     return () => { cancelled = true; };
   }, [selectedLevel, parentStudent?.teacher_id]);
@@ -1053,7 +1062,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       setOnline(true);
       // Le réseau revient : on rafraîchit les listes — et on le DIT.
       // Auparavant la synchronisation était totalement silencieuse.
-      Promise.all([fetchTimetable(), fetchTopics(), fetchAllLessons()])
+      Promise.all([fetchTimetable(), fetchTopics(), fetchAllLessons(), fetchCoverage()])
         .then(() => pushToast("Connexion rétablie · contenu synchronisé", "success"))
         .catch(() => pushToast("Connexion rétablie, mais la synchronisation a échoué.", "error"));
       sync();
@@ -1101,6 +1110,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const data = await cachedQuery("topics_" + selectedLevel.id, () =>
       supabase.from("curriculum_topics").select("*").eq("level", selectedLevel.id));
     setTopics(data || []);
+  };
+
+  // Statut de couverture par matière (config globale, indépendante du niveau).
+  const fetchCoverage = async () => {
+    const data = await cachedQuery("subject_coverage", () =>
+      supabase.from("subject_coverage").select("subject_id, status, message"));
+    const map = {};
+    (data || []).forEach((r) => { map[r.subject_id] = r; });
+    setCoverage(map);
   };
 
   const fetchAllLessons = async () => {
@@ -2784,7 +2802,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                 {daySlots.map((slot, i) => {
                   const topic = getTopic(selectedUnit, selectedWeek, slot.subject_id, slot.component_id);
                   const color = getSubjectColor(slot.subject_id);
-                  const lesson = topic ? getLessonForTopic(slot.subject_id, slot.component_id, selectedUnit, selectedWeek) : null;
+                  const tt = isTeacherTaught(slot.subject_id);
+                  const lesson = (topic && !tt) ? getLessonForTopic(slot.subject_id, slot.component_id, selectedUnit, selectedWeek) : null;
                   const st = toMinutes(slot.start_time), en = toMinutes(slot.end_time);
                   const isNow = showingToday && st != null && en != null && minutesNow >= st && minutesNow < en;
                   const isPast = showingToday && en != null && minutesNow >= en;
@@ -2839,7 +2858,14 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                             {isNow ? " · en cours" : isPast ? " · terminée" : ""}
                           </div>
 
-                          {topic ? (
+                          {tt ? (
+                            <div style={{ marginTop: 9 }}>
+                              <Badge tone="neutral">Enseignée par l'enseignant(e)</Badge>
+                              <div style={{ fontSize: FONT.sm, color: COLORS.ink3, marginTop: 6, lineHeight: 1.5 }}>
+                                Cette matière n'est pas couverte par la plateforme ; elle est enseignée directement par l'enseignant(e).
+                              </div>
+                            </div>
+                          ) : topic ? (
                             <>
                               <div style={{ fontSize: "var(--ec-fs-4)", fontWeight: 600, color: COLORS.ink, marginTop: 8 }}>
                                 {topic.topic_title}
@@ -2909,6 +2935,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         }
       });
       topics.forEach((t, i) => {
+        if (isTeacherTaught(t.subject_id)) return; // matière enseignée par l'enseignant·e : pas de sujets à créer
         if ((t.topic_title || "").toLowerCase().includes(q)) {
           const subj = SUBJECTS.find((sb) => sb.id === t.subject_id);
           const lesson = getLessonForTopic(t.subject_id, t.component_id, t.unit_number, t.week_number);
@@ -2958,7 +2985,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               {weekTopics.map((t, i) => {
                 const subject = SUBJECTS.find((sb) => sb.id === t.subject_id);
                 const comp = subject?.components.find((c) => c.id === t.component_id);
-                const lesson = getLessonForTopic(t.subject_id, t.component_id, t.unit_number, t.week_number);
+                const tt = isTeacherTaught(t.subject_id);
+                const lesson = tt ? null : getLessonForTopic(t.subject_id, t.component_id, t.unit_number, t.week_number);
                 return (
                   <ListRow
                     key={`${t.subject_id}-${t.component_id}-${i}`}
@@ -2967,9 +2995,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                     title={t.topic_title || comp?.name || subject?.name || "Sujet"}
                     meta={`${subject?.name || "Matière"}${comp ? " — " + comp.name : ""}`}
                     onClick={lesson ? () => openLesson(lesson.id) : undefined}
-                    right={lesson
-                      ? <Badge tone="brand">Leçon prête</Badge>
-                      : <Badge tone="neutral">À créer</Badge>}
+                    right={tt
+                      ? <Badge tone="neutral">Enseignant·e</Badge>
+                      : (lesson
+                        ? <Badge tone="brand">Leçon prête</Badge>
+                        : <Badge tone="neutral">À créer</Badge>)}
                   />
                 );
               })}
@@ -2980,8 +3010,10 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     }
 
     if (programmeView === "subjects") {
-      const totalTopics = topics.length;
-      const totalLessons = availableLessons.length;
+      // On ne compte que les matières couvertes : afficher les sujets des matières
+      // « enseignées par l'enseignant·e » laisserait croire à des leçons à venir.
+      const totalTopics = topics.filter((t) => !isTeacherTaught(t.subject_id)).length;
+      const totalLessons = availableLessons.filter((l) => !isTeacherTaught(l.subject_id)).length;
       return (
         <div>
           <div style={{ display: "flex", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
@@ -3079,6 +3111,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               {loadingData && <SkeletonRows rows={4} />}
               <div style={{ display: "grid", gap: 9, gridTemplateColumns: "repeat(auto-fit, minmax(390px, 1fr))" }}>
                 {SUBJECTS.map((subject) => {
+                  const tt = isTeacherTaught(subject.id);
                   const subjTopics = topics.filter((t) => t.subject_id === subject.id).length;
                   const subjLessons = availableLessons.filter((l) => l.subject_id === subject.id).length;
                   return (
@@ -3087,12 +3120,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                       icon={subject.icon}
                       iconColor={subject.color}
                       title={subject.name}
-                      meta={subjTopics > 0
-                        ? `${subjLessons} / ${subjTopics} leçons · ${subject.components.length} composantes`
-                        : `${subject.components.length} composantes · ${subject.hours}`}
+                      meta={tt
+                        ? "Enseignée directement par l'enseignant(e)"
+                        : (subjTopics > 0
+                          ? `${subjLessons} / ${subjTopics} leçons · ${subject.components.length} composantes`
+                          : `${subject.components.length} composantes · ${subject.hours}`)}
                       onClick={() => { setSelectedSubject(subject); setProgrammeView("components"); }}
+                      right={tt ? <Badge tone="neutral">Enseignant·e</Badge> : undefined}
                     >
-                      {subjTopics > 0 && (
+                      {!tt && subjTopics > 0 && (
                         <Meter
                           value={Math.min(subjLessons, subjTopics)}
                           max={subjTopics}
@@ -3127,11 +3163,18 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             <div>
               <h1 className="ec-h1">{selectedSubject.name}</h1>
               <p className="ec-sub">
-                {selectedLevel.name} · {selectedSubject.hours} · {selectedSubject.components.length} composantes
+                {isTeacherTaught(selectedSubject.id)
+                  ? `${selectedLevel.name} · enseignée par l'enseignant(e)`
+                  : `${selectedLevel.name} · ${selectedSubject.hours} · ${selectedSubject.components.length} composantes`}
               </p>
             </div>
           </div>
 
+          {isTeacherTaught(selectedSubject.id) ? (
+            <Callout tone="neutral" icon="👩🏽‍🏫" style={{ marginTop: 20 }}>
+              {coverageMessage(selectedSubject.id)}
+            </Callout>
+          ) : (
           <div style={{ display: "grid", gap: 9, marginTop: 20 }}>
             {selectedSubject.components.map((comp) => {
               const compTopics = getTopicsForComponent(selectedSubject.id, comp.id);
@@ -3158,12 +3201,29 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               );
             })}
           </div>
+          )}
         </div>
       );
     }
 
     // ---- SUJETS D'UNE COMPOSANTE, PAR UNITÉ ----
     if (programmeView === "topics" && selectedSubject && selectedComponent) {
+      // Matière enseignée par l'enseignant·e : pas de détail de sujets, on montre
+      // le message (protège aussi contre un accès direct à cette vue).
+      if (isTeacherTaught(selectedSubject.id)) {
+        return (
+          <div>
+            <Breadcrumb items={[
+              { label: "Programme", onClick: () => setProgrammeView("subjects") },
+              { label: selectedSubject.name, onClick: () => setProgrammeView("components") },
+            ]} />
+            <h1 className="ec-h1">{selectedSubject.name}</h1>
+            <Callout tone="neutral" icon="👩🏽‍🏫" style={{ marginTop: 16 }}>
+              {coverageMessage(selectedSubject.id)}
+            </Callout>
+          </div>
+        );
+      }
       const compTopics = getTopicsForComponent(selectedSubject.id, selectedComponent.id);
       const color = selectedSubject.color;
 
