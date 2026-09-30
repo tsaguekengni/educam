@@ -90,14 +90,40 @@ grant execute on function public.educam_set_student_contact(uuid, text, text) to
 -- ÉTAPE 2 — FERMETURE. À lancer SEULEMENT APRÈS le déploiement du code.
 -- ════════════════════════════════════════════════════════════════════════════
 
--- §2.1 ⚠️ CECI EST LA LIGNE QUI PROTÈGE.
+-- §2.1 ⚠️ C'EST LE BLOC QUI PROTÈGE.
+--
+-- 🪤 PIÈGE PAYÉ COMPTANT LE 2026-09-30 — à ne pas repayer.
+-- Le premier essai était :
+--     revoke select (parent_phone, parent_email) on public.students from authenticated;
+-- Cela ne fait RIEN, EN SILENCE. Le droit est accordé au niveau de la TABLE
+-- (`authenticated=arwdDxtm` dans l'ACL), et **un retrait colonne par colonne ne
+-- perce jamais un octroi au niveau table**. Aucune erreur n'est levée : on croit
+-- avoir fermé, et tout reste lisible. Détecté par un test en transaction
+-- annulée, pas à la lecture.
+--
+-- La seule manière correcte : retirer le droit AU NIVEAU DE LA TABLE, puis le
+-- rendre COLONNE PAR COLONNE, sauf les deux à protéger.
+--
 -- `authenticated` = toute personne connectée (enseignant, direction, parent, et
 -- Maxime lui-même). `anon` = visiteur non connecté.
--- Après cela, DEMANDER ces colonnes depuis le navigateur fait échouer la
--- requête ENTIÈRE (erreur 42501) — pas seulement renvoyer du vide.
-revoke select (parent_phone, parent_email) on public.students from authenticated, anon;
-revoke insert (parent_phone, parent_email) on public.students from authenticated, anon;
-revoke update (parent_phone, parent_email) on public.students from authenticated, anon;
+-- On ne retire QUE select/insert/update : `delete` et les autres droits de la
+-- table doivent survivre (retirer un élève, les clés étrangères, les triggers).
+revoke select, insert, update on public.students from authenticated, anon;
+
+grant select (id, school_id, teacher_id, full_name, access_code, created_at, has_parent_contact)
+  on public.students to authenticated, anon;
+grant insert (id, school_id, teacher_id, full_name, access_code, created_at)
+  on public.students to authenticated, anon;
+grant update (id, school_id, teacher_id, full_name, access_code, created_at)
+  on public.students to authenticated, anon;
+
+-- 🪤 DEUXIÈME PIÈGE, CRÉÉ PAR CE BLOC — le plus dangereux pour la suite.
+-- À partir d'ici, la liste des colonnes lisibles est ÉNUMÉRÉE. Donc **toute
+-- nouvelle colonne ajoutée plus tard à `students` sera INVISIBLE pour
+-- l'application** jusqu'à ce qu'on l'ajoute au `grant select` ci-dessus. Le
+-- symptôme sera « permission denied for table students » et une liste d'élèves
+-- vide — pas « colonne inconnue ». Le contrôle du §3 le trouve en une requête.
+-- RÈGLE : qui ajoute une colonne à `students` ajoute la ligne de grant.
 
 -- §2.2 Le journal WhatsApp gardait le numéro EN CLAIR.
 -- `whatsapp_notifications.to_phone` est le numéro du parent, et la politique
