@@ -387,6 +387,23 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // ---- Unified inbox (parents AND teachers) ----
   const [inbox, setInbox] = useState([]);                      // messages received by the current user
   const [openMsg, setOpenMsg] = useState(null);                // the message opened in the reading pane
+
+  // ─── ÉCHANGES DE L'ÉCOLE (direction et référent) — LOT D ───────────────────
+  // Demande de la direction : être au courant de toute communication
+  // enseignant → parent. C'est une VUE, pas un envoi : rien n'est dupliqué,
+  // aucun second destinataire n'est créé. La direction avait DÉJÀ le droit de
+  // lire les messages de son école ; c'est simplement l'application qui ne le
+  // demandait jamais (sa boîte ne charge que `recipient_id = moi`).
+  //
+  // ⚠️ Ces messages ne passent JAMAIS par `openMessage()`. Cette fonction écrit
+  // `read_at`, l'accusé de lecture DU DESTINATAIRE. Si la consultation par la
+  // direction le remplissait, l'enseignante verrait « lu » alors que le parent
+  // n'a rien ouvert, et la liste « parents à relancer » cesserait de le
+  // signaler. D'où un volet de lecture séparé (`openExchange`) et une table
+  // `exchange_marks` pour « jusqu'où la direction avait lu ».
+  const [exchanges, setExchanges] = useState([]);
+  const [openExch, setOpenExch] = useState(null);
+  const [exchSeenAt, setExchSeenAt] = useState(null);
   useEffect(() => {
     if (!isParent || !parent?.student_id) {
       setParentLessons([]); setParentTaughtIds(new Set());
@@ -484,6 +501,59 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     }
   };
   const unreadCount = inbox.filter((m) => !m.read_at).length;
+
+  // ---- LOT D : charger les échanges enseignant → parent de l'école ----------
+  // Tout est fait par `educam_school_exchanges` : le contrôle de rôle, le
+  // filtrage des messages de l'administrateur (décision de Maxime) et les noms
+  // de l'expéditeur et de l'élève. L'écran ne décide de rien — un enseignant
+  // qui appellerait cette fonction reçoit une liste vide.
+  //
+  // Mis en cache comme le reste des écrans de direction, pour rester
+  // consultable après une coupure. Ce sont des messages de l'école, pas des
+  // coordonnées : le refus de mise en cache ne concerne que les numéros.
+  const loadExchanges = async () => {
+    if (!isSchoolAdmin || !teacher?.school_id) { setExchanges([]); return; }
+    // ⚠️ Clé par PERSONNE (`teacher.id`), pas par école. Le cache hors ligne
+    // vit dans l'IndexedDB du navigateur, qui ne connaît pas les comptes : une
+    // clé par école aurait laissé un enseignant se connectant sur le même
+    // portable relire les échanges mis en cache par le directeur. C'est la même
+    // raison qui fait que les clés de la boîte de réception portent déjà
+    // `inbox_t_<id>` et non l'école.
+    const rows = await cachedQuery(`exchanges_${teacher.id}`, () =>
+      supabase.rpc("educam_school_exchanges", { p_school: teacher.school_id })
+    );
+    setExchanges(rows || []);
+  };
+
+  // « Jusqu'où avais-je lu ? » — lu une fois, puis reposé en quittant l'écran.
+  // Jamais dans `messages.read_at` : voir le commentaire de l'état.
+  const loadExchangeMark = async () => {
+    if (!teacher?.id) return;
+    const { data } = await supabase.from("exchange_marks")
+      .select("last_seen_at").eq("viewer_id", teacher.id).eq("scope", "school_exchanges").maybeSingle();
+    setExchSeenAt(data?.last_seen_at || null);
+  };
+
+  const touchExchangeMark = async () => {
+    if (!teacher?.id) return;
+    // `upsert` et pas `insert` : la deuxième visite ne doit pas échouer sur la
+    // clé primaire. Sans réseau, on ne met rien en file d'attente — un repère
+    // de lecture rejoué trois jours plus tard dirait le contraire de la vérité.
+    if (typeof navigator !== "undefined" && !navigator.onLine) return;
+    await supabase.from("exchange_marks").upsert(
+      { viewer_id: teacher.id, scope: "school_exchanges", last_seen_at: new Date().toISOString() },
+      { onConflict: "viewer_id,scope" }
+    );
+  };
+
+  // Ouvrir un échange : on affiche, et c'est TOUT. Aucune écriture sur le
+  // message. Si un jour quelqu'un ajoute ici un `update` sur `messages`,
+  // l'accusé de lecture du parent devient faux — voir l'état plus haut.
+  const openExchange = (m) => setOpenExch(m);
+
+  const exchNew = exchSeenAt
+    ? exchanges.filter((m) => m.created_at && m.created_at > exchSeenAt).length
+    : exchanges.length;
 
   // ---- Compose a new message (teacher / director / referent / superadmin) ----
   // Recipients depend on the sender's role:
@@ -661,6 +731,27 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     screenRef.current = prev;
     setScreenRaw(prev);
   };
+
+  // ---- LOT D : entrée et sortie de l'écran « Échanges de l'école » ----------
+  // Placé ICI et pas avec les autres chargeurs, volontairement : cet effet a
+  // `screen` dans ses dépendances, or les dépendances sont évaluées PENDANT le
+  // rendu. Déclaré avant `const [screen, …]`, il lèverait une erreur de zone
+  // morte à chaque rendu — l'écran entier serait blanc. Ne pas le remonter.
+  //
+  // On lit le repère AVANT la liste, sinon tout apparaîtrait comme nouveau le
+  // temps d'un rendu. Le repère n'est reposé qu'en QUITTANT l'écran : les
+  // pastilles « Nouveau » restent donc visibles pendant toute la visite, au lieu
+  // de s'effacer sous les yeux du directeur.
+  useEffect(() => {
+    if (!PROFILES_ENABLED || screen !== "exchanges" || !isSchoolAdmin) return;
+    let cancelled = false;
+    (async () => {
+      await loadExchangeMark();
+      if (!cancelled) await loadExchanges();
+    })();
+    return () => { cancelled = true; touchExchangeMark(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen, teacher?.id, teacher?.school_id, isSchoolAdmin]);
   const [tab, setTab] = useState("calendar");
   // Onglet d'ouverture de l'écran Résultats : "entry" (saisie) par défaut,
   // "class" quand on arrive depuis une tuile « Moyenne de classe » / « Élèves à
@@ -2360,6 +2451,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           { key: "results", icon: "✓", label: "Résultats", phone: true, onClick: go("results") },
           { key: "activitylog", icon: "◔", label: "Activité", phone: false, onClick: go("activitylog") },
           { key: "messages", icon: "✉", label: "Messagerie", phone: false, onClick: go("messages") },
+          // Lot D — la vue des échanges, direction et référent uniquement.
+          { key: "exchanges", icon: "⇄", label: "Échanges de l'école", phone: false, onClick: go("exchanges") },
         ] },
       ];
     } else {
@@ -2559,6 +2652,22 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           {isParent ? "Les messages de l'école au sujet de votre enfant." : "Vos messages."}
         </p>
 
+        {/* LOT D — l'autre moitié de l'avertissement, ne pas retirer.
+            Les parents ne rédigent pas de message, donc la phrase ne peut pas
+            vivre sur le composeur : elle vit ici, là où ils lisent. Les deux
+            côtés doivent savoir, sinon la vue de la direction devient une
+            surveillance non annoncée. */}
+        {isParent && (
+          <p style={{
+            fontSize: FONT.sm, color: COLORS.ink2, lineHeight: 1.55, marginTop: 12,
+            background: COLORS.g50, border: `1px solid ${COLORS.g200}`,
+            borderRadius: 8, padding: "10px 12px",
+          }}>
+            La direction de l'école a accès aux messages échangés entre les
+            enseignants et les parents.
+          </p>
+        )}
+
         {!isParent && (
           <div style={{ marginTop: 14 }}>
             {!composeOpen ? (
@@ -2613,6 +2722,23 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                   )}
                   <input className="ec-input" placeholder="Objet" value={cSubject} onChange={(e) => setCSubject(e.target.value)} maxLength={140} />
                   <textarea className="ec-input" placeholder="Votre message…" value={cBody} onChange={(e) => setCBody(e.target.value)} rows={5} style={{ resize: "vertical" }} />
+                  {/* LOT D — AVERTISSEMENT OBLIGATOIRE, ne pas retirer.
+                      La direction peut lire les messages enseignant → parent.
+                      Une surveillance non annoncée est un problème, pas une
+                      fonctionnalité : la phrase doit être visible AU MOMENT
+                      d'écrire, pas enfouie dans un règlement. Elle ne s'affiche
+                      pas pour l'administrateur, dont les messages sont exclus de
+                      cette vue, ni pour la direction elle-même. */}
+                  {cAudience === "parent" && !isAdmin && !isSchoolAdmin && (
+                    <p style={{
+                      fontSize: FONT.sm, color: COLORS.ink2, lineHeight: 1.55,
+                      background: COLORS.g50, border: `1px solid ${COLORS.g200}`,
+                      borderRadius: 8, padding: "10px 12px", margin: 0,
+                    }}>
+                      La direction de votre école a accès aux messages échangés entre
+                      les enseignants et les parents.
+                    </p>
+                  )}
                   {cAudience === "parent" && (
                     <input className="ec-input" placeholder="Lien (n° de leçon ou URL) — optionnel" value={cLink} onChange={(e) => setCLink(e.target.value)} />
                   )}
@@ -2634,6 +2760,120 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               que s'il y a quelque chose à lire. */}
           <div className={`ec-c5${openMsg ? " ec-deskonly" : ""}`}>{list}</div>
           <div className={`ec-c7${openMsg ? "" : " ec-deskonly"}`}>{detail}</div>
+        </div>
+      </div>
+    );
+  };
+
+  // ============ ÉCHANGES DE L'ÉCOLE (direction et référent) — LOT D ============
+  // Demande de la direction : voir toute communication enseignant → parent.
+  //
+  // ⚠️ AUCUNE ÉCRITURE ICI. Ce volet n'appelle jamais `openMessage()`, qui pose
+  // `read_at` — l'accusé de lecture DU PARENT. Le seul repère écrit est
+  // `exchange_marks`, propre à chaque directeur. Si quelqu'un ajoute un jour un
+  // `update` sur `messages` dans cette vue, l'enseignante verra « lu » sur des
+  // messages que le parent n'a jamais ouverts.
+  //
+  // ⚠️ Appelée — `{screen === "exchanges" && ExchangesView()}` — et non montée
+  // en `<ExchangesView/>`, parce qu'un composant défini dans le render et monté
+  // en JSX est une nouvelle identité à chaque rendu : React démonte tout et les
+  // champs perdent le focus. Piège déjà payé QUATRE fois sur ce fichier. Elle
+  // n'utilise donc AUCUN hook : si elle en gagne un, il faut la sortir au
+  // niveau module, surtout pas la remettre en `<Élément/>`.
+  const ExchangesView = () => {
+    const fmtDate = (s) => (s || "").slice(0, 10);
+    const roleLabel = (r) => (r === "school_admin" ? "directeur" : r === "referent" ? "référent" : "enseignant");
+    const isNew = (m) => !exchSeenAt || (m.created_at && m.created_at > exchSeenAt);
+
+    const Row = (m) => (
+      <ListRow
+        key={m.id}
+        icon={(m.sender_name || "?").slice(0, 1).toUpperCase()}
+        iconColor={isNew(m) ? COLORS.g500 : undefined}
+        title={m.subject || "Sans objet"}
+        meta={`${m.sender_name} · ${roleLabel(m.sender_role)}${m.student_name ? " → parent de " + m.student_name : ""} · ${fmtDate(m.created_at)}`}
+        onClick={() => openExchange(m)}
+        style={openExch?.id === m.id ? { borderColor: COLORS.g500, background: COLORS.g50 } : undefined}
+        right={isNew(m) ? <Badge tone="brand">Nouveau</Badge> : undefined}
+      >
+        <span style={{
+          display: "block", fontSize: FONT.sm, color: COLORS.ink2, marginTop: 5,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>
+          {m.body}
+        </span>
+      </ListRow>
+    );
+
+    const detail = !openExch ? (
+      <Card>
+        <EmptyState icon="✉" title="Choisissez un échange">
+          Le texte complet du message s'affichera ici.
+        </EmptyState>
+      </Card>
+    ) : (
+      <Card>
+        <div className="ec-cardhd">
+          <h2 className="ec-cardtitle">{openExch.subject || "Sans objet"}</h2>
+          <button className="ec-more ec-link" style={{ textDecoration: "none" }} onClick={() => setOpenExch(null)}>
+            Fermer
+          </button>
+        </div>
+        <p style={{ fontSize: FONT.sm, color: COLORS.ink3, marginBottom: 12 }}>
+          De <strong style={{ color: COLORS.ink2 }}>{openExch.sender_name}</strong> ({roleLabel(openExch.sender_role)})
+          {openExch.student_name ? <> au parent de <strong style={{ color: COLORS.ink2 }}>{openExch.student_name}</strong></> : null}
+          {" · "}{fmtDate(openExch.created_at)}
+        </p>
+        <p style={{ fontSize: FONT.md, color: COLORS.ink, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+          {openExch.body}
+        </p>
+        {/* On n'affiche PAS de bouton « répondre » : cette vue sert à être au
+            courant, pas à s'immiscer dans un échange. Pour écrire au parent, la
+            direction passe par la messagerie, et son message sera un message
+            d'elle — pas une réponse glissée dans la conversation d'un autre. */}
+        <p style={{ fontSize: FONT.sm, color: COLORS.ink3, marginTop: 14 }}>
+          Consulter cet échange ne le marque pas comme lu pour le parent.
+        </p>
+      </Card>
+    );
+
+    return (
+      <div>
+        <h1 className="ec-h1">Échanges de l'école</h1>
+        <p className="ec-sub">
+          Tous les messages envoyés aux parents par les enseignants et la direction
+          de {schoolContext?.name || "l'école"}. Les messages de l'administration EduCam
+          n'y figurent pas.
+        </p>
+
+        <Card style={{ marginTop: 14, borderColor: COLORS.g200, background: COLORS.g50 }}>
+          <p style={{ fontSize: FONT.sm, color: COLORS.ink2, lineHeight: 1.6, margin: 0 }}>
+            <strong>Cette vue est connue des enseignants et des parents.</strong> Les deux
+            voient, au moment d'écrire et de lire, que la direction a accès aux
+            échanges enseignant-parent. Consulter un message ici ne modifie rien :
+            l'accusé de lecture du parent n'est pas touché.
+          </p>
+        </Card>
+
+        <div className="ec-grid" style={{ marginTop: 18 }}>
+          <div className={`ec-c5${openExch ? " ec-deskonly" : ""}`}>
+            {exchanges.length === 0 ? (
+              <Card>
+                <EmptyState icon="📭" title="Aucun échange">
+                  Aucun message n'a encore été envoyé à un parent dans votre école.
+                </EmptyState>
+              </Card>
+            ) : (
+              <>
+                <CardLabel>
+                  {exchanges.length} message{exchanges.length > 1 ? "s" : ""}
+                  {exchNew > 0 ? ` · ${exchNew} nouveau${exchNew > 1 ? "x" : ""}` : ""}
+                </CardLabel>
+                {exchanges.map(Row)}
+              </>
+            )}
+          </div>
+          <div className={`ec-c7${openExch ? "" : " ec-deskonly"}`}>{detail}</div>
         </div>
       </div>
     );
@@ -4816,6 +5056,12 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             key: "activitylog", icon: "◔", tint: "violet", title: "Activité",
             meta: "Qui utilise vraiment EduCam", onClick: () => setScreen("activitylog"),
           });
+          // Lot D — la vue des échanges. Le chargement se fait par l'effet lié à
+          // `screen`, pas ici : un raccourci ne doit pas dupliquer une requête.
+          if (PROFILES_ENABLED && isSchoolAdmin) quick.push({
+            key: "exchanges", icon: "⇄", tint: "blue", title: "Échanges de l'école",
+            meta: "Messages des enseignants aux parents", onClick: () => setScreen("exchanges"),
+          });
 
           return (
           <div>
@@ -5866,6 +6112,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             onActAsParent={isAdmin && onImpersonate ? actAsParentById : undefined} />
         )}
         {screen === "messages" && PROFILES_ENABLED && MessagesInbox()}
+        {/* Lot D — appelée, pas montée : voir le commentaire sur ExchangesView. */}
+        {screen === "exchanges" && PROFILES_ENABLED && isSchoolAdmin && ExchangesView()}
       </main>
       {screen !== "lesson" && BottomNav()}
 
