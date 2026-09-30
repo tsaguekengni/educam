@@ -564,6 +564,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const openComposer = async () => {
     setComposeOpen(true);
     setCMsg(""); setCRecipient("");
+    setCQuery("");   // un filtre laissé d'un message précédent cacherait la liste
     setCAudience("parent");
     if (isParent) return;
     const scope = isAdmin ? "all" : isSchoolAdmin ? `s${teacher?.school_id}` : `t${teacher?.id}`;
@@ -888,6 +889,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [cMsg, setCMsg] = useState("");
   const [cStudents, setCStudents] = useState([]);       // pupils the sender may write about
   const [cStaff, setCStaff] = useState([]);             // teachers/directors the sender may write to
+  // Filtre du choix du destinataire. Ajouté le 2026-09-30 : la liste était une
+  // liste déroulante ordinaire, et dans une liste déroulante on ne TAPE pas —
+  // le navigateur ne fait que sauter à la première lettre. Avec 246 élèves en
+  // base, il fallait dérouler à la main pour trouver un enfant.
+  const [cQuery, setCQuery] = useState("");
   // pupil id → parent account id. Resolved while the composer opens (online) so
   // a message written later without a network can still name its recipient.
   const [cParentByStudent, setCParentByStudent] = useState({});
@@ -2683,43 +2689,111 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                     <label style={{ display: "block" }}>
                       <span style={{ display: "block", fontSize: FONT.sm, fontWeight: 700, color: COLORS.ink2, marginBottom: 4 }}>Destinataire</span>
                       <select className="ec-input" value={cAudience}
-                        onChange={(e) => { setCAudience(e.target.value); setCRecipient(""); }}>
+                        onChange={(e) => { setCAudience(e.target.value); setCRecipient(""); setCQuery(""); }}>
                         <option value="parent">Un parent d'élève</option>
                         <option value="staff">{isAdmin ? "Un membre du personnel (enseignant / direction)" : "Un enseignant de l'école"}</option>
                       </select>
                     </label>
                   )}
-                  {cAudience === "parent" ? (
-                    <label style={{ display: "block" }}>
-                      <span style={{ display: "block", fontSize: FONT.sm, fontWeight: 700, color: COLORS.ink2, marginBottom: 4 }}>
-                        {isSchoolAdmin || isAdmin ? "Élève concerné (le parent lié le recevra)" : "Élève de votre classe (le parent le recevra)"}
-                      </span>
-                      {cStudents.length === 0 ? (
-                        <div style={{ fontSize: FONT.sm, color: COLORS.ink3 }}>Aucun élève à afficher.</div>
-                      ) : (
-                        <select className="ec-input" value={cRecipient} onChange={(e) => setCRecipient(e.target.value)}>
-                          <option value="">— choisir un élève —</option>
-                          {cStudents.map((s) => <option key={s.id} value={s.id}>{s.full_name}</option>)}
-                        </select>
-                      )}
-                    </label>
-                  ) : (
-                    <label style={{ display: "block" }}>
-                      <span style={{ display: "block", fontSize: FONT.sm, fontWeight: 700, color: COLORS.ink2, marginBottom: 4 }}>Destinataire</span>
-                      {cStaff.length === 0 ? (
-                        <div style={{ fontSize: FONT.sm, color: COLORS.ink3 }}>Aucun destinataire à afficher.</div>
-                      ) : (
-                        <select className="ec-input" value={cRecipient} onChange={(e) => setCRecipient(e.target.value)}>
-                          <option value="">— choisir un destinataire —</option>
-                          {cStaff.map((t) => (
-                            <option key={t.id} value={t.id}>
-                              {(t.full_name || t.id) + (t.role === "school_admin" ? " · directeur" : t.role === "referent" ? " · référent" : " · enseignant")}
-                            </option>
-                          ))}
-                        </select>
-                      )}
-                    </label>
-                  )}
+                  {/* ─── CHOIX DU DESTINATAIRE — champ de recherche + liste filtrée ───
+                      Corrigé le 2026-09-30 sur signalement de Maxime. C'était une
+                      liste déroulante `<select>` ordinaire : on ne peut pas y TAPER
+                      un nom, le navigateur saute seulement à la première lettre. Avec
+                      246 élèves, il fallait dérouler à la main.
+
+                      Le `<select>` est CONSERVÉ pour le choix lui-même — on ne filtre
+                      que ce qu'il contient. C'est volontaire : il reste utilisable au
+                      clavier, et sur téléphone il ouvre le sélecteur natif d'Android
+                      et d'iOS, qu'aucune liste faite maison n'égale.
+
+                      ⚠️ Le champ de recherche ne doit PAS perdre le focus à chaque
+                      frappe. Il le garde parce que `MessagesInbox` est APPELÉE
+                      (`MessagesInbox()`) et non montée en `<MessagesInbox/>`, et que
+                      son état vit dans le composant parent. Piège React déjà payé
+                      quatre fois : ne pas transformer ce bloc en composant défini
+                      dans le render. */}
+                  {(() => {
+                    const staffLabel = (t) =>
+                      (t.full_name || t.id)
+                      + (t.role === "school_admin" ? " · directeur" : t.role === "referent" ? " · référent" : " · enseignant");
+                    const isParentAudience = cAudience === "parent";
+                    const source = isParentAudience ? cStudents : cStaff;
+                    const labelOf = isParentAudience ? ((s) => s.full_name || "") : staffLabel;
+
+                    const q = cQuery.trim().toLowerCase();
+                    const shown = q ? source.filter((x) => labelOf(x).toLowerCase().includes(q)) : source;
+
+                    // Recherche affichée seulement quand elle sert : sous une dizaine
+                    // d'entrées, un champ de plus est du bruit.
+                    const searchable = source.length > 8;
+
+                    // Un seul résultat → on le choisit tout de suite. Fait ICI, dans le
+                    // gestionnaire de saisie, et jamais pendant le rendu : un effet de
+                    // bord au rendu se rejouerait à chaque passage.
+                    const onQuery = (value) => {
+                      setCQuery(value);
+                      const vq = value.trim().toLowerCase();
+                      if (!vq) return;
+                      const matches = source.filter((x) => labelOf(x).toLowerCase().includes(vq));
+                      if (matches.length === 1) setCRecipient(matches[0].id);
+                      else if (cRecipient && !matches.some((m) => m.id === cRecipient)) setCRecipient("");
+                    };
+
+                    // Le choix courant reste visible même s'il sort du filtre, sinon le
+                    // `<select>` afficherait « choisir… » alors qu'un destinataire EST
+                    // choisi — et on enverrait sans comprendre à qui.
+                    const selected = source.find((x) => x.id === cRecipient);
+                    const list = (selected && !shown.some((x) => x.id === selected.id))
+                      ? [selected, ...shown]
+                      : shown;
+
+                    return (
+                      <label style={{ display: "block" }}>
+                        <span style={{ display: "block", fontSize: FONT.sm, fontWeight: 700, color: COLORS.ink2, marginBottom: 4 }}>
+                          {isParentAudience
+                            ? (isSchoolAdmin || isAdmin ? "Élève concerné (le parent lié le recevra)" : "Élève de votre classe (le parent le recevra)")
+                            : "Destinataire"}
+                        </span>
+
+                        {source.length === 0 ? (
+                          <div style={{ fontSize: FONT.sm, color: COLORS.ink3 }}>
+                            {isParentAudience ? "Aucun élève à afficher." : "Aucun destinataire à afficher."}
+                          </div>
+                        ) : (
+                          <>
+                            {searchable && (
+                              <input
+                                className="ec-input"
+                                type="search"
+                                value={cQuery}
+                                onChange={(e) => onQuery(e.target.value)}
+                                placeholder={isParentAudience ? "Tapez un nom d'élève pour filtrer…" : "Tapez un nom pour filtrer…"}
+                                aria-label={isParentAudience ? "Rechercher un élève" : "Rechercher un destinataire"}
+                                style={{ marginBottom: 6 }}
+                              />
+                            )}
+
+                            <select className="ec-input" value={cRecipient} onChange={(e) => setCRecipient(e.target.value)}>
+                              <option value="">{isParentAudience ? "— choisir un élève —" : "— choisir un destinataire —"}</option>
+                              {list.map((x) => (
+                                <option key={x.id} value={x.id}>{labelOf(x)}</option>
+                              ))}
+                            </select>
+
+                            {searchable && q && (
+                              <span style={{ display: "block", fontSize: FONT.sm, color: shown.length === 0 ? COLORS.crit : COLORS.ink3, marginTop: 4 }}>
+                                {shown.length === 0
+                                  ? "Aucun nom ne correspond."
+                                  : shown.length === 1
+                                    ? "1 résultat — déjà sélectionné."
+                                    : `${shown.length} résultats`}
+                              </span>
+                            )}
+                          </>
+                        )}
+                      </label>
+                    );
+                  })()}
                   <input className="ec-input" placeholder="Objet" value={cSubject} onChange={(e) => setCSubject(e.target.value)} maxLength={140} />
                   <textarea className="ec-input" placeholder="Votre message…" value={cBody} onChange={(e) => setCBody(e.target.value)} rows={5} style={{ resize: "vertical" }} />
                   {/* LOT D — AVERTISSEMENT OBLIGATOIRE, ne pas retirer.
