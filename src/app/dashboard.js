@@ -549,8 +549,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // Ouvrir un échange : on affiche, et c'est TOUT. Aucune écriture sur le
   // message. Si un jour quelqu'un ajoute ici un `update` sur `messages`,
   // l'accusé de lecture du parent devient faux — voir l'état plus haut.
-  const openExchange = (m) => setOpenExch(m);
+  // Reçoit un GROUPE — `{ key, head, members }` — et non un message, depuis que
+  // les envois à plusieurs familles sont pliés en une seule entrée.
+  const openExchange = (group) => setOpenExch(group);
 
+  // Nombre de messages non encore vus par ce directeur. Sert à la pastille du
+  // rail ; l'écran lui-même compte les ENVOIS (voir `newGroups`), parce qu'une
+  // annonce à douze familles est une nouveauté et non douze.
   const exchNew = exchSeenAt
     ? exchanges.filter((m) => m.created_at && m.created_at > exchSeenAt).length
     : exchanges.length;
@@ -563,8 +568,9 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // Parents don't compose. RLS enforces the same scoping server-side.
   const openComposer = async () => {
     setComposeOpen(true);
-    setCMsg(""); setCRecipient("");
+    setCMsg(""); setCRecipient(""); setCRecipients([]);
     setCQuery("");   // un filtre laissé d'un message précédent cacherait la liste
+    setCConfirm(null); setCNotifyWa(true);
     setCAudience("parent");
     if (isParent) return;
     const scope = isAdmin ? "all" : isSchoolAdmin ? `s${teacher?.school_id}` : `t${teacher?.id}`;
@@ -572,8 +578,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     // ⚠️ All three reads are cached. Without this the composer is unusable
     // offline: the lists of pupils and colleagues come back empty, so there is
     // nobody to address a message to.
-    const st = await cachedQuery(`compose_students_${scope}`, () => {
-      let sq = supabase.from("students").select("id, full_name, teacher_id, school_id");
+    // ⚠️ Clé de cache passée en `_v2` : on demande maintenant
+    // `has_parent_contact` en plus. Sans ce changement de clé, une entrée mise
+    // en cache avant la mise à jour serait resservie sans ce champ, et le
+    // compteur annoncerait « 0 recevront un WhatsApp » alors que tous en ont un.
+    // Une entrée de cache doit changer de nom quand sa FORME change.
+    const st = await cachedQuery(`compose_students_v2_${scope}`, () => {
+      let sq = supabase.from("students").select("id, full_name, teacher_id, school_id, has_parent_contact");
       if (isAdmin) { /* every school */ }
       else if (isSchoolAdmin) sq = sq.eq("school_id", teacher?.school_id || "");
       else sq = sq.eq("teacher_id", teacher?.id || ""); // plain teacher: own class only
@@ -607,9 +618,30 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     }
   };
 
+  // Les destinataires retenus : plusieurs élèves pour l'audience parent, une
+  // seule personne pour le personnel.
+  const composeTargets = () =>
+    cAudience === "parent" ? cRecipients : (cRecipient ? [cRecipient] : []);
+
+  // Le bouton « Envoyer » passe par ici. Au-delà d'UN destinataire, on demande
+  // une confirmation en affichant les nombres : un message envoyé ne se rappelle
+  // pas, chaque envoi WhatsApp coûte et compte dans la note de qualité du numéro
+  // chez Meta, et 246 élèves sont en base — une fausse manœuvre sur « cocher
+  // tous » serait chère et irréparable.
+  const askSendMessage = () => {
+    const targets = composeTargets();
+    if (!cSubject.trim() || !cBody.trim() || targets.length === 0) return;
+    if (targets.length === 1 || cConfirm) { sendNewMessage(); return; }
+    const withPhone = cAudience === "parent"
+      ? targets.filter((id) => (cStudents.find((s) => s.id === id) || {}).has_parent_contact).length
+      : targets.length;
+    setCConfirm({ families: targets.length, wa: (WHATSAPP_ENABLED && cNotifyWa) ? withPhone : 0 });
+  };
+
   const sendNewMessage = async () => {
-    if (!cSubject.trim() || !cBody.trim() || !cRecipient) return;
-    setCSending(true); setCMsg("");
+    const targets = composeTargets();
+    if (!cSubject.trim() || !cBody.trim() || targets.length === 0) return;
+    setCSending(true); setCMsg(""); setCConfirm(null);
 
     // ⚠️ The sender used to come from `supabase.auth.getUser()` — which is a
     // SERVER call, not a local read. Offline it returned nothing and the
@@ -618,51 +650,63 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const senderId = (isParent ? parent?.id : teacher?.id) || null;
     if (!senderId) { setCMsg("Session introuvable. Reconnectez-vous."); setCSending(false); return; }
 
-    // The row is fully formed here, id included, so it can be written now or
-    // replayed later without anything further from the server.
-    const messageId = newId();
+    // UNE LIGNE PAR DESTINATAIRE — voir le commentaire de `cRecipients`. Elles
+    // partagent `batch_id` quand il y en a plusieurs, pour rester reconnaissables
+    // comme un seul envoi dans l'écran « Échanges de l'école ».
+    const batchId = targets.length > 1 ? newId() : null;
     const base = {
-      id: messageId,
       sender_id: senderId, subject: cSubject.trim(), body: cBody.trim(),
       link_url: cLink.trim() || null,
       created_at: new Date().toISOString(), // when it was written, not when it synced
+      batch_id: batchId,
     };
-    let row;
-    if (cAudience === "parent") {
-      const stu = cStudents.find((s) => s.id === cRecipient);
-      row = {
-        ...base, audience: "parent", student_id: cRecipient,
-        // Resolved when the composer opened, so this works without a network.
-        recipient_id: cParentByStudent[cRecipient] || null,
-        school_id: stu?.school_id || teacher?.school_id || null,
-      };
-    } else {
-      const st = cStaff.find((t) => t.id === cRecipient);
-      row = {
-        ...base,
+
+    // Chaque ligne est COMPLÈTE ici, identifiant inclus, donc elle peut être
+    // écrite maintenant ou rejouée plus tard sans rien demander au serveur.
+    const rows = targets.map((target) => {
+      if (cAudience === "parent") {
+        const stu = cStudents.find((s) => s.id === target);
+        return {
+          ...base, id: newId(), audience: "parent", student_id: target,
+          // Resolved when the composer opened, so this works without a network.
+          recipient_id: cParentByStudent[target] || null,
+          school_id: stu?.school_id || teacher?.school_id || null,
+        };
+      }
+      const st = cStaff.find((t) => t.id === target);
+      return {
+        ...base, id: newId(),
         audience: (st?.role === "school_admin" || st?.role === "referent") ? "school_admin" : "teacher",
-        recipient_id: cRecipient,
+        recipient_id: target,
         school_id: st?.school_id || teacher?.school_id || null,
       };
-    }
+    });
 
+    const notifyWanted = WHATSAPP_ENABLED && (cAudience !== "parent" || cNotifyWa);
     const offlineNow = typeof navigator !== "undefined" && !navigator.onLine;
 
-    // Queue the message, and the parent nudge behind it. Order matters: the
-    // queue drains oldest-first, so the row exists before the Edge Function is
-    // asked to notify anyone about it.
+    // Queue the messages, and the nudges behind them. Order matters: the queue
+    // drains oldest-first, so each row exists before the Edge Function is asked
+    // to notify anyone about it.
+    //
+    // ⚠️ UNE ENTRÉE DE FILE PAR LIGNE, jamais un tableau dans une seule entrée :
+    // la file rejoue chaque entrée telle quelle, et si l'une échoue on ne veut
+    // pas perdre les onze autres avec elle.
     const hold = async () => {
-      await enqueue({ kind: "message", table: "messages", op: "insert", payload: row });
-      // Notify whoever it was written to — parent OR colleague. Staff used to
-      // get nothing at all, because the old path could only address a pupil's
-      // parent. Uses the DIRECT template, which names the sender, so a message
-      // a person wrote never arrives looking like an automatic lesson notice.
-      if (WHATSAPP_ENABLED) {
-        await enqueue({
-          kind: "notify", op: "invoke", fn: "send-direct-message",
-          body: { message_id: messageId },
-          bestEffort: true, // a nudge must never hold up a teacher's marks
-        });
+      for (const r of rows) {
+        await enqueue({ kind: "message", table: "messages", op: "insert", payload: r });
+      }
+      // Notify whoever it was written to — parent OR colleague. Uses the DIRECT
+      // template, which names the sender, so a message a person wrote never
+      // arrives looking like an automatic lesson notice.
+      if (notifyWanted) {
+        for (const r of rows) {
+          await enqueue({
+            kind: "notify", op: "invoke", fn: "send-direct-message",
+            body: { message_id: r.id },
+            bestEffort: true, // a nudge must never hold up a teacher's marks
+          });
+        }
       }
       refreshPending();
     };
@@ -671,26 +715,46 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       try { await hold(); }
       catch (_) { setCMsg("Erreur lors de l'envoi. Réessayez."); setCSending(false); return; }
     } else {
-      const { error } = await supabase.from("messages").insert(row);
+      // ⚠️ TOUT OU RIEN : une insertion multiple qui viole la règle d'écriture
+      // sur UNE ligne échoue en ENTIER. C'est voulu — mieux vaut ne rien envoyer
+      // que la moitié d'une annonce. La liste ne propose de toute façon que les
+      // élèves que l'expéditeur a le droit d'adresser.
+      const { error } = await supabase.from("messages").insert(rows);
       if (error) {
         // Online but it did not land — keep it rather than lose what was typed.
         try { await hold(); }
         catch (_) { setCMsg("Erreur lors de l'envoi. Réessayez."); setCSending(false); return; }
-      } else {
-        notifyDirectMessage({ messageId });
+      } else if (notifyWanted) {
+        // Un envoi APRÈS l'autre, pas tous en parallèle : trente appels
+        // simultanés à Meta, c'est ce qui fait chuter la note de qualité d'un
+        // numéro. Non attendu, pour ne pas figer l'écran pendant la série.
+        (async () => {
+          for (const r of rows) {
+            try { await notifyDirectMessage({ messageId: r.id }); } catch (_) {}
+          }
+        })();
       }
     }
 
     logActivity({
       actorId: senderId, actorRole: teacher?.role || "teacher",
-      schoolId: row.school_id, eventType: "message_sent", detail: row.subject,
+      schoolId: rows[0].school_id, eventType: "message_sent",
+      detail: rows.length > 1 ? `${rows[0].subject} (${rows.length} familles)` : rows[0].subject,
     });
+
+    const sansCompte = rows.filter((r) => r.audience === "parent" && !r.recipient_id).length;
     setCMsg(offlineNow
-      ? "Message gardé ✓ — il partira au retour du réseau."
-      : row.audience === "parent" && !row.recipient_id
-        ? "Message enregistré ✓ — le parent le verra dès son inscription."
-        : "Message envoyé ✓");
-    setCSubject(""); setCBody(""); setCLink(""); setCRecipient("");
+      ? (rows.length > 1
+        ? `${rows.length} messages gardés ✓ — ils partiront au retour du réseau.`
+        : "Message gardé ✓ — il partira au retour du réseau.")
+      : (rows.length > 1
+        ? `Envoyé à ${rows.length} familles ✓${sansCompte ? ` — ${sansCompte} verront le message dès leur inscription.` : ""}`
+        : (sansCompte
+          ? "Message enregistré ✓ — le parent le verra dès son inscription."
+          : "Message envoyé ✓")));
+
+    setCSubject(""); setCBody(""); setCLink("");
+    setCRecipient(""); setCRecipients([]); setCQuery("");
     setCSending(false);
   };
 
@@ -894,6 +958,18 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // le navigateur ne fait que sauter à la première lettre. Avec 246 élèves en
   // base, il fallait dérouler à la main pour trouver un enfant.
   const [cQuery, setCQuery] = useState("");
+
+  // ─── ENVOI À PLUSIEURS FAMILLES (2026-09-30, demande de Maxime) ─────────────
+  // Un message ne peut PAS être « adressé à douze parents » en une seule ligne :
+  // chaque parent a besoin de la sienne, avec son propre `read_at`. Sinon le
+  // premier parent qui ouvre marquerait le message lu pour les onze autres, et
+  // la liste « parents à relancer » deviendrait fausse. Douze familles = douze
+  // lignes, même texte, reliées par `batch_id`.
+  const [cRecipients, setCRecipients] = useState([]);   // audience parent : plusieurs élèves
+  const [cNotifyWa, setCNotifyWa] = useState(true);     // prévenir aussi par WhatsApp
+  // Résumé en attente de confirmation, dès qu'il y a plus d'un destinataire.
+  // Un message envoyé ne se rappelle pas, et chaque envoi WhatsApp coûte.
+  const [cConfirm, setCConfirm] = useState(null);
   // pupil id → parent account id. Resolved while the composer opens (online) so
   // a message written later without a network can still name its recipient.
   const [cParentByStudent, setCParentByStudent] = useState({});
@@ -2727,71 +2803,171 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                     // d'entrées, un champ de plus est du bruit.
                     const searchable = source.length > 8;
 
-                    // Un seul résultat → on le choisit tout de suite. Fait ICI, dans le
-                    // gestionnaire de saisie, et jamais pendant le rendu : un effet de
-                    // bord au rendu se rejouerait à chaque passage.
-                    const onQuery = (value) => {
-                      setCQuery(value);
-                      const vq = value.trim().toLowerCase();
-                      if (!vq) return;
-                      const matches = source.filter((x) => labelOf(x).toLowerCase().includes(vq));
-                      if (matches.length === 1) setCRecipient(matches[0].id);
-                      else if (cRecipient && !matches.some((m) => m.id === cRecipient)) setCRecipient("");
-                    };
+                    const label = (
+                      <span style={{ display: "block", fontSize: FONT.sm, fontWeight: 700, color: COLORS.ink2, marginBottom: 4 }}>
+                        {isParentAudience
+                          ? (isSchoolAdmin || isAdmin ? "Familles destinataires (le parent lié de chaque élève recevra le message)" : "Élèves de votre classe (le parent de chacun recevra le message)")
+                          : "Destinataire"}
+                      </span>
+                    );
 
-                    // Le choix courant reste visible même s'il sort du filtre, sinon le
-                    // `<select>` afficherait « choisir… » alors qu'un destinataire EST
-                    // choisi — et on enverrait sans comprendre à qui.
-                    const selected = source.find((x) => x.id === cRecipient);
-                    const list = (selected && !shown.some((x) => x.id === selected.id))
-                      ? [selected, ...shown]
-                      : shown;
-
-                    return (
-                      <label style={{ display: "block" }}>
-                        <span style={{ display: "block", fontSize: FONT.sm, fontWeight: 700, color: COLORS.ink2, marginBottom: 4 }}>
-                          {isParentAudience
-                            ? (isSchoolAdmin || isAdmin ? "Élève concerné (le parent lié le recevra)" : "Élève de votre classe (le parent le recevra)")
-                            : "Destinataire"}
-                        </span>
-
-                        {source.length === 0 ? (
+                    if (source.length === 0) {
+                      return (
+                        <div>
+                          {label}
                           <div style={{ fontSize: FONT.sm, color: COLORS.ink3 }}>
                             {isParentAudience ? "Aucun élève à afficher." : "Aucun destinataire à afficher."}
                           </div>
-                        ) : (
-                          <>
-                            {searchable && (
-                              <input
-                                className="ec-input"
-                                type="search"
-                                value={cQuery}
-                                onChange={(e) => onQuery(e.target.value)}
-                                placeholder={isParentAudience ? "Tapez un nom d'élève pour filtrer…" : "Tapez un nom pour filtrer…"}
-                                aria-label={isParentAudience ? "Rechercher un élève" : "Rechercher un destinataire"}
-                                style={{ marginBottom: 6 }}
-                              />
-                            )}
+                        </div>
+                      );
+                    }
 
-                            <select className="ec-input" value={cRecipient} onChange={(e) => setCRecipient(e.target.value)}>
-                              <option value="">{isParentAudience ? "— choisir un élève —" : "— choisir un destinataire —"}</option>
-                              {list.map((x) => (
-                                <option key={x.id} value={x.id}>{labelOf(x)}</option>
-                              ))}
-                            </select>
+                    const search = searchable && (
+                      <input
+                        className="ec-input"
+                        type="search"
+                        value={cQuery}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setCQuery(value);
+                          setCConfirm(null);   // le résumé confirmé ne vaut plus rien si la liste change
+                          // Audience personnel : un seul destinataire, donc un
+                          // résultat unique se choisit tout de suite. Fait ICI, dans
+                          // le gestionnaire de saisie, et jamais pendant le rendu —
+                          // un effet de bord au rendu se rejouerait à chaque passage.
+                          if (isParentAudience) return;
+                          const vq = value.trim().toLowerCase();
+                          if (!vq) return;
+                          const m = source.filter((x) => labelOf(x).toLowerCase().includes(vq));
+                          if (m.length === 1) setCRecipient(m[0].id);
+                          else if (cRecipient && !m.some((y) => y.id === cRecipient)) setCRecipient("");
+                        }}
+                        placeholder={isParentAudience ? "Tapez un nom d'élève pour filtrer…" : "Tapez un nom pour filtrer…"}
+                        aria-label={isParentAudience ? "Rechercher un élève" : "Rechercher un destinataire"}
+                        style={{ marginBottom: 6 }}
+                      />
+                    );
 
-                            {searchable && q && (
-                              <span style={{ display: "block", fontSize: FONT.sm, color: shown.length === 0 ? COLORS.crit : COLORS.ink3, marginTop: 4 }}>
-                                {shown.length === 0
-                                  ? "Aucun nom ne correspond."
-                                  : shown.length === 1
-                                    ? "1 résultat — déjà sélectionné."
-                                    : `${shown.length} résultats`}
+                    // ─── PERSONNEL : un seul destinataire, liste déroulante ─────────
+                    // Le `<select>` natif est conservé : il reste utilisable au clavier
+                    // et ouvre le sélecteur d'Android et d'iOS sur téléphone.
+                    if (!isParentAudience) {
+                      const selected = source.find((x) => x.id === cRecipient);
+                      const list = (selected && !shown.some((x) => x.id === selected.id))
+                        ? [selected, ...shown]   // le choix courant reste visible hors filtre
+                        : shown;
+                      return (
+                        <label style={{ display: "block" }}>
+                          {label}
+                          {search}
+                          <select className="ec-input" value={cRecipient} onChange={(e) => setCRecipient(e.target.value)}>
+                            <option value="">— choisir un destinataire —</option>
+                            {list.map((x) => <option key={x.id} value={x.id}>{labelOf(x)}</option>)}
+                          </select>
+                          {searchable && q && (
+                            <span style={{ display: "block", fontSize: FONT.sm, color: shown.length === 0 ? COLORS.crit : COLORS.ink3, marginTop: 4 }}>
+                              {shown.length === 0 ? "Aucun nom ne correspond."
+                                : shown.length === 1 ? "1 résultat — déjà sélectionné."
+                                  : `${shown.length} résultats`}
+                            </span>
+                          )}
+                        </label>
+                      );
+                    }
+
+                    // ─── FAMILLES : plusieurs destinataires, cases à cocher ─────────
+                    // Pas de `<select multiple>` : sur téléphone comme sur ordinateur
+                    // il exige de garder Ctrl enfoncé et se dé-sélectionne au moindre
+                    // clic de travers. Des cases à cocher ne trompent personne.
+                    const picked = new Set(cRecipients);
+                    const shownIds = shown.map((s) => s.id);
+                    const allShownPicked = shownIds.length > 0 && shownIds.every((id) => picked.has(id));
+                    const withPhone = cRecipients.filter(
+                      (id) => (source.find((s) => s.id === id) || {}).has_parent_contact).length;
+
+                    const toggle = (id) => {
+                      setCConfirm(null);
+                      setCRecipients((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
+                    };
+                    const toggleAllShown = () => {
+                      setCConfirm(null);
+                      setCRecipients((prev) => allShownPicked
+                        ? prev.filter((id) => !shownIds.includes(id))
+                        : Array.from(new Set([...prev, ...shownIds])));
+                    };
+
+                    return (
+                      <div>
+                        {label}
+                        {search}
+
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
+                          <button className="ec-link" onClick={toggleAllShown} style={{ fontSize: FONT.sm, fontWeight: 700 }}>
+                            {allShownPicked
+                              ? `Décocher les ${shownIds.length} affichés`
+                              : `Cocher les ${shownIds.length} affichés${q ? "" : " (toute la liste)"}`}
+                          </button>
+                          {cRecipients.length > 0 && (
+                            <button className="ec-link" onClick={() => { setCRecipients([]); setCConfirm(null); }}
+                              style={{ fontSize: FONT.sm, color: COLORS.ink3 }}>
+                              Tout décocher
+                            </button>
+                          )}
+                        </div>
+
+                        <div style={{
+                          maxHeight: 220, overflowY: "auto",
+                          border: `1px solid ${COLORS.g200}`, borderRadius: 8, padding: 4,
+                        }}>
+                          {shown.length === 0 ? (
+                            <div style={{ fontSize: FONT.sm, color: COLORS.crit, padding: "8px 10px" }}>
+                              Aucun nom ne correspond.
+                            </div>
+                          ) : shown.map((s) => (
+                            <label key={s.id} style={{
+                              display: "flex", alignItems: "center", gap: 10,
+                              padding: "7px 10px", borderRadius: 6, cursor: "pointer",
+                              background: picked.has(s.id) ? COLORS.g50 : "transparent",
+                            }}>
+                              <input type="checkbox" checked={picked.has(s.id)} onChange={() => toggle(s.id)}
+                                style={{ width: 17, height: 17, flex: "0 0 auto" }} />
+                              <span style={{ fontSize: FONT.md, color: COLORS.ink, flex: 1, minWidth: 0 }}>
+                                {s.full_name}
                               </span>
-                            )}
-                          </>
+                              {/* Pas de numéro = message dans l'application seulement.
+                                  Dit ici, pas découvert après l'envoi. */}
+                              {!s.has_parent_contact && (
+                                <span style={{ fontSize: FONT.sm, color: COLORS.ink3, flex: "0 0 auto" }}>
+                                  pas de numéro
+                                </span>
+                              )}
+                            </label>
+                          ))}
+                        </div>
+
+                        <span style={{ display: "block", fontSize: FONT.sm, color: COLORS.ink2, marginTop: 6, fontWeight: 650 }}>
+                          {cRecipients.length === 0
+                            ? "Aucune famille sélectionnée."
+                            : `${cRecipients.length} famille${cRecipients.length > 1 ? "s" : ""} sélectionnée${cRecipients.length > 1 ? "s" : ""}`}
+                          {cRecipients.length > 0 && WHATSAPP_ENABLED && cNotifyWa && (
+                            <span style={{ color: COLORS.ink3, fontWeight: 400 }}>
+                              {" · "}{withPhone} recevra{withPhone > 1 ? "ont" : ""} un WhatsApp
+                              {cRecipients.length - withPhone > 0 ? `, ${cRecipients.length - withPhone} sans numéro` : ""}
+                            </span>
+                          )}
+                        </span>
+
+                        {WHATSAPP_ENABLED && (
+                          <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, cursor: "pointer" }}>
+                            <input type="checkbox" checked={cNotifyWa}
+                              onChange={(e) => { setCNotifyWa(e.target.checked); setCConfirm(null); }}
+                              style={{ width: 17, height: 17 }} />
+                            <span style={{ fontSize: FONT.sm, color: COLORS.ink2 }}>
+                              Prévenir aussi par WhatsApp — sinon le message n'existe que dans l'application
+                            </span>
+                          </label>
                         )}
-                      </label>
+                      </div>
                     );
                   })()}
                   <input className="ec-input" placeholder="Objet" value={cSubject} onChange={(e) => setCSubject(e.target.value)} maxLength={140} />
@@ -2816,9 +2992,38 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                   {cAudience === "parent" && (
                     <input className="ec-input" placeholder="Lien (n° de leçon ou URL) — optionnel" value={cLink} onChange={(e) => setCLink(e.target.value)} />
                   )}
+                  {/* Confirmation d'un envoi groupé — elle dit les NOMBRES, parce
+                      qu'un message envoyé ne se rappelle pas et que chaque envoi
+                      WhatsApp coûte. Toute modification de la sélection l'efface :
+                      un résumé confirmé ne doit jamais survivre à ce qu'il décrit. */}
+                  {cConfirm && (
+                    <div style={{
+                      border: `1px solid ${COLORS.g200}`, background: COLORS.g50,
+                      borderRadius: 8, padding: "12px 14px",
+                    }}>
+                      <p style={{ fontSize: FONT.md, color: COLORS.ink, margin: 0, lineHeight: 1.5, fontWeight: 650 }}>
+                        Envoyer ce message à <strong>{cConfirm.families} familles</strong> ?
+                      </p>
+                      <p style={{ fontSize: FONT.sm, color: COLORS.ink2, margin: "6px 0 0", lineHeight: 1.5 }}>
+                        {cConfirm.wa > 0
+                          ? <>Cela déclenchera <strong>{cConfirm.wa} envoi{cConfirm.wa > 1 ? "s" : ""} WhatsApp</strong>. Un message envoyé ne peut pas être rappelé.</>
+                          : <>Aucun WhatsApp ne partira — le message n'existera que dans l'application.</>}
+                      </p>
+                      <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+                        <Button onClick={sendNewMessage} disabled={cSending}>
+                          {cSending ? "Envoi…" : `Confirmer l'envoi à ${cConfirm.families} familles`}
+                        </Button>
+                        <Button variant="ghost" onClick={() => setCConfirm(null)}>Revenir</Button>
+                      </div>
+                    </div>
+                  )}
+
                   <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                    <Button onClick={sendNewMessage} disabled={cSending || !cSubject.trim() || !cBody.trim() || !cRecipient}>
-                      {cSending ? "Envoi…" : "Envoyer"}
+                    <Button onClick={askSendMessage}
+                      disabled={cSending || !!cConfirm || !cSubject.trim() || !cBody.trim() || composeTargets().length === 0}>
+                      {cSending ? "Envoi…"
+                        : composeTargets().length > 1 ? `Envoyer à ${composeTargets().length} familles`
+                          : "Envoyer"}
                     </Button>
                     {cMsg && <span style={{ fontSize: FONT.sm, fontWeight: 700, color: cMsg.startsWith("Erreur") ? COLORS.crit : COLORS.g600 }}>{cMsg}</span>}
                   </div>
@@ -2859,25 +3064,54 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const roleLabel = (r) => (r === "school_admin" ? "directeur" : r === "referent" ? "référent" : "enseignant");
     const isNew = (m) => !exchSeenAt || (m.created_at && m.created_at > exchSeenAt);
 
-    const Row = (m) => (
-      <ListRow
-        key={m.id}
-        icon={(m.sender_name || "?").slice(0, 1).toUpperCase()}
-        iconColor={isNew(m) ? COLORS.g500 : undefined}
-        title={m.subject || "Sans objet"}
-        meta={`${m.sender_name} · ${roleLabel(m.sender_role)}${m.student_name ? " → parent de " + m.student_name : ""} · ${fmtDate(m.created_at)}`}
-        onClick={() => openExchange(m)}
-        style={openExch?.id === m.id ? { borderColor: COLORS.g500, background: COLORS.g50 } : undefined}
-        right={isNew(m) ? <Badge tone="brand">Nouveau</Badge> : undefined}
-      >
-        <span style={{
-          display: "block", fontSize: FONT.sm, color: COLORS.ink2, marginTop: 5,
-          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-        }}>
-          {m.body}
-        </span>
-      </ListRow>
-    );
+    // ─── REGROUPEMENT DES ENVOIS MULTIPLES ──────────────────────────────────
+    // Une annonce envoyée à douze familles, ce sont douze lignes en base — il
+    // le faut, chaque parent ayant besoin de la sienne. Mais les afficher une
+    // par une rendrait cet écran illisible en une semaine. Les lignes qui
+    // partagent `batch_id` sont donc pliées en une seule entrée « → 12
+    // familles ». Un message individuel n'a pas de `batch_id` : il reste seul.
+    const groups = [];
+    const byBatch = new Map();
+    for (const m of exchanges) {
+      if (!m.batch_id) { groups.push({ key: m.id, head: m, members: [m] }); continue; }
+      const existing = byBatch.get(m.batch_id);
+      if (existing) { existing.members.push(m); continue; }
+      const g = { key: m.batch_id, head: m, members: [m] };
+      byBatch.set(m.batch_id, g);
+      groups.push(g);
+    }
+
+    // Compté en ENVOIS, comme le reste de l'écran : une annonce à douze familles
+    // est UNE nouveauté pour le directeur, pas douze.
+    const newGroups = groups.filter((g) => isNew(g.head)).length;
+
+    const who = (g) => {
+      if (g.members.length > 1) return `→ ${g.members.length} familles`;
+      return g.head.student_name ? `→ parent de ${g.head.student_name}` : "";
+    };
+
+    const Row = (g) => {
+      const m = g.head;
+      return (
+        <ListRow
+          key={g.key}
+          icon={(m.sender_name || "?").slice(0, 1).toUpperCase()}
+          iconColor={isNew(m) ? COLORS.g500 : undefined}
+          title={m.subject || "Sans objet"}
+          meta={`${m.sender_name} · ${roleLabel(m.sender_role)}${who(g) ? " " + who(g) : ""} · ${fmtDate(m.created_at)}`}
+          onClick={() => openExchange(g)}
+          style={openExch?.key === g.key ? { borderColor: COLORS.g500, background: COLORS.g50 } : undefined}
+          right={isNew(m) ? <Badge tone="brand">Nouveau</Badge> : undefined}
+        >
+          <span style={{
+            display: "block", fontSize: FONT.sm, color: COLORS.ink2, marginTop: 5,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}>
+            {m.body}
+          </span>
+        </ListRow>
+      );
+    };
 
     const detail = !openExch ? (
       <Card>
@@ -2888,18 +3122,31 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     ) : (
       <Card>
         <div className="ec-cardhd">
-          <h2 className="ec-cardtitle">{openExch.subject || "Sans objet"}</h2>
+          <h2 className="ec-cardtitle">{openExch.head.subject || "Sans objet"}</h2>
           <button className="ec-more ec-link" style={{ textDecoration: "none" }} onClick={() => setOpenExch(null)}>
             Fermer
           </button>
         </div>
         <p style={{ fontSize: FONT.sm, color: COLORS.ink3, marginBottom: 12 }}>
-          De <strong style={{ color: COLORS.ink2 }}>{openExch.sender_name}</strong> ({roleLabel(openExch.sender_role)})
-          {openExch.student_name ? <> au parent de <strong style={{ color: COLORS.ink2 }}>{openExch.student_name}</strong></> : null}
-          {" · "}{fmtDate(openExch.created_at)}
+          De <strong style={{ color: COLORS.ink2 }}>{openExch.head.sender_name}</strong> ({roleLabel(openExch.head.sender_role)})
+          {openExch.members.length > 1
+            ? <> à <strong style={{ color: COLORS.ink2 }}>{openExch.members.length} familles</strong></>
+            : (openExch.head.student_name ? <> au parent de <strong style={{ color: COLORS.ink2 }}>{openExch.head.student_name}</strong></> : null)}
+          {" · "}{fmtDate(openExch.head.created_at)}
         </p>
+
+        {/* Un envoi groupé dit QUI l'a reçu : « 12 familles » sans les noms
+            n'aiderait pas une direction qui veut savoir si telle famille a été
+            prévenue. */}
+        {openExch.members.length > 1 && (
+          <p style={{ fontSize: FONT.sm, color: COLORS.ink2, marginBottom: 12, lineHeight: 1.6 }}>
+            <span style={{ fontWeight: 700 }}>Familles concernées : </span>
+            {openExch.members.map((m) => m.student_name || "élève").join(", ")}
+          </p>
+        )}
+
         <p style={{ fontSize: FONT.md, color: COLORS.ink, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
-          {openExch.body}
+          {openExch.head.body}
         </p>
         {/* On n'affiche PAS de bouton « répondre » : cette vue sert à être au
             courant, pas à s'immiscer dans un échange. Pour écrire au parent, la
@@ -2931,7 +3178,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
 
         <div className="ec-grid" style={{ marginTop: 18 }}>
           <div className={`ec-c5${openExch ? " ec-deskonly" : ""}`}>
-            {exchanges.length === 0 ? (
+            {groups.length === 0 ? (
               <Card>
                 <EmptyState icon="📭" title="Aucun échange">
                   Aucun message n'a encore été envoyé à un parent dans votre école.
@@ -2939,11 +3186,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               </Card>
             ) : (
               <>
+                {/* On compte les ENVOIS, pas les lignes : une annonce à douze
+                    familles est un envoi, et l'annoncer « 12 messages » ferait
+                    croire à douze conversations distinctes. */}
                 <CardLabel>
-                  {exchanges.length} message{exchanges.length > 1 ? "s" : ""}
-                  {exchNew > 0 ? ` · ${exchNew} nouveau${exchNew > 1 ? "x" : ""}` : ""}
+                  {groups.length} envoi{groups.length > 1 ? "s" : ""}
+                  {exchanges.length !== groups.length ? ` · ${exchanges.length} messages` : ""}
+                  {newGroups > 0 ? ` · ${newGroups} nouveau${newGroups > 1 ? "x" : ""}` : ""}
                 </CardLabel>
-                {exchanges.map(Row)}
+                {groups.map(Row)}
               </>
             )}
           </div>
