@@ -7,6 +7,10 @@ import { Button, Card, CardLabel, ListRow, IconButton, EmptyState, SkeletonRows 
 import { Field } from "../components/forms";
 import { COLORS, FONT } from "../lib/theme";
 import { notifyParentWhatsApp } from "../lib/whatsapp";
+// Un numéro mal saisi ne produit AUCUNE erreur : Meta refuse l'envoi en silence
+// et le parent ne reçoit jamais rien. D'où la normalisation à l'écriture et le
+// badge « à vérifier » sur les valeurs existantes non envoyables.
+import { normalizePhone, formatPhone, isSendablePhone } from "../lib/phone";
 
 // School-admin timetable editor. Rendered only when PROFILES_ENABLED and the
 // logged-in user is a school_admin. Edits each class's (= teacher's) weekly
@@ -166,6 +170,11 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
   // { [student_id]: { parent_phone, parent_email } } — rempli seulement pour
   // Maxime, et seulement en ligne. Vide pour la direction, toujours.
   const [contacts, setContacts] = useState({});
+  // Correction d'un contact : quel élève est en cours d'édition, et les valeurs
+  // saisies. `null` = personne.
+  const [editId, setEditId] = useState(null);
+  const [editPhone, setEditPhone] = useState("");
+  const [editEmail, setEditEmail] = useState("");
   const [stuSaving, setStuSaving] = useState(false);
   const [stuQuery, setStuQuery] = useState(""); // recherche dans la liste d'élèves
   // School dashboard + director's observations.
@@ -304,10 +313,18 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
     // situation est visible et se répare en réenregistrant la coordonnée —
     // bien mieux qu'un élève créé en silence avec un numéro perdu.
     let contactOk = true;
-    const wantsContact = newEmail.trim() || newPhone.trim();
-    if (ok && newId && wantsContact) {
+    let contactMsg = null;
+    const rawPhone = newPhone.trim();
+    // Même règle qu'à la correction : on normalise, et on REFUSE ce qu'on ne
+    // sait pas conclure plutôt que d'enregistrer un numéro qui n'arrivera
+    // jamais. L'élève est créé quand même — c'est la coordonnée qui manque, et
+    // le témoin le dira.
+    const phone = rawPhone ? normalizePhone(rawPhone) : null;
+    if (rawPhone && !phone) { contactOk = false; contactMsg = "Élève créé, mais le numéro n'a pas été reconnu — corrigez-le avec le crayon ✎."; }
+    const wantsContact = newEmail.trim() || phone;
+    if (ok && newId && contactOk && wantsContact) {
       const { error: cErr } = await supabase.rpc("educam_set_student_contact", {
-        p_student: newId, p_phone: newPhone.trim() || null, p_email: newEmail.trim() || null,
+        p_student: newId, p_phone: phone, p_email: newEmail.trim() || null,
       });
       if (cErr) contactOk = false;
     }
@@ -316,9 +333,44 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
       setNewName(""); setNewEmail(""); setNewPhone("");
       await loadStudents(selected.id);
       if (!contactOk) {
-        setMsg({ t: "Élève créé, mais la coordonnée du parent n'a pas pu être enregistrée. Réessayez depuis la console Utilisateurs.", tone: "err" });
+        setMsg({ t: contactMsg || "Élève créé, mais la coordonnée du parent n'a pas pu être enregistrée. Corrigez-la avec le crayon ✎ sur sa ligne.", tone: "err" });
       }
     } else setMsg({ t: "Erreur lors de l'ajout de l'élève.", tone: "err" });
+    setStuSaving(false);
+  };
+
+  // Corriger la coordonnée d'un parent — Maxime seulement, et c'est la BASE qui
+  // le vérifie (`educam_set_student_contact` lève `not_admin` sinon).
+  //
+  // ⚠️ On REFUSE un numéro qu'on ne sait pas normaliser, plutôt que de
+  // l'enregistrer tel quel. Un numéro mal formé ne produit aucune erreur
+  // visible : Meta refuse l'envoi en silence et le parent ne reçoit jamais
+  // rien. Mieux vaut un refus franc ici qu'un parent qu'on croit joignable.
+  // Laisser le champ VIDE efface la coordonnée — c'est volontaire et utile.
+  const saveContact = async (id) => {
+    if (blockedOffline()) return;
+    const raw = editPhone.trim();
+    let phone = null;
+    if (raw) {
+      phone = normalizePhone(raw);
+      if (!phone) {
+        setMsg({ t: "Numéro non reconnu. Attendu : 690 00 00 00, +237690000000, ou 00237…", tone: "err" });
+        return;
+      }
+    }
+    setStuSaving(true);
+    const { error } = await supabase.rpc("educam_set_student_contact", {
+      p_student: id, p_phone: phone, p_email: editEmail.trim() || null,
+    });
+    if (error) {
+      setMsg({ t: "La coordonnée n'a pas pu être enregistrée.", tone: "err" });
+    } else {
+      setEditId(null);
+      setMsg({ t: phone ? `Coordonnée enregistrée : ${formatPhone(phone)}` : "Coordonnée effacée.", tone: "ok" });
+      // On recharge la LISTE aussi : `has_parent_contact` est calculé en base,
+      // donc le témoin de la direction ne bouge qu'après relecture.
+      await loadStudents(selected.id);
+    }
     setStuSaving(false);
   };
 
@@ -815,9 +867,59 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
                             <td style={{ color: COLORS.ink3 }}>
                               {(() => {
                                 const c = contacts[s.id];
-                                if (asAdmin && c && (c.parent_email || c.parent_phone)) {
-                                  return [c.parent_email, c.parent_phone].filter(Boolean).join(" · ");
+
+                                // ─── CORRECTION D'UN CONTACT (Maxime seulement) ───────
+                                // Trou comblé le 2026-09-30 : jusque-là, le numéro d'un
+                                // parent ne pouvait s'écrire QU'À LA CRÉATION de l'élève.
+                                // Aucun écran ne savait le corriger — or c'est le numéro
+                                // que lisent LES TROIS fonctions WhatsApp. Un chiffre mal
+                                // saisi était donc définitif, et le parent ne recevait
+                                // jamais rien, sans qu'aucune erreur n'apparaisse.
+                                if (asAdmin && editId === s.id) {
+                                  return (
+                                    <span style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                      <input className="ec-input" type="tel" value={editPhone}
+                                        onChange={(e) => setEditPhone(e.target.value)}
+                                        aria-label={`Téléphone du parent de ${s.full_name}`}
+                                        placeholder="Tél. WhatsApp (+237…)" style={{ flex: "1 1 130px", minWidth: 120 }} />
+                                      <input className="ec-input" value={editEmail}
+                                        onChange={(e) => setEditEmail(e.target.value)}
+                                        aria-label={`E-mail du parent de ${s.full_name}`}
+                                        placeholder="E-mail (optionnel)" style={{ flex: "1 1 130px", minWidth: 120 }} />
+                                      <Button size="sm" onClick={() => saveContact(s.id)}
+                                        disabled={stuSaving || !online}>Enregistrer</Button>
+                                      <Button size="sm" variant="ghost" onClick={() => setEditId(null)}>Annuler</Button>
+                                    </span>
+                                  );
                                 }
+
+                                if (asAdmin) {
+                                  const has = c && (c.parent_email || c.parent_phone);
+                                  return (
+                                    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                      <span>
+                                        {has
+                                          ? [c.parent_email, formatPhone(c.parent_phone) || c.parent_phone].filter(Boolean).join(" · ")
+                                          : (s.has_parent_contact ? "✓ contact enregistré" : "contact manquant")}
+                                      </span>
+                                      {/* Badge « à vérifier » : un numéro non envoyable ne
+                                          produit AUCUNE erreur, Meta le refuse en silence. */}
+                                      {has && c.parent_phone && !isSendablePhone(c.parent_phone) && (
+                                        <span style={{ color: COLORS.crit, fontWeight: 700, fontSize: FONT.sm }}>
+                                          téléphone à vérifier
+                                        </span>
+                                      )}
+                                      <IconButton label={`Corriger la coordonnée du parent de ${s.full_name}`}
+                                        onClick={() => {
+                                          setEditId(s.id);
+                                          setEditPhone((c && c.parent_phone) || "");
+                                          setEditEmail((c && c.parent_email) || "");
+                                          setMsg(null);
+                                        }}>✎</IconButton>
+                                    </span>
+                                  );
+                                }
+
                                 if (!s.has_parent_contact) return <span>contact manquant</span>;
                                 return <span style={{ color: COLORS.g700, fontWeight: 650 }}>✓ contact enregistré</span>;
                               })()}
