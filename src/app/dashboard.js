@@ -578,13 +578,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     // ⚠️ All three reads are cached. Without this the composer is unusable
     // offline: the lists of pupils and colleagues come back empty, so there is
     // nobody to address a message to.
-    // ⚠️ Clé de cache passée en `_v2` : on demande maintenant
-    // `has_parent_contact` en plus. Sans ce changement de clé, une entrée mise
-    // en cache avant la mise à jour serait resservie sans ce champ, et le
-    // compteur annoncerait « 0 recevront un WhatsApp » alors que tous en ont un.
-    // Une entrée de cache doit changer de nom quand sa FORME change.
-    const st = await cachedQuery(`compose_students_v2_${scope}`, () => {
-      let sq = supabase.from("students").select("id, full_name, teacher_id, school_id, has_parent_contact");
+    // ⚠️ Clé de cache en `_v3` : la requête a changé de FORME deux fois
+    // (`has_parent_contact`, puis `access_code`). Sans changement de clé, une
+    // entrée mise en cache avant serait resservie sans les nouveaux champs, et
+    // l'écran mentirait sans lever d'erreur — « 0 recevront un WhatsApp » alors
+    // que tous en ont un. **Une entrée de cache change de nom quand sa forme
+    // change**, sinon le cache sert une vérité périmée.
+    const st = await cachedQuery(`compose_students_v3_${scope}`, () => {
+      let sq = supabase.from("students")
+        .select("id, full_name, teacher_id, school_id, has_parent_contact, access_code");
       if (isAdmin) { /* every school */ }
       else if (isSchoolAdmin) sq = sq.eq("school_id", teacher?.school_id || "");
       else sq = sq.eq("teacher_id", teacher?.id || ""); // plain teacher: own class only
@@ -605,6 +607,41 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       setCParentByStudent({});
     }
 
+    // ─── DE QUOI DISTINGUER DEUX HOMONYMES (2026-09-30) ──────────────────────
+    // Signalé par Maxime, capture à l'appui : la liste affichait huit « Achille »
+    // dont quatre noms en DOUBLE EXACT. Un nom seul ne dit pas à qui on écrit —
+    // et se tromper de famille, c'est envoyer à un parent un message sur
+    // l'enfant d'un autre.
+    //
+    // On charge donc la classe (via son enseignant) et, pour l'administrateur
+    // qui voit plusieurs écoles, le nom de l'école. Les deux lectures sont mises
+    // en cache comme le reste du composeur : sans réseau, la liste doit rester
+    // lisible, pas seulement présente.
+    const teacherIds = Array.from(new Set((st || []).map((s) => s.teacher_id).filter(Boolean)));
+    if (teacherIds.length) {
+      const cls = await cachedQuery(`compose_classes_${scope}`, () =>
+        supabase.from("teachers").select("id, full_name, class_label, level").in("id", teacherIds));
+      const map = {};
+      (cls || []).forEach((t) => { map[t.id] = t; });
+      setCClassByTeacher(map);
+    } else {
+      setCClassByTeacher({});
+    }
+
+    // L'école ne sert à distinguer que si l'expéditeur en voit plusieurs — donc
+    // l'administrateur seulement. Un directeur n'a qu'une école : l'afficher
+    // serait du bruit sur chaque ligne.
+    if (isAdmin) {
+      const schoolIds = Array.from(new Set((st || []).map((s) => s.school_id).filter(Boolean)));
+      if (schoolIds.length > 1) {
+        const sc = await cachedQuery(`compose_schools_${scope}`, () =>
+          supabase.from("schools").select("id, name").in("id", schoolIds));
+        const map = {};
+        (sc || []).forEach((x) => { map[x.id] = x.name; });
+        setCSchoolById(map);
+      } else setCSchoolById({});
+    } else setCSchoolById({});
+
     // Staff the sender may write to (directors/referents + admin only).
     if (isSchoolAdmin || isAdmin) {
       const stf = await cachedQuery(`compose_staff_${scope}`, () => {
@@ -616,6 +653,43 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     } else {
       setCStaff([]);
     }
+  };
+
+  // ─── COMMENT UN ÉLÈVE EST DÉSIGNÉ DANS LE COMPOSEUR ────────────────────────
+  // « Achille KAMGA » ne suffit pas : la base en contient plusieurs, dans des
+  // classes différentes, et parfois avec le MÊME nom exact. On ajoute donc ce
+  // qui distingue vraiment, et rien de plus :
+  //
+  //   · la classe (son libellé, sinon le niveau, sinon le nom de l'enseignant) ;
+  //   · l'école, pour l'administrateur seul — un directeur n'en a qu'une ;
+  //   · et, en DERNIER RECOURS, le code parent de l'élève, quand deux lignes
+  //     restent malgré tout identiques. C'est la seule chose unique par élève.
+  //
+  // Le code n'apparaît QUE dans ce cas : l'afficher partout encombrerait la
+  // liste, et il n'expose rien de nouveau (la direction voit tous les codes dans
+  // « Gérer l'école », l'enseignante ceux de sa classe).
+  const composeStudentLabels = () => {
+    const out = {};
+    const base = {};
+    const count = {};
+    for (const s of cStudents) {
+      const t = cClassByTeacher[s.teacher_id];
+      const klass = t && (t.class_label || (t.level ? String(t.level).toUpperCase() : null) || t.full_name);
+      const school = cSchoolById[s.school_id];
+      const parts = [s.full_name || "Élève"];
+      if (school) parts.push(school);
+      if (klass) parts.push(klass);
+      const label = parts.join(" · ");
+      base[s.id] = label;
+      count[label] = (count[label] || 0) + 1;
+    }
+    for (const s of cStudents) {
+      const label = base[s.id];
+      out[s.id] = count[label] > 1 && s.access_code
+        ? `${label} · code ${s.access_code}`
+        : label;
+    }
+    return out;
   };
 
   // Les destinataires retenus : plusieurs élèves pour l'audience parent, une
@@ -965,6 +1039,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // premier parent qui ouvre marquerait le message lu pour les onze autres, et
   // la liste « parents à relancer » deviendrait fausse. Douze familles = douze
   // lignes, même texte, reliées par `batch_id`.
+  const [cClassByTeacher, setCClassByTeacher] = useState({}); // id enseignant → { full_name, class_label, level }
+  const [cSchoolById, setCSchoolById] = useState({});          // id école → nom (administrateur seulement)
   const [cRecipients, setCRecipients] = useState([]);   // audience parent : plusieurs élèves
   const [cNotifyWa, setCNotifyWa] = useState(true);     // prévenir aussi par WhatsApp
   // Résumé en attente de confirmation, dès qu'il y a plus d'un destinataire.
@@ -2794,7 +2870,14 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                       + (t.role === "school_admin" ? " · directeur" : t.role === "referent" ? " · référent" : " · enseignant");
                     const isParentAudience = cAudience === "parent";
                     const source = isParentAudience ? cStudents : cStaff;
-                    const labelOf = isParentAudience ? ((s) => s.full_name || "") : staffLabel;
+                    // Nom + classe (+ école, + code parent en dernier recours) :
+                    // voir `composeStudentLabels`. La recherche porte sur ce
+                    // libellé complet, donc taper « CM1 A » filtre la classe
+                    // entière, et taper un code trouve l'élève directement.
+                    const studentLabels = isParentAudience ? composeStudentLabels() : null;
+                    const labelOf = isParentAudience
+                      ? ((s) => studentLabels[s.id] || s.full_name || "")
+                      : staffLabel;
 
                     const q = cQuery.trim().toLowerCase();
                     const shown = q ? source.filter((x) => labelOf(x).toLowerCase().includes(q)) : source;
@@ -2932,7 +3015,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                               <input type="checkbox" checked={picked.has(s.id)} onChange={() => toggle(s.id)}
                                 style={{ width: 17, height: 17, flex: "0 0 auto" }} />
                               <span style={{ fontSize: FONT.md, color: COLORS.ink, flex: 1, minWidth: 0 }}>
-                                {s.full_name}
+                                {/* Le nom en gras, ce qui le distingue en discret :
+                                    on lit d'abord l'élève, la classe ne sert qu'à
+                                    trancher entre homonymes. */}
+                                <strong style={{ fontWeight: 650 }}>{s.full_name}</strong>
+                                {labelOf(s) !== s.full_name && (
+                                  <span style={{ color: COLORS.ink3, fontWeight: 400 }}>
+                                    {labelOf(s).slice((s.full_name || "").length)}
+                                  </span>
+                                )}
                               </span>
                               {/* Pas de numéro = message dans l'application seulement.
                                   Dit ici, pas découvert après l'envoi. */}
