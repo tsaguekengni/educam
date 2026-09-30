@@ -126,15 +126,30 @@ const toneColor = (p) => (p == null ? "#9CA3AF" : p < 50 ? "#DC2626" : p < 70 ? 
 // endroit monte cet écran sans passer la propriété, le défaut ferme les
 // commandes au lieu de les ouvrir à tout le monde par distraction.
 //
-// ⚠️ ET SURTOUT — ceci est un GARDE-FOU D'INTERFACE, pas une sécurité.
-// Les lignes `students` arrivent quand même dans le navigateur : la sécurité
-// niveau ligne de Supabase filtre les LIGNES, jamais les COLONNES. Masquer la
-// colonne « Parent » empêche le directeur de la lire à l'écran ; cela
-// n'empêche pas de la lire dans les outils du navigateur. La vraie protection
-// des coordonnées viendra du déplacement de `parent_phone` / `parent_email`
-// vers une table réservée à l'administrateur — voir
-// `claude/EduCam_Console_Utilisateurs.md`. Ne pas confondre les deux, et ne
-// pas annoncer à l'école que c'est verrouillé avant ce déplacement.
+// ─── COORDONNÉES DES PARENTS : LE VERROU EST EN BASE, PAS ICI ────────────────
+// Masquer la colonne à l'écran ne protégeait rien : la sécurité niveau ligne de
+// Supabase filtre les LIGNES, jamais les COLONNES — la ligne élève arrivait donc
+// dans le navigateur avec le numéro dedans, lisible dans les outils de
+// développement. Par n'importe quel ENSEIGNANT de l'école, d'ailleurs, pas
+// seulement par la direction : la politique de lecture des élèves porte sur
+// l'école entière, sans condition de rôle.
+//
+// Le verrou réel est donc posé en base, avec les DROITS PAR COLONNE de
+// PostgreSQL : le rôle `authenticated` — toute session navigateur, Maxime
+// compris — n'a plus le droit de lire ni d'écrire `parent_phone` et
+// `parent_email`. Conséquences à connaître avant de toucher à ce fichier :
+//
+//   · les DEMANDER ferait échouer la requête ENTIÈRE (erreur 42501) ;
+//   · `has_parent_contact` (colonne calculée par Postgres) dit s'il y a un
+//     contact, jamais lequel — c'est ce que lit la liste ;
+//   · les VALEURS passent par `educam_student_contacts()` en lecture et
+//     `educam_set_student_contact()` en écriture, qui vérifient le rôle EN
+//     BASE. `asAdmin` ne fait plus que choisir l'affichage : même trafiqué
+//     dans le navigateur, il ne rend aucune coordonnée lisible ;
+//   · les fonctions Edge (WhatsApp) tournent avec la clé de service, un rôle
+//     DIFFÉRENT, qui garde ses droits — elles n'ont pas été touchées.
+//
+// Détail, ordre de déploiement et pièges : `claude/EduCam_Confidentialite_Coordonnees_Parents.md`.
 export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
   const [classes, setClasses] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -148,6 +163,9 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
   const [newName, setNewName] = useState("");
   const [newEmail, setNewEmail] = useState("");
   const [newPhone, setNewPhone] = useState("");
+  // { [student_id]: { parent_phone, parent_email } } — rempli seulement pour
+  // Maxime, et seulement en ligne. Vide pour la direction, toujours.
+  const [contacts, setContacts] = useState({});
   const [stuSaving, setStuSaving] = useState(false);
   const [stuQuery, setStuQuery] = useState(""); // recherche dans la liste d'élèves
   // School dashboard + director's observations.
@@ -227,12 +245,38 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
   const loadStudents = async (teacherId) => {
     // Mis en cache par CLASSE : c'est la liste que le directeur vient relire
     // quand il cherche le code parent d'un élève, coupure ou pas.
+    //
+    // ⚠️ `parent_phone` et `parent_email` NE SONT PLUS SÉLECTIONNÉS — et ce
+    // n'est pas un choix d'affichage. Le droit de lire ces deux colonnes a été
+    // retiré au rôle `authenticated` en base : les demander ferait échouer la
+    // requête ENTIÈRE (erreur 42501), donc la liste d'élèves serait vide.
+    // À la place, `has_parent_contact` : une colonne calculée par Postgres qui
+    // dit s'il y a un contact, jamais lequel. Voir
+    // `claude/EduCam_Confidentialite_Coordonnees_Parents.md`.
     const { data } = await cachedQueryMeta(`schooladmin_students_${teacherId}`, () =>
       supabase.from("students")
-        .select("id, full_name, access_code, parent_email, parent_phone, created_at")
+        .select("id, full_name, access_code, has_parent_contact, created_at")
         .eq("teacher_id", teacherId).order("full_name")
     );
     setStudents(data || []);
+    loadContacts(teacherId);
+  };
+
+  // Les VALEURS des coordonnées, pour Maxime seulement, par une fonction qui
+  // vérifie le rôle en base (`educam_student_contacts`). Un appelant non
+  // administrateur reçoit une liste vide — ce n'est pas l'écran qui décide.
+  //
+  // ⚠️ DÉLIBÉRÉMENT PAS MIS EN CACHE hors ligne, contrairement au reste de cet
+  // écran. Mettre des numéros de parents dans l'IndexedDB d'un portable de
+  // classe reviendrait à les ressortir par la porte qu'on vient de fermer.
+  // Sans réseau, même Maxime voit le témoin et pas la valeur — c'est voulu.
+  const loadContacts = async (teacherId) => {
+    if (!asAdmin || !online) { setContacts({}); return; }
+    const { data, error } = await supabase.rpc("educam_student_contacts", { p_teacher: teacherId });
+    if (error) { setContacts({}); return; }
+    const map = {};
+    (data || []).forEach((r) => { map[r.student_id] = r; });
+    setContacts(map);
   };
 
   // Insert a student with a unique parent code (retry on the rare code collision).
@@ -240,19 +284,41 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
     if (!selected || !newName.trim()) return;
     if (blockedOffline()) return;
     setStuSaving(true); setMsg(null);
+    // DEUX TEMPS, et c'est imposé par la base : le rôle `authenticated` n'a
+    // plus le droit d'écrire `parent_phone`/`parent_email` directement. On crée
+    // donc l'élève d'abord, puis on pose la coordonnée par la fonction
+    // `educam_set_student_contact`, qui vérifie le rôle en base.
     let ok = false;
+    let newId = null;
     for (let attempt = 0; attempt < 4 && !ok; attempt++) {
-      const { error } = await supabase.from("students").insert({
+      const { data, error } = await supabase.from("students").insert({
         school_id: school.id, teacher_id: selected.id,
         full_name: newName.trim(), access_code: randomCode(),
-        parent_email: newEmail.trim() || null,
-        parent_phone: newPhone.trim() || null,
-      });
-      if (!error) ok = true;
+      }).select("id").maybeSingle();
+      if (!error) { ok = true; newId = data?.id || null; }
       else if (error.code !== "23505") break; // not a uniqueness clash → stop retrying
     }
-    if (ok) { setNewName(""); setNewEmail(""); setNewPhone(""); await loadStudents(selected.id); }
-    else setMsg({ t: "Erreur lors de l'ajout de l'élève.", tone: "err" });
+
+    // Si la deuxième étape échoue, l'élève EXISTE mais sans coordonnée. On le
+    // dit franchement : le témoin affichera « contact manquant », donc la
+    // situation est visible et se répare en réenregistrant la coordonnée —
+    // bien mieux qu'un élève créé en silence avec un numéro perdu.
+    let contactOk = true;
+    const wantsContact = newEmail.trim() || newPhone.trim();
+    if (ok && newId && wantsContact) {
+      const { error: cErr } = await supabase.rpc("educam_set_student_contact", {
+        p_student: newId, p_phone: newPhone.trim() || null, p_email: newEmail.trim() || null,
+      });
+      if (cErr) contactOk = false;
+    }
+
+    if (ok) {
+      setNewName(""); setNewEmail(""); setNewPhone("");
+      await loadStudents(selected.id);
+      if (!contactOk) {
+        setMsg({ t: "Élève créé, mais la coordonnée du parent n'a pas pu être enregistrée. Réessayez depuis la console Utilisateurs.", tone: "err" });
+      }
+    } else setMsg({ t: "Erreur lors de l'ajout de l'élève.", tone: "err" });
     setStuSaving(false);
   };
 
@@ -725,13 +791,16 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
                           if (!q) return true;
                           // Chercher par coordonnée est réservé à Maxime : sinon taper
                           // un numéro et voir quel élève ressort rendrait le contact
-                          // lisible alors qu'il est masqué dans la colonne.
+                          // lisible alors qu'il est masqué dans la colonne. Et la
+                          // direction n'a de toute façon plus les valeurs : `contacts`
+                          // est vide pour elle.
                           const byName = (s.full_name || "").toLowerCase().includes(q)
                             || (s.access_code || "").toLowerCase().includes(q);
                           if (!asAdmin) return byName;
+                          const c = contacts[s.id] || {};
                           return byName
-                            || (s.parent_email || "").toLowerCase().includes(q)
-                            || (s.parent_phone || "").toLowerCase().includes(q);
+                            || (c.parent_email || "").toLowerCase().includes(q)
+                            || (c.parent_phone || "").toLowerCase().includes(q);
                         })
                         .map((s) => (
                           <tr key={s.id}>
@@ -739,13 +808,19 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
                             {/* Coordonnées du parent : valeurs pour Maxime, simple
                                 témoin pour la direction (décision Maxime, 2026-09-29 :
                                 l'école sait SI le contact existe, jamais lequel).
-                                ⚠️ Garde-fou d'interface seulement — voir l'entête. */}
+                                Les valeurs viennent de `contacts`, rempli par une
+                                fonction qui vérifie le rôle EN BASE — plus de la ligne
+                                élève, qui ne les porte plus. `has_parent_contact` est
+                                calculé par Postgres et ne révèle rien. */}
                             <td style={{ color: COLORS.ink3 }}>
-                              {asAdmin
-                                ? ([s.parent_email, s.parent_phone].filter(Boolean).join(" · ") || "—")
-                                : ((s.parent_phone || s.parent_email)
-                                    ? <span style={{ color: COLORS.g700, fontWeight: 650 }}>✓ contact enregistré</span>
-                                    : <span>contact manquant</span>)}
+                              {(() => {
+                                const c = contacts[s.id];
+                                if (asAdmin && c && (c.parent_email || c.parent_phone)) {
+                                  return [c.parent_email, c.parent_phone].filter(Boolean).join(" · ");
+                                }
+                                if (!s.has_parent_contact) return <span>contact manquant</span>;
+                                return <span style={{ color: COLORS.g700, fontWeight: 650 }}>✓ contact enregistré</span>;
+                              })()}
                             </td>
                             <td>
                               {/* Un <code> n'est pas interactif : c'est un vrai bouton. */}
