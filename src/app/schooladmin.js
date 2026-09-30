@@ -262,9 +262,13 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
     // À la place, `has_parent_contact` : une colonne calculée par Postgres qui
     // dit s'il y a un contact, jamais lequel. Voir
     // `claude/EduCam_Confidentialite_Coordonnees_Parents.md`.
-    const { data } = await cachedQueryMeta(`schooladmin_students_${teacherId}`, () =>
+    // ⚠️ Clé en `_v2` : la requête demande maintenant `matricule`. **Une entrée
+    // de cache change de NOM quand sa FORME change** — sinon une entrée d'avant
+    // serait resservie sans le nouveau champ, et la colonne resterait vide sans
+    // la moindre erreur. Règle payée comptant le 2026-09-30.
+    const { data } = await cachedQueryMeta(`schooladmin_students_v2_${teacherId}`, () =>
       supabase.from("students")
-        .select("id, full_name, access_code, has_parent_contact, created_at")
+        .select("id, full_name, matricule, access_code, has_parent_contact, created_at")
         .eq("teacher_id", teacherId).order("full_name")
     );
     setStudents(data || []);
@@ -400,8 +404,11 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
     // faire sortir toutes les coordonnées de la plateforme d'un seul clic, pour
     // n'importe qui ayant accès à cet écran. L'export ne porte plus que ce qu'il
     // doit porter : le nom de l'élève et son code parent.
+    // Le matricule est repris ici : c'est par lui que l'école retrouve l'élève
+    // sur ses propres listes, donc l'export se rapproche de son registre. Le
+    // code parent reste la seule chose secrète de la ligne.
     const lines = students
-      .map((s) => `${s.full_name} — ${s.access_code}`)
+      .map((s) => `${s.full_name}${s.matricule ? " (" + s.matricule + ")" : ""} — ${s.access_code}`)
       .join("\n");
     copyText(lines);
     setMsg({ t: "Codes copiés", tone: "ok" });
@@ -846,8 +853,15 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
                           // lisible alors qu'il est masqué dans la colonne. Et la
                           // direction n'a de toute façon plus les valeurs : `contacts`
                           // est vide pour elle.
+                          // Le matricule est cherchable par tout le monde : c'est
+                          // l'identifiant que l'école a déjà sur ses listes papier,
+                          // donc c'est souvent par lui qu'on arrive. Séparateurs
+                          // ignorés — l'école mêle tirets et tirets bas.
+                          const flat = (x) => (x || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+                          const qFlat = flat(q);
                           const byName = (s.full_name || "").toLowerCase().includes(q)
-                            || (s.access_code || "").toLowerCase().includes(q);
+                            || (s.access_code || "").toLowerCase().includes(q)
+                            || (qFlat !== "" && flat(s.matricule).includes(qFlat));
                           if (!asAdmin) return byName;
                           const c = contacts[s.id] || {};
                           return byName
@@ -856,7 +870,23 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
                         })
                         .map((s) => (
                           <tr key={s.id}>
-                            <td style={{ fontWeight: 650 }}>{s.full_name}</td>
+                            {/* Le matricule de l'école sous le nom. Il ne sert PAS
+                                de code d'accès (décision de Maxime, 2026-09-30 :
+                                les matricules se suivent, le code parent doit rester
+                                indevinable) — mais c'est l'identifiant que l'école
+                                emploie dans ses registres, et il tranche entre deux
+                                homonymes mieux que n'importe quoi. */}
+                            <td style={{ fontWeight: 650 }}>
+                              {s.full_name}
+                              {s.matricule && (
+                                <span style={{
+                                  display: "block", fontSize: FONT.sm, fontWeight: 400,
+                                  color: COLORS.ink3, fontFamily: "ui-monospace, monospace", marginTop: 2,
+                                }}>
+                                  {s.matricule}
+                                </span>
+                              )}
+                            </td>
                             {/* Coordonnées du parent : valeurs pour Maxime, simple
                                 témoin pour la direction (décision Maxime, 2026-09-29 :
                                 l'école sait SI le contact existe, jamais lequel).
