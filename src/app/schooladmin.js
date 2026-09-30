@@ -82,12 +82,21 @@ const isBreak = (sid) => sid === "pause" || sid === "etude";
 const breakType = (sid, cid) => BREAK_TYPES.find((b) => b.subject_id === sid && b.component_id === cid);
 const slotTypeValue = (s) => (isBreak(s.subject_id) ? `brk:${s.subject_id}:${s.component_id}` : `subj:${s.subject_id}`);
 
-function randomPasscode() {
-  const chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
-  let s = "";
-  for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
-  return s;
-}
+// ⚠️ LE « CODE PARENTS » DE CLASSE A ÉTÉ RETIRÉ (2026-09-29, décision de Maxime).
+//
+// Il restait de la conception d'origine, où un seul code servait toute une
+// classe. L'inscription d'un parent valide en réalité `students.access_code`,
+// le code INDIVIDUEL de l'enfant (voir `page.js` → `educam_find_student_by_code`).
+// Le code de classe n'était donc plus lu par personne — mais il s'affichait
+// encore ici, sous le libellé « code parents », juste au-dessus du texte qui
+// explique correctement le code par élève. Un directeur pouvait le distribuer à
+// toute une classe de bonne foi : aucun parent n'aurait pu s'inscrire, et la
+// plateforme aurait eu l'air cassée.
+//
+// La colonne `teachers.parent_passcode` est LAISSÉE EN BASE : la retirer est une
+// opération destructive qui demande un oui explicite, et elle ne coûte rien.
+// La fonction SQL `educam_find_teacher_by_passcode()` existe aussi encore et
+// n'est appelée par personne — même raisonnement.
 
 // Per-child parent code — longer (8 chars) since each is unique and secret.
 function randomCode(len = 8) {
@@ -100,13 +109,38 @@ function randomCode(len = 8) {
 const input = { padding: "8px 10px", border: "1.5px solid #D1D5DB", borderRadius: 8, fontSize: "var(--ec-fs-3)", outline: "none", boxSizing: "border-box", background: "white" };
 const toneColor = (p) => (p == null ? "#9CA3AF" : p < 50 ? "#DC2626" : p < 70 ? "#D97706" : "#16A34A");
 
-export default function SchoolAdmin({ school, onBack }) {
+// ─── QUI PEUT CRÉER (décision Maxime, 2026-09-29) ────────────────────────────
+// Cet écran est PARTAGÉ : le directeur/référent y arrive par « Ma classe /
+// Direction », et Maxime (super-administrateur) par « Écoles ». Pendant le
+// pilote, c'est Maxime qui crée les écoles, les enseignants et les élèves ;
+// l'école prend la main progressivement.
+//
+// D'où la propriété `asAdmin` :
+//   · asAdmin = true  → chemin « Écoles » de Maxime : tout est ouvert.
+//   · asAdmin = false → directeur et référent : ils VOIENT tout (élèves, codes
+//     parents, emploi du temps, tableau de bord) et gardent l'emploi du temps
+//     et les codes, mais ne peuvent plus AJOUTER ni RETIRER un élève, ni
+//     renommer la classe, ni lire les coordonnées d'un parent.
+//
+// ⚠️ La valeur par défaut est `false` — volontairement. Si un jour un nouvel
+// endroit monte cet écran sans passer la propriété, le défaut ferme les
+// commandes au lieu de les ouvrir à tout le monde par distraction.
+//
+// ⚠️ ET SURTOUT — ceci est un GARDE-FOU D'INTERFACE, pas une sécurité.
+// Les lignes `students` arrivent quand même dans le navigateur : la sécurité
+// niveau ligne de Supabase filtre les LIGNES, jamais les COLONNES. Masquer la
+// colonne « Parent » empêche le directeur de la lire à l'écran ; cela
+// n'empêche pas de la lire dans les outils du navigateur. La vraie protection
+// des coordonnées viendra du déplacement de `parent_phone` / `parent_email`
+// vers une table réservée à l'administrateur — voir
+// `claude/EduCam_Console_Utilisateurs.md`. Ne pas confondre les deux, et ne
+// pas annoncer à l'école que c'est verrouillé avant ce déplacement.
+export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
   const [classes, setClasses] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null);
   const [slots, setSlots] = useState([]);
   const [classLabel, setClassLabel] = useState("");
-  const [passcode, setPasscode] = useState("");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState(null); // { t, tone: "ok" | "err" } — plus de classification par chaîne
   // Students of the selected class + parent-code issuance.
@@ -164,7 +198,7 @@ export default function SchoolAdmin({ school, onBack }) {
     setLoading(true);
     const meta = await cachedQueryMeta(`schooladmin_classes_${school.id}`, () =>
       supabase.from("teachers")
-        .select("id, full_name, level, class_label, parent_passcode, role")
+        .select("id, full_name, level, class_label, role")
         .eq("school_id", school.id).order("full_name")
     );
     // Classes = actual teachers. Exclude the technician (admin) and the school's
@@ -180,7 +214,7 @@ export default function SchoolAdmin({ school, onBack }) {
   }));
 
   const openClass = async (t) => {
-    setSelected(t); setClassLabel(t.class_label || ""); setPasscode(t.parent_passcode || ""); setMsg(null);
+    setSelected(t); setClassLabel(t.class_label || ""); setMsg(null);
     setNewName(""); setNewEmail(""); setNewPhone(""); setStudents([]);
     const { data } = await cachedQueryMeta(`schooladmin_slots_${t.id}`, () =>
       supabase.from("timetable_slots").select("*")
@@ -243,8 +277,13 @@ export default function SchoolAdmin({ school, onBack }) {
 
   const copyText = (t) => { try { navigator.clipboard?.writeText(t); } catch (_) {} };
   const copyAllCodes = () => {
+    // L'e-mail du parent ne sort PLUS de cet export (décision Maxime, 2026-09-29).
+    // Il servait à savoir qui contacter ; c'était aussi le moyen le plus simple de
+    // faire sortir toutes les coordonnées de la plateforme d'un seul clic, pour
+    // n'importe qui ayant accès à cet écran. L'export ne porte plus que ce qu'il
+    // doit porter : le nom de l'élève et son code parent.
     const lines = students
-      .map((s) => `${s.full_name} — ${s.access_code}${s.parent_email ? " (" + s.parent_email + ")" : ""}`)
+      .map((s) => `${s.full_name} — ${s.access_code}`)
       .join("\n");
     copyText(lines);
     setMsg({ t: "Codes copiés", tone: "ok" });
@@ -296,7 +335,6 @@ export default function SchoolAdmin({ school, onBack }) {
     try {
       await supabase.from("teachers").update({
         class_label: classLabel.trim() || null,
-        parent_passcode: passcode.trim() || null,
       }).eq("id", selected.id);
 
       await supabase.from("timetable_slots").delete().eq("owner_teacher_id", selected.id);
@@ -578,7 +616,7 @@ export default function SchoolAdmin({ school, onBack }) {
                       key={t.id}
                       icon={(t.class_label || t.level || "?").slice(0, 3).toUpperCase()}
                       title={t.full_name || "Enseignant"}
-                      meta={`${t.class_label || t.level?.toUpperCase() || "Classe"}${t.parent_passcode ? ` · code parents : ${t.parent_passcode}` : " · pas de code parents"}`}
+                      meta={t.class_label || t.level?.toUpperCase() || "Classe"}
                       onClick={() => openClass(t)}
                     />
                   ))}
@@ -598,37 +636,25 @@ export default function SchoolAdmin({ school, onBack }) {
               </p>
             </div>
 
-            {/* Réglages de la classe */}
-            <Card className="ec-c4">
-              <div className="ec-cardhd"><h2 className="ec-cardtitle">Réglages</h2></div>
-              <Field
-                label="Nom de la classe"
-                value={classLabel}
-                onChange={(e) => setClassLabel(e.target.value)}
-                placeholder="Ex : CM1 A"
-              />
-              <div style={{ marginTop: 12 }}>
-                <label htmlFor="ec-passcode" style={{
-                  display: "block", fontSize: FONT.sm, fontWeight: 650, color: COLORS.ink2, marginBottom: 5,
-                }}>
-                  Code parents
-                </label>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input
-                    id="ec-passcode"
-                    className="ec-input"
-                    value={passcode}
-                    onChange={(e) => setPasscode(e.target.value.toUpperCase())}
-                    placeholder="Code"
-                    style={{ flex: 1 }}
-                  />
-                  <Button variant="ghost" onClick={() => setPasscode(randomPasscode())}>Générer</Button>
-                </div>
-                <p style={{ fontSize: FONT.sm, color: COLORS.ink3, marginTop: 7, lineHeight: 1.45 }}>
-                  Ce code permet aux parents de rattacher leur compte à cette classe.
-                </p>
-              </div>
-            </Card>
+            {/* Réglages de la classe — Maxime seulement (voir `asAdmin` en tête).
+                La carte entière disparaît côté direction : elle ne contenait plus
+                que le nom de la classe.
+                ⚠️ `classLabel` reste chargé par `openClass`, donc « Enregistrer »
+                réécrit la même valeur — l'emploi du temps s'enregistre normalement. */}
+            {asAdmin && (
+              <Card className="ec-c4">
+                <div className="ec-cardhd"><h2 className="ec-cardtitle">Réglages</h2></div>
+                <Field
+                  label="Nom de la classe"
+                  value={classLabel}
+                  onChange={(e) => setClassLabel(e.target.value)}
+                  placeholder="Ex : CM1 A"
+                />
+                {/* Le « Code parents » de classe vivait ici. Retiré le 2026-09-29 :
+                    chaque élève a son propre code, généré plus bas dans
+                    « Élèves & codes parents ». Voir la note en tête du fichier. */}
+              </Card>
+            )}
 
             {/* Élèves & codes parents */}
             <Card className="ec-c8" style={{ padding: 0, overflow: "hidden" }}>
@@ -644,15 +670,18 @@ export default function SchoolAdmin({ school, onBack }) {
                   parent pour qu'il suive uniquement son enfant.
                 </p>
 
-                <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-                  <input className="ec-input" value={newName} onChange={(e) => setNewName(e.target.value)}
-                    aria-label="Nom de l'élève" placeholder="Nom de l'élève" style={{ flex: "2 1 150px" }} />
-                  <input className="ec-input" value={newEmail} onChange={(e) => setNewEmail(e.target.value)}
-                    aria-label="E-mail du parent (optionnel)" placeholder="E-mail du parent (optionnel)" style={{ flex: "2 1 150px" }} />
-                  <input className="ec-input" type="tel" value={newPhone} onChange={(e) => setNewPhone(e.target.value)}
-                    aria-label="Téléphone WhatsApp du parent (optionnel)" placeholder="Tél. WhatsApp (+237…)" style={{ flex: "2 1 150px" }} />
-                  <Button onClick={addStudent} disabled={stuSaving || !newName.trim() || !online}>+ Ajouter</Button>
-                </div>
+                {/* Ajout d'un élève — Maxime seulement (voir `asAdmin` en tête). */}
+                {asAdmin && (
+                  <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+                    <input className="ec-input" value={newName} onChange={(e) => setNewName(e.target.value)}
+                      aria-label="Nom de l'élève" placeholder="Nom de l'élève" style={{ flex: "2 1 150px" }} />
+                    <input className="ec-input" value={newEmail} onChange={(e) => setNewEmail(e.target.value)}
+                      aria-label="E-mail du parent (optionnel)" placeholder="E-mail du parent (optionnel)" style={{ flex: "2 1 150px" }} />
+                    <input className="ec-input" type="tel" value={newPhone} onChange={(e) => setNewPhone(e.target.value)}
+                      aria-label="Téléphone WhatsApp du parent (optionnel)" placeholder="Tél. WhatsApp (+237…)" style={{ flex: "2 1 150px" }} />
+                    <Button onClick={addStudent} disabled={stuSaving || !newName.trim() || !online}>+ Ajouter</Button>
+                  </div>
+                )}
 
                 {students.length > 8 && (
                   <div style={{ marginBottom: 12 }}>
@@ -672,7 +701,9 @@ export default function SchoolAdmin({ school, onBack }) {
                     </EmptyState>
                   ) : (
                     <EmptyState icon="👥" title="Aucun élève enregistré">
-                      Ajoutez vos élèves ci-dessus ; leur code parent sera généré automatiquement.
+                      {asAdmin
+                        ? "Ajoutez vos élèves ci-dessus ; leur code parent sera généré automatiquement."
+                        : "Les élèves de cette classe sont enregistrés par l'administrateur EduCam. Leur code parent apparaîtra ici dès qu'ils seront inscrits."}
                     </EmptyState>
                   )}
                 </div>
@@ -692,15 +723,30 @@ export default function SchoolAdmin({ school, onBack }) {
                         .filter((s) => {
                           const q = stuQuery.trim().toLowerCase();
                           if (!q) return true;
-                          return (s.full_name || "").toLowerCase().includes(q)
-                            || (s.access_code || "").toLowerCase().includes(q)
+                          // Chercher par coordonnée est réservé à Maxime : sinon taper
+                          // un numéro et voir quel élève ressort rendrait le contact
+                          // lisible alors qu'il est masqué dans la colonne.
+                          const byName = (s.full_name || "").toLowerCase().includes(q)
+                            || (s.access_code || "").toLowerCase().includes(q);
+                          if (!asAdmin) return byName;
+                          return byName
                             || (s.parent_email || "").toLowerCase().includes(q)
                             || (s.parent_phone || "").toLowerCase().includes(q);
                         })
                         .map((s) => (
                           <tr key={s.id}>
                             <td style={{ fontWeight: 650 }}>{s.full_name}</td>
-                            <td style={{ color: COLORS.ink3 }}>{[s.parent_email, s.parent_phone].filter(Boolean).join(" · ") || "—"}</td>
+                            {/* Coordonnées du parent : valeurs pour Maxime, simple
+                                témoin pour la direction (décision Maxime, 2026-09-29 :
+                                l'école sait SI le contact existe, jamais lequel).
+                                ⚠️ Garde-fou d'interface seulement — voir l'entête. */}
+                            <td style={{ color: COLORS.ink3 }}>
+                              {asAdmin
+                                ? ([s.parent_email, s.parent_phone].filter(Boolean).join(" · ") || "—")
+                                : ((s.parent_phone || s.parent_email)
+                                    ? <span style={{ color: COLORS.g700, fontWeight: 650 }}>✓ contact enregistré</span>
+                                    : <span>contact manquant</span>)}
+                            </td>
                             <td>
                               {/* Un <code> n'est pas interactif : c'est un vrai bouton. */}
                               <button
@@ -720,10 +766,17 @@ export default function SchoolAdmin({ school, onBack }) {
                               <span style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                                 <IconButton label={`Régénérer le code de ${s.full_name}`}
                                   onClick={() => regenerateCode(s.id)} disabled={stuSaving || !online}>↻</IconButton>
-                                <IconButton label={`Retirer ${s.full_name} de la classe`}
-                                  onClick={() => setConfirm({ kind: "student", id: s.id, label: s.full_name })}>
-                                  <span style={{ color: COLORS.crit, fontWeight: 700 }}>✕</span>
-                                </IconButton>
+                                {/* Retirer un élève — Maxime seulement. Non demandé
+                                    explicitement, mais fermé par cohérence : une
+                                    direction qui ne peut pas inscrire un élève ne doit
+                                    pas pouvoir le désinscrire, l'effet étant plus grave.
+                                    À rouvrir d'un mot si Maxime le souhaite. */}
+                                {asAdmin && (
+                                  <IconButton label={`Retirer ${s.full_name} de la classe`}
+                                    onClick={() => setConfirm({ kind: "student", id: s.id, label: s.full_name })}>
+                                    <span style={{ color: COLORS.crit, fontWeight: 700 }}>✕</span>
+                                  </IconButton>
+                                )}
                               </span>
                             </td>
                           </tr>

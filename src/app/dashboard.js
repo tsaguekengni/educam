@@ -5498,7 +5498,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             onOpenTab={() => setScreen("schooladmin")}
           />
         )}
-        {screen === "schooladmin" && isSchoolAdmin && <SchoolAdmin school={schoolContext} onBack={goBack} />}
+        {/* Chemin DIRECTION (school_admin et referent) : `asAdmin` reste faux, donc
+            pas d'ajout ni de retrait d'élève, pas de renommage de classe, pas de
+            coordonnées parents lisibles. `isSchoolAdmin` n'inclut PAS le rôle admin
+            — Maxime passe par « Écoles » plus bas, où `asAdmin` vaut vrai. On passe
+            quand même `isAdmin` ici : si un jour un administrateur atterrit sur ce
+            chemin, il garde ses commandes au lieu de les perdre sans explication. */}
+        {screen === "schooladmin" && isSchoolAdmin && <SchoolAdmin school={schoolContext} onBack={goBack} asAdmin={isAdmin} />}
         {screen === "adminschools" && isAdmin && (
           adminSchool ? (
             <div>
@@ -5555,7 +5561,10 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                   </div>
                 );
               })() : (
-                <SchoolAdmin school={adminSchool} onBack={() => setAdminSchool(null)} />
+                // Chemin « Écoles » — réservé au super-administrateur par le `isAdmin`
+                // de l'écran parent. C'est d'ici que Maxime crée les élèves et lit les
+                // coordonnées parents pendant le pilote.
+                <SchoolAdmin school={adminSchool} onBack={() => setAdminSchool(null)} asAdmin={true} />
               )}
             </div>
           ) : (

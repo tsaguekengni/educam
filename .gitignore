@@ -74,3 +74,10 @@ Capture d*.png
 /claude/EduCam_Landing_Page.html
 # Fichier parasite vide
 /Vercel
+
+# Ajouts 2026-09-29 (lot 15) — allègement des images.
+# `scripts/optimise-media.mjs` copie ici chaque original AVANT de le réécrire
+# dans Supabase : le compartiment ne garde aucun historique, c'est le seul
+# filet de sécurité. ~25 Mo d'images — à garder jusqu'à validation à l'écran,
+# à ne JAMAIS committer (dépôt PUBLIC).
+/media-backup/
