@@ -167,13 +167,17 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
   const [newName, setNewName] = useState("");
   const [newEmail, setNewEmail] = useState("");
   const [newPhone, setNewPhone] = useState("");
-  // { [student_id]: { parent_phone, parent_email } } — rempli seulement pour
-  // Maxime, et seulement en ligne. Vide pour la direction, toujours.
+  // { [student_id]: { parent_phone, parent_phone_2, parent_email } } — rempli
+  // seulement pour Maxime, et seulement en ligne. Vide pour la direction,
+  // toujours. Deux numéros depuis le 2026-10-01 : le père et la mère.
   const [contacts, setContacts] = useState({});
   // Correction d'un contact : quel élève est en cours d'édition, et les valeurs
   // saisies. `null` = personne.
   const [editId, setEditId] = useState(null);
   const [editPhone, setEditPhone] = useState("");
+  // Deuxième numéro : chaque enfant a le père ET la mère (demande de Maxime,
+  // 2026-10-01). Les deux reçoivent les messages le concernant.
+  const [editPhone2, setEditPhone2] = useState("");
   const [editEmail, setEditEmail] = useState("");
   const [stuSaving, setStuSaving] = useState(false);
   const [stuQuery, setStuQuery] = useState(""); // recherche dans la liste d'élèves
@@ -353,24 +357,43 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
   // Laisser le champ VIDE efface la coordonnée — c'est volontaire et utile.
   const saveContact = async (id) => {
     if (blockedOffline()) return;
-    const raw = editPhone.trim();
-    let phone = null;
-    if (raw) {
-      phone = normalizePhone(raw);
-      if (!phone) {
-        setMsg({ t: "Numéro non reconnu. Attendu : 690 00 00 00, +237690000000, ou 00237…", tone: "err" });
-        return;
-      }
+
+    // Les DEUX numéros passent par la même vérification : un numéro mal formé
+    // du père est aussi silencieux qu'un numéro mal formé de la mère.
+    const check = (raw, quel) => {
+      const t = (raw || "").trim();
+      if (!t) return { ok: true, value: null };
+      const n = normalizePhone(t);
+      if (!n) return { ok: false, quel };
+      return { ok: true, value: n };
+    };
+    const c1 = check(editPhone, "premier");
+    const c2 = check(editPhone2, "deuxième");
+    const bad = !c1.ok ? c1 : (!c2.ok ? c2 : null);
+    if (bad) {
+      setMsg({ t: `Le ${bad.quel} numéro n'est pas reconnu. Attendu : 690 00 00 00, +237690000000, ou 00237…`, tone: "err" });
+      return;
     }
+
     setStuSaving(true);
+    // La BASE tient deux règles qu'on ne refait pas ici : un seul numéro fourni
+    // atterrit toujours dans le premier emplacement (sinon le témoin
+    // `has_parent_contact` deviendrait faux), et deux numéros identiques sont
+    // ramenés à un seul (sinon le parent recevrait deux fois le même message).
     const { error } = await supabase.rpc("educam_set_student_contact", {
-      p_student: id, p_phone: phone, p_email: editEmail.trim() || null,
+      p_student: id, p_phone: c1.value, p_phone2: c2.value, p_email: editEmail.trim() || null,
     });
     if (error) {
       setMsg({ t: "La coordonnée n'a pas pu être enregistrée.", tone: "err" });
     } else {
       setEditId(null);
-      setMsg({ t: phone ? `Coordonnée enregistrée : ${formatPhone(phone)}` : "Coordonnée effacée.", tone: "ok" });
+      const n = [c1.value, c2.value].filter(Boolean).length;
+      setMsg({
+        t: n === 0 ? "Coordonnées effacées."
+          : n === 1 ? `Coordonnée enregistrée : ${formatPhone(c1.value || c2.value)}`
+            : "Deux numéros enregistrés — les deux parents recevront les messages.",
+        tone: "ok",
+      });
       // On recharge la LISTE aussi : `has_parent_contact` est calculé en base,
       // donc le témoin de la direction ne bouge qu'après relecture.
       await loadStudents(selected.id);
@@ -864,9 +887,13 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
                             || (qFlat !== "" && flat(s.matricule).includes(qFlat));
                           if (!asAdmin) return byName;
                           const c = contacts[s.id] || {};
+                          // Les DEUX numéros sont cherchables : retrouver un élève
+                          // à partir du numéro de sa mère doit marcher aussi bien
+                          // qu'à partir de celui de son père.
                           return byName
                             || (c.parent_email || "").toLowerCase().includes(q)
-                            || (c.parent_phone || "").toLowerCase().includes(q);
+                            || (c.parent_phone || "").toLowerCase().includes(q)
+                            || (c.parent_phone_2 || "").toLowerCase().includes(q);
                         })
                         .map((s) => (
                           <tr key={s.id}>
@@ -908,10 +935,16 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
                                 if (asAdmin && editId === s.id) {
                                   return (
                                     <span style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                      {/* DEUX numéros : le père et la mère. Les deux
+                                          recevront les messages concernant l'enfant. */}
                                       <input className="ec-input" type="tel" value={editPhone}
                                         onChange={(e) => setEditPhone(e.target.value)}
-                                        aria-label={`Téléphone du parent de ${s.full_name}`}
-                                        placeholder="Tél. WhatsApp (+237…)" style={{ flex: "1 1 130px", minWidth: 120 }} />
+                                        aria-label={`Premier téléphone du parent de ${s.full_name}`}
+                                        placeholder="1er tél. WhatsApp (+237…)" style={{ flex: "1 1 130px", minWidth: 120 }} />
+                                      <input className="ec-input" type="tel" value={editPhone2}
+                                        onChange={(e) => setEditPhone2(e.target.value)}
+                                        aria-label={`Deuxième téléphone du parent de ${s.full_name}`}
+                                        placeholder="2e tél. (second parent)" style={{ flex: "1 1 130px", minWidth: 120 }} />
                                       <input className="ec-input" value={editEmail}
                                         onChange={(e) => setEditEmail(e.target.value)}
                                         aria-label={`E-mail du parent de ${s.full_name}`}
@@ -924,17 +957,29 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
                                 }
 
                                 if (asAdmin) {
-                                  const has = c && (c.parent_email || c.parent_phone);
+                                  const phones = c ? [c.parent_phone, c.parent_phone_2].filter(Boolean) : [];
+                                  const has = c && (c.parent_email || phones.length > 0);
+                                  // Un numéro non envoyable ne produit AUCUNE erreur : Meta
+                                  // le refuse en silence. On signale dès que l'UN des deux
+                                  // est douteux — sinon le parent concerné ne recevrait
+                                  // jamais rien et personne ne saurait pourquoi.
+                                  const douteux = phones.some((p) => !isSendablePhone(p));
                                   return (
                                     <span style={{ display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                                       <span>
                                         {has
-                                          ? [c.parent_email, formatPhone(c.parent_phone) || c.parent_phone].filter(Boolean).join(" · ")
+                                          ? [c.parent_email, ...phones.map((p) => formatPhone(p) || p)].filter(Boolean).join(" · ")
                                           : (s.has_parent_contact ? "✓ contact enregistré" : "contact manquant")}
                                       </span>
-                                      {/* Badge « à vérifier » : un numéro non envoyable ne
-                                          produit AUCUNE erreur, Meta le refuse en silence. */}
-                                      {has && c.parent_phone && !isSendablePhone(c.parent_phone) && (
+                                      {/* Deux numéros = les deux parents seront prévenus.
+                                          Dit explicitement, pour que l'absence du second se
+                                          remarque autant que sa présence. */}
+                                      {phones.length === 2 && (
+                                        <span style={{ color: COLORS.g700, fontWeight: 650, fontSize: FONT.sm }}>
+                                          2 parents
+                                        </span>
+                                      )}
+                                      {douteux && (
                                         <span style={{ color: COLORS.crit, fontWeight: 700, fontSize: FONT.sm }}>
                                           téléphone à vérifier
                                         </span>
@@ -943,6 +988,7 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
                                         onClick={() => {
                                           setEditId(s.id);
                                           setEditPhone((c && c.parent_phone) || "");
+                                          setEditPhone2((c && c.parent_phone_2) || "");
                                           setEditEmail((c && c.parent_email) || "");
                                           setMsg(null);
                                         }}>✎</IconButton>

@@ -140,18 +140,29 @@ drop policy if exists "wa notif read scoped" on public.whatsapp_notifications;
 
 -- ════════════════════════════════════════════════════════════════════════════
 -- §3 VÉRIFICATION — à lancer après l'étape 2.
--- Résultat attendu :  0  |  1  |  2  |  1
 --
--- ⚠️ `droits_restants_navigateur` doit valoir 0 et RESTER à 0. Un
+-- Résultat attendu :  0  |  1  |  2  |  1  |  (vide)
+--
+-- ⚠️ `numero_encore_lisible` doit valoir 0 et RESTER à 0. Un
 -- `grant all on table students to authenticated` — rejoué par un script de
--- configuration ou par distraction — effacerait les retraits colonne par
--- colonne et rouvrirait la fuite EN SILENCE. C'est le contrôle qui le détecte.
+-- configuration Supabase ou par distraction — rendrait le droit au niveau TABLE
+-- et rouvrirait la fuite EN SILENCE.
+--
+-- ⚠️ `colonnes_oubliees` doit rester VIDE. Si une colonne y apparaît, c'est
+-- qu'elle a été ajoutée à `students` sans être ajoutée au `grant select` du
+-- §2.1 : l'application ne peut plus lire la table du tout.
 -- ════════════════════════════════════════════════════════════════════════════
+-- ⚠️ 2026-10-01 : `parent_phone_2` rejoint la liste des colonnes PROTÉGÉES
+-- (deuxième parent). Toute nouvelle coordonnée ajoutée à `students` doit être
+-- inscrite dans LES DEUX listes ci-dessous : celle des colonnes qui doivent
+-- rester illisibles, et celle des colonnes exclues du contrôle « oubliées ».
+-- Oublier la première laisserait une fuite ; oublier la seconde ferait crier le
+-- contrôle à tort, et un contrôle qui crie pour rien finit par être ignoré.
 select
   (select count(*) from information_schema.column_privileges
      where table_schema='public' and table_name='students'
-       and grantee in ('authenticated','anon')
-       and column_name in ('parent_phone','parent_email'))            as droits_restants_navigateur,
+       and grantee in ('authenticated','anon') and privilege_type='SELECT'
+       and column_name in ('parent_phone','parent_phone_2','parent_email')) as numero_encore_lisible,
   (select count(*) from information_schema.columns
      where table_schema='public' and table_name='students'
        and column_name='has_parent_contact')                          as temoin_cree,
@@ -159,4 +170,12 @@ select
      where n.nspname='public'
        and p.proname in ('educam_student_contacts','educam_set_student_contact')) as fonctions_creees,
   (select count(*) from pg_policies
-     where schemaname='public' and tablename='whatsapp_notifications') as politiques_journal;
+     where schemaname='public' and tablename='whatsapp_notifications') as politiques_journal,
+  (select coalesce(string_agg(c.column_name, ', '), '') from information_schema.columns c
+     where c.table_schema='public' and c.table_name='students'
+       and c.column_name not in ('parent_phone','parent_phone_2','parent_email')
+       and not exists (
+         select 1 from information_schema.column_privileges p
+         where p.table_schema='public' and p.table_name='students'
+           and p.grantee='authenticated' and p.privilege_type='SELECT'
+           and p.column_name=c.column_name))                          as colonnes_oubliees;
