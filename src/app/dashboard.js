@@ -713,43 +713,40 @@ function RetardNotice({ retard, mois, vendrediLibre, onAjuster }) {
 /**
  * Recalcule les heures d'une journée. Une seule passe, de haut en bas.
  * Rend, pour chaque ligne : son début, sa fin, et l'écart constaté avant une
- * ancre (`libre` = minutes creuses, `depasse` = minutes de trop).
+ * ancre (`libre` = minutes creuses avant une heure fixee par l'ecole).
  */
 function edtRecalcule(lignes) {
   const finJour = edtMin(EDT_FIN);
   let curseur = edtMin(EDT_DEBUT);
-  let dehors = false;
-  let dejaDehors = false;        // la banniere « hors journee » ne s'affiche qu'UNE fois
-  return lignes.map((l) => {
+  const out = [];
+  for (const l of lignes) {
     const t = edtTypeByKey(l.kind);
-    let libre = 0, depasse = 0;
-    if (t?.ancre && l.ancreDebut != null && !dehors) {
-      if (curseur < l.ancreDebut) { libre = l.ancreDebut - curseur; curseur = l.ancreDebut; }
-      else if (curseur > l.ancreDebut) { depasse = curseur - l.ancreDebut; }
+    let libre = 0;
+    if (t?.ancre && l.ancreDebut != null && curseur < l.ancreDebut) {
+      libre = l.ancreDebut - curseur;
+      curseur = l.ancreDebut;
     }
+    /* 🔴 LA JOURNÉE S'ARRÊTE À 14:30 — ON NE MONTRE RIEN APRÈS.
+     *
+     * Décision de Maxime, 2026-10-01, après deux captures d'écran. D'abord
+     * l'éditeur inventait des heures jusqu'à 23:10 ; puis il affichait ces
+     * lignes sous l'étiquette « hors journée ». Les deux versions encombrent
+     * l'écran d'une journée qui n'existe pas. Un créneau qui ne tient pas
+     * dans la journée n'est tout simplement PAS une ligne de l'emploi du
+     * temps : il disparaît de l'écran. Si elle veut un créneau de plus, elle
+     * l'ajoute elle-même — et le bouton ne le permet que s'il reste du temps.
+     *
+     * ⚠️ Conséquence à connaître : une journée déjà trop chargée en base
+     * (données de démonstration, ancien modèle) perd ses créneaux excédentaires
+     * À L'ENREGISTREMENT, puisque l'enregistrement réécrit la journée à partir
+     * de ce qui est affiché. C'est voulu — mais c'est une suppression, et elle
+     * ne doit surprendre personne. */
+    if (curseur + l.minutes > finJour) break;
     const debut = curseur;
     curseur += l.minutes;
-    /* ⚠️ LA JOURNÉE S'ARRÊTE À 14:30, L'AFFICHAGE AUSSI.
-     *
-     * Signalé par Maxime le 2026-10-01, capture à l'appui : en allongeant des
-     * créneaux, l'écran continuait d'inventer des heures — 19:55, 22:55,
-     * 23:10 — et annonçait « dépassement de 775 min sur Récréation ». Deux
-     * absurdités d'un coup : des heures auxquelles aucune école ne tourne, et
-     * un reproche que l'enseignante ne peut pas suivre.
-     *
-     * Une ligne qui ne tient plus dans la journée ne reçoit donc PLUS d'heure
-     * du tout : elle est marquée `dehors`, et l'écran le dit en une phrase.
-     * On n'empêche rien — elle peut toujours enregistrer, et la règle « on
-     * suggère, on ne refuse jamais » tient — mais on cesse de lui raconter
-     * une journée qui n'existe pas. Les ancres passées ce point ne produisent
-     * plus de « dépassement » : une fois hors journée, le chiffre n'a plus
-     * de sens. */
-    const horsJournee = dehors || debut >= finJour;
-    const premierDehors = horsJournee && !dejaDehors;
-    if (horsJournee) dejaDehors = true;
-    if (curseur > finJour) dehors = true;
-    return { ...l, debut, fin: curseur, libre, depasse, horsJournee, premierDehors };
-  });
+    out.push({ ...l, debut, fin: curseur, libre });
+  }
+  return out;
 }
 
 function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack, retard, moisCourant }) {
@@ -780,7 +777,6 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
   const calc = edtRecalcule(lignes);
   const finJournee = calc.length ? calc[calc.length - 1].fin : edtMin(EDT_DEBUT);
   const resteFinJournee = edtMin(EDT_FIN) - finJournee;
-  const depassements = calc.filter((l) => l.depasse > 0);
 
   // Toute modification passe par ici : c'est le seul endroit qui mémorise
   // l'état précédent, donc le seul qui rend « annuler » fiable.
@@ -958,29 +954,12 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
           const matiere = subjects.find((s) => s.id === l.subject_id);
           return (
             <Fragment key={l.uid}>
-              {l.premierDehors && (
-                <div style={{
-                  padding: "9px 18px", background: COLORS.critBg,
-                  borderTop: `1px solid ${COLORS.critBrd}`,
-                  fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.crit,
-                }}>
-                  Ce qui suit ne tient plus dans la journée (fin à {EDT_FIN}) — raccourcissez ou retirez un créneau.
-                </div>
-              )}
-              {l.libre > 0 && !l.horsJournee && (
+              {l.libre > 0 && (
                 <div style={{
                   padding: "7px 18px", background: COLORS.warnBg,
                   fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.warn,
                 }}>
                   {l.libre} min libres avant {t?.nom || "ce créneau"}
-                </div>
-              )}
-              {l.depasse > 0 && !l.horsJournee && (
-                <div style={{
-                  padding: "7px 18px", background: COLORS.critBg,
-                  fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.crit,
-                }}>
-                  Dépassement de {l.depasse} min sur {t?.nom || "ce créneau"} — raccourcissez un créneau au-dessus.
                 </div>
               )}
               <div style={{
@@ -990,11 +969,8 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
                 borderTop: `1px solid ${COLORS.divider}`,
                 background: t?.ancre ? COLORS.panel : COLORS.card,
               }}>
-                <div style={{
-                  fontSize: "var(--ec-fs-3)", fontWeight: 700,
-                  color: l.horsJournee ? COLORS.ink3 : COLORS.ink,
-                }}>
-                  {l.horsJournee ? "hors journée" : edtHhmm(l.debut)}
+                <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 700, color: COLORS.ink }}>
+                  {edtHhmm(l.debut)}
                 </div>
 
                 <select
@@ -1003,7 +979,12 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
                   value={l.minutes}
                   onChange={(e) => changeChamp(l.uid, "minutes", Number(e.target.value))}
                 >
-                  {EDT_DUREES.map((d) => <option key={d} value={d}>{d} min</option>)}
+                  {/* Seules les durées qui TIENNENT encore sont proposées : on ne
+                      peut donc pas fabriquer un créneau qui déborde. La durée
+                      actuelle reste dans la liste même si elle ne tient plus,
+                      sinon le menu afficherait une valeur absente de ses options. */}
+                  {EDT_DUREES.filter((d) => d <= (edtMin(EDT_FIN) - l.debut) || d === l.minutes)
+                    .map((d) => <option key={d} value={d}>{d} min</option>)}
                 </select>
 
                 <select
@@ -1073,9 +1054,7 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
           <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 700, color: resteFinJournee < 0 ? COLORS.crit : COLORS.ink2 }}>
             {resteFinJournee > 0
               ? `Fin à ${edtHhmm(finJournee)} — ${resteFinJournee} min libres avant ${EDT_FIN}`
-              : resteFinJournee === 0
-                ? `La journée se termine juste à ${EDT_FIN}`
-                : `La journée dépasse ${EDT_FIN} de ${-resteFinJournee} min — raccourcissez un créneau`}
+              : `La journée est complète : elle se termine à ${EDT_FIN}`}
           </div>
           <button
             type="button"
@@ -1090,10 +1069,8 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
 
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, marginTop: 16, flexWrap: "wrap" }}>
         <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3, maxWidth: 560 }}>
-          {depassements.length > 0
-            ? "Des créneaux dépassent une heure fixée par l'école. Vous pouvez enregistrer quand même."
-            : <>Gardez-vous ce {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()} pour cette semaine,
-               ou devient-il votre {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()} habituel ?</>}
+          Gardez-vous ce {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()} pour cette semaine,
+          ou devient-il votre {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()} habituel ?
         </div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <button
