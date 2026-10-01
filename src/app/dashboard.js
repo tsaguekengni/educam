@@ -287,6 +287,35 @@ const PROJ_MAX_W = 1760;
 // un écran de 1080 px. 1400 px → 787 px de haut, ça tient.
 const PROJ_VIDEO_MAX_W = 1400;
 
+/* ──────────────────────────────────────────────────────────────────────────
+ * LE ZOOM DE LA PROJECTION — demande de Maxime, 2026-10-01.
+ *
+ * Les facteurs PROJ_BODY_X / PROJ_COPY_X ci-dessus sont un pari fait à
+ * distance, sur une salle qu'on n'a jamais vue. Le zoom rend la main à
+ * l'enseignante : elle ajuste devant sa classe, avec SON projecteur, et la
+ * valeur est retenue sur l'appareil.
+ *
+ * ⚠️ LE ZOOM S'APPLIQUE APRÈS LES PLAFONDS, jamais avant. Si on le plaçait
+ * avant, un appui sur « + » ne ferait RIEN dès que le plafond est atteint —
+ * un bouton qui ne répond pas, et l'enseignante conclut que c'est cassé. Le
+ * plafond borne la taille PAR DÉFAUT ; le zoom est la décision de l'humain
+ * qui voit l'écran, et il passe devant.
+ * ────────────────────────────────────────────────────────────────────────── */
+const PROJ_ZOOM_MIN = 0.7;
+const PROJ_ZOOM_MAX = 2.0;
+const PROJ_ZOOM_STEP = 0.1;
+const PROJ_ZOOM_KEY = "educam_proj_zoom";
+// Arrondi au centième : sans lui, additionner 0,1 en virgule flottante finit
+// par afficher « 110.00000000000001 % ».
+// `Number.isFinite` plutôt que `|| 1` : avec `|| 1`, une valeur 0 — venue d'un
+// stockage local abîmé — serait devenue 100 % au lieu d'être ramenée au
+// plancher. Faux sans bruit, donc à éviter même quand c'est sans gravité.
+const clampZoom = (z) => {
+  const n = Number(z);
+  const v = Number.isFinite(n) ? n : 1;
+  return Math.round(Math.min(PROJ_ZOOM_MAX, Math.max(PROJ_ZOOM_MIN, v)) * 100) / 100;
+};
+
 /**
  * A lesson video, played from the copy stored on this device whenever there is
  * one.
@@ -1119,7 +1148,7 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
  * le piège React payé quatre fois sur ce projet.
  * ══════════════════════════════════════════════════════════════════════════ */
 
-function AdminChat({ moiId, online, pushToast }) {
+function AdminChat({ moiId, online, pushToast, usurpation }) {
   const [ouvert, setOuvert] = useState(false);
   const [fil, setFil] = useState([]);
   const [texte, setTexte] = useState("");
@@ -1155,6 +1184,10 @@ function AdminChat({ moiId, online, pushToast }) {
   const envoyer = async () => {
     const corps = texte.trim();
     if (!corps || envoi) return;
+    if (usurpation) {
+      pushToast("Vous agissez en tant qu'une autre personne : l'envoi est désactivé.", "error");
+      return;
+    }
     if (!online) { pushToast("Pas de réseau. Réessayez une fois connectée.", "error"); return; }
     if (!adminId) { pushToast("Destinataire introuvable. Réessayez dans un instant.", "error"); return; }
     setEnvoi(true);
@@ -1179,8 +1212,17 @@ function AdminChat({ moiId, online, pushToast }) {
       // La notification WhatsApp est un PLUS, jamais une dépendance : le
       // message est déjà parti. On n'échoue pas si elle échoue.
       notifyDirectMessage({ messageId: data.id }).catch(() => {});
-    } catch (_) {
-      pushToast("Impossible d'envoyer. Rien n'est perdu, réessayez.", "error");
+    } catch (e) {
+      /* ⚠️ Distinguer un REFUS d'un incident. Un refus de la politique (42501)
+         ne se répare pas en réessayant : dire « réessayez » envoie la personne
+         appuyer dix fois sur un bouton qui ne marchera jamais. C'est ce qui est
+         arrivé le 2026-10-01 pendant un essai en « Agir en tant que ». */
+      const refus = e?.code === "42501" || /row-level security|policy/i.test(String(e?.message || ""));
+      pushToast(
+        refus
+          ? "Envoi refusé : ce compte n'a pas le droit d'écrire ici."
+          : "Impossible d'envoyer. Rien n'est perdu, réessayez.",
+        "error");
     }
     setEnvoi(false);
   };
@@ -1263,6 +1305,17 @@ function AdminChat({ moiId, online, pushToast }) {
             })}
           </div>
 
+          {usurpation && (
+            <div style={{
+              padding: "10px 14px", background: COLORS.warnBg,
+              borderTop: `1px solid ${COLORS.border}`,
+              fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.warn,
+            }}>
+              Vous agissez en tant qu'une autre personne. Vous pouvez lire l'échange,
+              pas écrire à sa place.
+            </div>
+          )}
+
           <div style={{ padding: 12, borderTop: `1px solid ${COLORS.divider}`, display: "flex", gap: 8, alignItems: "flex-end" }}>
             <label htmlFor="ec-adminchat" className="ec-sr">Votre message</label>
             <textarea
@@ -1270,7 +1323,8 @@ function AdminChat({ moiId, online, pushToast }) {
               value={texte}
               onChange={(e) => setTexte(e.target.value)}
               rows={2}
-              placeholder="Votre message…"
+              disabled={usurpation}
+              placeholder={usurpation ? "Envoi désactivé" : "Votre message…"}
               style={{
                 flexGrow: 1, resize: "none", minHeight: 44, padding: "10px 12px",
                 fontFamily: "inherit", fontSize: "var(--ec-fs-3)", color: COLORS.ink,
@@ -1279,7 +1333,7 @@ function AdminChat({ moiId, online, pushToast }) {
             />
             <button
               type="button" className="ec-btn" onClick={envoyer}
-              disabled={envoi || !texte.trim()}
+              disabled={envoi || usurpation || !texte.trim()}
               style={{ minHeight: 44 }}
             >
               {envoi ? "…" : "Envoyer"}
@@ -1938,6 +1992,23 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [lessonTaught, setLessonTaught] = useState(false);
   const [taughtSaving, setTaughtSaving] = useState(false);
   const [projectorMode, setProjectorMode] = useState(false);
+  // ⚠️ LE ZOOM VIT ICI, ET PAS DANS `ProjectorView`. Cette fonction n'utilise
+  // AUCUN hook, volontairement : c'est ce qui permet de l'APPELER
+  // (`{ProjectorView()}`) au lieu de la monter en `<ProjectorView/>`. Un
+  // `useState` à l'intérieur ferait d'elle un composant remonté à chaque
+  // rendu — le piège React déjà payé QUATRE fois sur ce projet. Ne pas
+  // déplacer cette ligne vers le bas.
+  const [projZoom, setProjZoom] = useState(1);
+  // Relu depuis l'appareil APRÈS le premier rendu. Lire le stockage local dans
+  // la valeur initiale de `useState` casserait le rendu côté serveur de Next,
+  // et le stockage peut lever une exception en navigation privée — d'où le
+  // try/catch, et une valeur par défaut qui marche sans lui.
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(PROJ_ZOOM_KEY);
+      if (saved) setProjZoom(clampZoom(parseFloat(saved)));
+    } catch (_) {}
+  }, []);
   const projectorScrollRef = useRef(null); // the scrollable projector panel (for pointer/keyboard scrolling)
   // Presenter mode: the lesson runs in a SECOND window (on the projector) while
   // the teacher keeps working on the laptop. `presenting` = this is the laptop
@@ -5855,6 +5926,24 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
 
   // Send a command to the projector window.
   const projectorPost = (msg) => { try { projectorChanRef.current?.postMessage(msg); } catch (_) {} };
+  // Changer le zoom. Trois choses à la fois, et les trois comptent :
+  //   1. l'état local, pour que l'écran et le pourcentage affiché changent ;
+  //   2. le stockage de l'appareil, pour ne pas le refaire à chaque leçon ;
+  //   3. la fenêtre du projecteur, quand la leçon tourne sur un SECOND écran.
+  // Sans le point 3, l'enseignante appuie sur « + » sur son portable et rien
+  // ne bouge sur le mur : la fenêtre du projecteur est une AUTRE fenêtre, avec
+  // son propre état React. On diffuse la valeur ABSOLUE et non l'écart, pour
+  // que les deux fenêtres ne puissent jamais se désynchroniser.
+  const applyZoom = (next) => {
+    const z = clampZoom(next);
+    setProjZoom(z);
+    try { window.localStorage.setItem(PROJ_ZOOM_KEY, String(z)); } catch (_) {}
+    if (presenting && !isPresentWindow) projectorPost({ cmd: "zoom", value: z });
+    return z;
+  };
+  const bumpZoom = (dir) => applyZoom(projZoom + dir * PROJ_ZOOM_STEP);
+  const resetZoom = () => applyZoom(1);
+
   const stopPresenter = () => {
     projectorPost({ cmd: "exit" });
     try { presenterWinRef.current?.close(); } catch (_) {}
@@ -5921,6 +6010,12 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         case " ": e.preventDefault(); doScroll(e.shiftKey ? -1 : 1); break;
         case "Home": e.preventDefault(); doTop(); break;
         case "End": e.preventDefault(); doBottom(); break;
+        // Zoom au clavier. « = » et « _ » sont les mêmes touches que « + » et
+        // « - » sans Majuscule : sans elles, le zoom ne marcherait qu'avec
+        // Majuscule enfoncée sur la plupart des claviers.
+        case "+": case "=": e.preventDefault(); bumpZoom(1); break;
+        case "-": case "_": e.preventDefault(); bumpZoom(-1); break;
+        case "0": e.preventDefault(); resetZoom(); break;
         default: break;
       }
     };
@@ -5931,7 +6026,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       window.removeEventListener("keydown", onKey);
       document.removeEventListener("fullscreenchange", onFsChange);
     };
-  }, [projectorMode, presenting, isPresentWindow]);
+    // ⚠️ `projZoom` DOIT figurer ici. `bumpZoom` calcule à partir de la valeur
+    // du zoom capturée au moment où cet effet s'est abonné : sans cette
+    // dépendance, la touche « + » partirait éternellement de la valeur
+    // initiale — 100 % → 110 %, puis 110 % à chaque appui suivant. Les boutons
+    // à la souris auraient marché, le clavier non : le genre de défaut qu'on
+    // ne voit qu'en appuyant deux fois.
+    // (Sans danger pour la zone morte : `projZoom` est déclaré tout en haut du
+    // composant, bien avant cet effet.)
+  }, [projectorMode, presenting, isPresentWindow, projZoom]);
 
   // BroadcastChannel between the laptop and the projector window. The projector
   // window applies the remote scroll/exit commands to its own panel.
@@ -5945,6 +6048,12 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       if (m.cmd === "scroll" && el) el.scrollBy({ top: Math.round((el.clientHeight || window.innerHeight) * PROJECTOR_SCROLL_FRACTION) * m.factor, behavior: "auto" });
       else if (m.cmd === "top" && el) el.scrollTo({ top: 0, behavior: "smooth" });
       else if (m.cmd === "bottom" && el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+      else if (m.cmd === "zoom" && typeof m.value === "number") {
+        // On NE rediffuse pas : cette fenêtre reçoit, elle ne commande pas.
+        const z = clampZoom(m.value);
+        setProjZoom(z);
+        try { window.localStorage.setItem(PROJ_ZOOM_KEY, String(z)); } catch (_) {}
+      }
       else if (m.cmd === "exit") { try { window.close(); } catch (_) {} }
     };
     ch.addEventListener("message", onMsg);
@@ -5980,10 +6089,25 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     // `baseFontVw` garde son nom : titres, sous-titres, légendes et la peau
     // « projecteur » de LessonVideo s'y accrochent déjà et grossissent donc
     // dans la même proportion que le corps du texte.
-    const baseFontVw = Math.min(fitVw * PROJ_BODY_X, PROJ_BODY_MAX_VW);
-    const copyFontVw = Math.min(fitVw * 1.15 * PROJ_COPY_X, PROJ_COPY_MAX_VW);
-    const basePx = `max(${PROJ_BODY_MIN_PX}px, ${baseFontVw}vw)`;
-    const copyPx = `max(${PROJ_COPY_MIN_PX}px, ${copyFontVw}vw)`;
+    // Les plafonds d'abord, le zoom de l'enseignante ensuite (voir l'encadré
+    // PROJ_ZOOM_* en haut du fichier : l'inverse rendrait « + » muet au
+    // plafond).
+    const baseFontVw = Math.min(fitVw * PROJ_BODY_X, PROJ_BODY_MAX_VW) * projZoom;
+    const copyFontVw = Math.min(fitVw * 1.15 * PROJ_COPY_X, PROJ_COPY_MAX_VW) * projZoom;
+    // Les planchers suivent le zoom : sur un écran étroit c'est le plancher
+    // qui gouverne, et un zoom sans effet là-bas serait un bouton mort.
+    const basePx = `max(${Math.round(PROJ_BODY_MIN_PX * projZoom)}px, ${baseFontVw}vw)`;
+    const copyPx = `max(${Math.round(PROJ_COPY_MIN_PX * projZoom)}px, ${copyFontVw}vw)`;
+
+    // Bouton de zoom : carré, lisible de loin, et VISIBLEMENT éteint quand la
+    // borne est atteinte — sinon on appuie dans le vide sans comprendre.
+    const projZoomBtn = (off) => ({
+      background: off ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.22)",
+      color: off ? "rgba(255,255,255,0.45)" : "#fff",
+      border: "1px solid rgba(255,255,255,0.35)", borderRadius: 8,
+      width: 40, height: 40, fontSize: 22, fontWeight: 800, lineHeight: 1,
+      cursor: off ? "default" : "pointer",
+    });
 
     return (
       <div ref={projectorScrollRef} tabIndex={-1} style={{
@@ -6008,6 +6132,28 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             cursor: "pointer", backdropFilter: "blur(8px)",
             boxShadow: "0 4px 20px rgba(0,0,0,0.2)"
           }}>✕ {isPresentWindow ? "Fermer" : "Quitter le projecteur"}</button>
+        </div>
+
+        {/* Zoom — EN BAS À DROITE, volontairement.
+            La barre du haut est déjà soupçonnée de recouvrir la barre
+            « marquer la leçon enseignée » (chantier 2) : y ajouter trois
+            boutons aggraverait un défaut connu. En bas à droite, c'est aussi
+            là où l'on cherche un zoom par habitude. */}
+        <div style={{
+          position: "fixed", bottom: 20, right: 24, zIndex: 10000,
+          display: "flex", alignItems: "center", gap: 6,
+          background: "rgba(0,0,0,0.7)", borderRadius: 12, padding: 6,
+          backdropFilter: "blur(8px)", boxShadow: "0 4px 20px rgba(0,0,0,0.2)"
+        }}>
+          <button onClick={() => bumpZoom(-1)} disabled={projZoom <= PROJ_ZOOM_MIN}
+            title="Réduire le texte (touche -)" style={projZoomBtn(projZoom <= PROJ_ZOOM_MIN)}>−</button>
+          <button onClick={resetZoom} title="Revenir à la taille d'origine (touche 0)"
+            style={{
+              background: "none", border: "none", color: "#fff", cursor: "pointer",
+              fontWeight: 800, fontSize: 16, minWidth: 62, letterSpacing: 0.5,
+            }}>{Math.round(projZoom * 100)} %</button>
+          <button onClick={() => bumpZoom(1)} disabled={projZoom >= PROJ_ZOOM_MAX}
+            title="Agrandir le texte (touche +)" style={projZoomBtn(projZoom >= PROJ_ZOOM_MAX)}>+</button>
         </div>
 
         {/* Content */}
@@ -6193,6 +6339,12 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           <button onClick={() => projectorPost({ cmd: "scroll", factor: -1 })} style={presentBtn} title="Monter">↑</button>
           <button onClick={() => projectorPost({ cmd: "scroll", factor: 1 })} style={presentBtn} title="Descendre">↓</button>
           <button onClick={() => projectorPost({ cmd: "bottom" })} style={presentBtn} title="Bas de la leçon">⤓</button>
+          {/* Le zoom aussi depuis le portable : la fenêtre projetée est au
+              tableau, l'enseignante est à son bureau. Sans ces trois boutons,
+              il faudrait aller cliquer sur l'écran de la classe. */}
+          <button onClick={() => bumpZoom(-1)} style={presentBtn} title="Réduire le texte">−</button>
+          <button onClick={resetZoom} style={{ ...presentBtn, minWidth: 58 }} title="Taille d'origine">{Math.round(projZoom * 100)} %</button>
+          <button onClick={() => bumpZoom(1)} style={presentBtn} title="Agrandir le texte">+</button>
           <button onClick={stopPresenter} style={{ ...presentBtn, background: "rgba(255,255,255,.92)", color: COLORS.g800 }}>✕ Arrêter</button>
         </div>
       )}
@@ -7712,6 +7864,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           moiId={isParent ? parent?.id : teacher?.id}
           online={online}
           pushToast={pushToast}
+          usurpation={!!impersonating}
         />
       )}
       <ToastViewport />
