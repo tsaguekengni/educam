@@ -34,6 +34,16 @@ const json = (body: unknown, status = 200) =>
   });
 
 const digits = (s: string) => (s || "").replace(/[^0-9]/g, ""); // Meta wants E.164 digits, no '+'
+// Les DEUX parents reçoivent (décision de Maxime, 2026-10-01). Dédoublonné sur
+// les CHIFFRES : « +237 690 00 00 01 » et « 237690000001 » sont le même numéro.
+const phonesOf = (stu: { parent_phone?: string | null; parent_phone_2?: string | null }) => {
+  const out: string[] = [];
+  for (const p of [stu.parent_phone, stu.parent_phone_2]) {
+    const d = digits(p || "");
+    if (d && !out.some((x) => digits(x) === d)) out.push(p as string);
+  }
+  return out;
+};
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
@@ -76,7 +86,7 @@ Deno.serve(async (req) => {
   // --- Read the student with the service role ---
   const { data: student, error: sErr } = await admin
     .from("students")
-    .select("id, full_name, parent_phone, school_id, teacher_id")
+    .select("id, full_name, parent_phone, parent_phone_2, school_id, teacher_id")
     .eq("id", studentId)
     .maybeSingle();
   if (sErr || !student) return json({ ok: false, error: "student_not_found" }, 404);
@@ -95,17 +105,18 @@ Deno.serve(async (req) => {
   const isTheirTeacher = student.teacher_id && student.teacher_id === uid;
   if (!isStaff && !isTheirTeacher) return json({ ok: false, error: "forbidden" }, 403);
 
+  const numbers = phonesOf(student);
   const logRow = {
     school_id: student.school_id,
     student_id: student.id,
     message_id: messageId,
-    to_phone: student.parent_phone || null,
+    to_phone: numbers[0] || null,
     kind,
     template: TEMPLATE,
   };
 
   // --- No phone on file → record as skipped, not an error ---
-  if (!student.parent_phone) {
+  if (!numbers.length) {
     await admin.from("whatsapp_notifications").insert({ ...logRow, status: "skipped", error: "no_parent_phone" });
     return json({ ok: true, skipped: true, reason: "no_parent_phone" });
   }
@@ -125,12 +136,11 @@ Deno.serve(async (req) => {
   // Sending the body only (or collapsing the two components) returns
   // `(#132000) Number of parameters does not match the expected number of params`.
   // If the template is ever re-edited, the parameter count here must follow it.
-  const to = digits(student.parent_phone);
   const link = APP_URL || "https://educam.app";
   const childName = student.full_name || "votre enfant";
-  const body = {
+  const bodyFor = (to: string) => ({
     messaging_product: "whatsapp",
-    to,
+    to: digits(to),
     type: "template",
     template: {
       name: TEMPLATE,
@@ -151,25 +161,36 @@ Deno.serve(async (req) => {
         },
       ],
     },
-  };
+  });
 
-  try {
-    const resp = await fetch(`https://graph.facebook.com/${API_VERSION}/${PHONE_ID}/messages`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const result = await resp.json();
-    if (!resp.ok) {
-      const errMsg = result?.error?.message || `http_${resp.status}`;
-      await admin.from("whatsapp_notifications").insert({ ...logRow, status: "failed", error: errMsg });
-      return json({ ok: false, error: errMsg }, 200); // 200: best-effort, don't surface as a hard error
+  // UN ENVOI APRÈS L'AUTRE, jamais en parallèle : une rafale simultanée vers
+  // Meta fait chuter la note de qualité du numéro. Chaque destinataire a sa
+  // propre ligne de journal, sinon un échec sur le second parent serait muet.
+  let lastId: string | null = null;
+  let anySent = false;
+  for (const to of numbers) {
+    const row = { ...logRow, to_phone: to };
+    try {
+      const resp = await fetch(`https://graph.facebook.com/${API_VERSION}/${PHONE_ID}/messages`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify(bodyFor(to)),
+      });
+      const result = await resp.json();
+      if (!resp.ok) {
+        const errMsg = result?.error?.message || `http_${resp.status}`;
+        await admin.from("whatsapp_notifications").insert({ ...row, status: "failed", error: errMsg });
+        continue;   // on tente quand même l'autre parent
+      }
+      const providerId = result?.messages?.[0]?.id || null;
+      await admin.from("whatsapp_notifications").insert({ ...row, status: "sent", provider_message_id: providerId });
+      lastId = providerId; anySent = true;
+    } catch (e) {
+      await admin.from("whatsapp_notifications").insert({ ...row, status: "failed", error: String(e) });
     }
-    const providerId = result?.messages?.[0]?.id || null;
-    await admin.from("whatsapp_notifications").insert({ ...logRow, status: "sent", provider_message_id: providerId });
-    return json({ ok: true, provider_message_id: providerId });
-  } catch (e) {
-    await admin.from("whatsapp_notifications").insert({ ...logRow, status: "failed", error: String(e) });
-    return json({ ok: false, error: String(e) }, 200);
   }
+
+  // 200 dans tous les cas : c'est un complément, le message dans l'application
+  // est déjà arrivé. On dit combien de parents ont été joints.
+  return json({ ok: anySent, sent: anySent ? 1 : 0, recipients: numbers.length, provider_message_id: lastId });
 });

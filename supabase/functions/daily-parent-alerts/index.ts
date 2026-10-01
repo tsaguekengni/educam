@@ -32,6 +32,18 @@ const CORS = {
 const json = (b: unknown, s = 200) =>
   new Response(JSON.stringify(b), { status: s, headers: { ...CORS, "Content-Type": "application/json" } });
 const digits = (s: string) => (s || "").replace(/[^0-9]/g, "");
+// Les DEUX parents reçoivent (décision de Maxime, 2026-10-01) : chaque enfant a
+// le numéro du père et de la mère. On dédoublonne sur les CHIFFRES — « +237 690
+// 00 00 01 » et « 237690000001 » sont le même téléphone, et l'envoyer deux fois
+// coûterait deux messages et agacerait le parent.
+const phonesOf = (stu: { parent_phone?: string | null; parent_phone_2?: string | null }) => {
+  const out: string[] = [];
+  for (const p of [stu.parent_phone, stu.parent_phone_2]) {
+    const d = digits(p || "");
+    if (d && !out.some((x) => digits(x) === d)) out.push(p as string);
+  }
+  return out;
+};
 const firstName = (full: string) => (full || "").trim().split(/\s+/)[0] || "votre enfant";
 const PUSH_COOLDOWN_HOURS = 20;   // one nudge per child per school day
 const DEFAULT_LOOKBACK_DAYS = 7;  // covers a teacher offline for a week
@@ -97,7 +109,7 @@ Deno.serve(async (req) => {
   const studentIds = [...new Set(fresh.map((r) => r.student_id))];
   const lessonIds = [...new Set(fresh.map((r) => r.lesson_id))];
   const [{ data: students }, { data: parents }, { data: lessons }] = await Promise.all([
-    admin.from("students").select("id, full_name, parent_phone, school_id").in("id", studentIds),
+    admin.from("students").select("id, full_name, parent_phone, parent_phone_2, school_id").in("id", studentIds),
     admin.from("parents").select("id, student_id").in("student_id", studentIds),
     admin.from("lessons").select("id, title, theme, parent_tip").in("id", lessonIds),
   ]);
@@ -180,12 +192,13 @@ Deno.serve(async (req) => {
         .eq("student_id", sid).eq("pushed", true).gte("created_at", cooldown).limit(1);
       if (recent?.length) continue;          // already nudged about this child today
 
+      const numbers = phonesOf(stu);
       const logRow = {
         school_id: stu.school_id, student_id: sid, message_id: null,
-        to_phone: stu.parent_phone || null, kind: "daily_alert", template: TEMPLATE,
+        to_phone: numbers[0] || null, kind: "daily_alert", template: TEMPLATE,
       };
 
-      if (!stu.parent_phone) {
+      if (!numbers.length) {
         await admin.from("whatsapp_notifications").insert({ ...logRow, status: "skipped", error: "no_parent_phone" });
         skipped++; continue;
       }
@@ -195,34 +208,50 @@ Deno.serve(async (req) => {
       }
 
       const childName = stu.full_name || "votre enfant";
-      try {
-        const resp = await fetch(`https://graph.facebook.com/${API_VERSION}/${PHONE_ID}/messages`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            messaging_product: "whatsapp", to: digits(stu.parent_phone), type: "template",
-            template: {
-              name: TEMPLATE, language: { code: LANG },
-              components: [
-                { type: "header", parameters: [{ type: "text", text: childName }] },
-                { type: "body", parameters: [{ type: "text", text: childName }, { type: "text", text: APP_URL }] },
-              ],
-            },
-          }),
-        });
-        const result = await resp.json();
-        if (!resp.ok) {
-          await admin.from("whatsapp_notifications").insert({ ...logRow, status: "failed", error: result?.error?.message || `http_${resp.status}` });
-          continue;
+
+      // UN ENVOI APRÈS L'AUTRE, jamais en parallèle : une rafale d'appels
+      // simultanés à Meta est ce qui fait chuter la note de qualité d'un numéro.
+      // Chaque destinataire a sa propre ligne de journal — sinon un échec sur le
+      // second parent serait invisible.
+      let anySent = false;
+      for (const to of numbers) {
+        const row = { ...logRow, to_phone: to };
+        try {
+          const resp = await fetch(`https://graph.facebook.com/${API_VERSION}/${PHONE_ID}/messages`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              messaging_product: "whatsapp", to: digits(to), type: "template",
+              template: {
+                name: TEMPLATE, language: { code: LANG },
+                components: [
+                  { type: "header", parameters: [{ type: "text", text: childName }] },
+                  { type: "body", parameters: [{ type: "text", text: childName }, { type: "text", text: APP_URL }] },
+                ],
+              },
+            }),
+          });
+          const result = await resp.json();
+          if (!resp.ok) {
+            await admin.from("whatsapp_notifications").insert({ ...row, status: "failed", error: result?.error?.message || `http_${resp.status}` });
+            continue;   // on tente quand même l'autre parent
+          }
+          await admin.from("whatsapp_notifications").insert({ ...row, status: "sent", provider_message_id: result?.messages?.[0]?.id || null });
+          anySent = true;
+          pushed++;
+        } catch (e) {
+          await admin.from("whatsapp_notifications").insert({ ...row, status: "failed", error: String(e) });
         }
-        await admin.from("whatsapp_notifications").insert({ ...logRow, status: "sent", provider_message_id: result?.messages?.[0]?.id || null });
+      }
+
+      // Le délai de garde se pose dès qu'AU MOINS UN parent a été joint. Sinon
+      // un échec sur le second ferait tout renvoyer au prochain passage, y
+      // compris au premier parent qui, lui, avait bien reçu.
+      if (anySent) {
         // Mark only the rows this run created, so the cooldown is measured from
         // the nudge itself rather than from an old school day.
         await admin.from("result_alerts").update({ pushed: true })
           .eq("student_id", sid).gte("created_at", new Date(Date.now() - 3600_000).toISOString());
-        pushed++;
-      } catch (e) {
-        await admin.from("whatsapp_notifications").insert({ ...logRow, status: "failed", error: String(e) });
       }
     }
   }

@@ -34,6 +34,14 @@ const CORS = {
 const json = (b: unknown, s = 200) =>
   new Response(JSON.stringify(b), { status: s, headers: { ...CORS, "Content-Type": "application/json" } });
 const digits = (s: string) => (s || "").replace(/[^0-9]/g, "");
+// Les DEUX parents reçoivent (décision de Maxime, 2026-10-01). Dédoublonné sur
+// les CHIFFRES, et le numéro du COMPTE parent est ajouté s'il diffère : un
+// parent inscrit avec un autre téléphone que celui donné à l'école doit être
+// joint là où il est.
+const addPhone = (out: string[], p?: string | null) => {
+  const d = digits(p || "");
+  if (d && !out.some((x) => digits(x) === d)) out.push(p as string);
+};
 // Meta rejects parameters containing newlines, tabs or runs of spaces.
 const param = (s: string, max: number) => {
   const flat = (s || "").replace(/\s+/g, " ").trim();
@@ -83,7 +91,7 @@ Deno.serve(async (req) => {
 
   // Resolve WHO is being written to — a parent through their child, a colleague
   // through their own record. Staff could not be reached at all before this.
-  let toPhone: string | null = null;
+  const numbers: string[] = [];
   let toName = "";
   let studentId: string | null = null;
 
@@ -92,14 +100,15 @@ Deno.serve(async (req) => {
     let childName = "";
     if (msg.student_id) {
       const { data: st } = await admin.from("students")
-        .select("full_name, parent_phone").eq("id", msg.student_id).maybeSingle();
-      toPhone = st?.parent_phone || null;
+        .select("full_name, parent_phone, parent_phone_2").eq("id", msg.student_id).maybeSingle();
+      addPhone(numbers, st?.parent_phone);
+      addPhone(numbers, st?.parent_phone_2);
       childName = st?.full_name || "";
     }
     if (msg.recipient_id) {
       const { data: pa } = await admin.from("parents")
         .select("full_name, phone").eq("id", msg.recipient_id).maybeSingle();
-      if (!toPhone) toPhone = pa?.phone || null;
+      addPhone(numbers, pa?.phone);
       toName = pa?.full_name || "";
     }
     // A parent may have no account yet (code not activated) — greet them through
@@ -108,18 +117,18 @@ Deno.serve(async (req) => {
   } else if (msg.recipient_id) {
     const { data: tc } = await admin.from("teachers")
       .select("full_name, phone").eq("id", msg.recipient_id).maybeSingle();
-    toPhone = tc?.phone || null;
+    addPhone(numbers, tc?.phone);          // un collègue n'a qu'un numéro
     toName = tc?.full_name || "cher collègue";
   }
 
   const logRow = {
     school_id: msg.school_id, student_id: studentId, message_id: msg.id,
-    to_phone: toPhone, kind: "direct", template: TEMPLATE,
+    to_phone: numbers[0] || null, kind: "direct", template: TEMPLATE,
   };
 
   // A missing number is recorded, never silently dropped — it is the single
   // most likely reason a message "was not received".
-  if (!toPhone) {
+  if (!numbers.length) {
     await admin.from("whatsapp_notifications").insert({ ...logRow, status: "skipped", error: "no_phone_on_file" });
     return json({ ok: true, skipped: true, reason: "no_phone_on_file" });
   }
@@ -132,37 +141,47 @@ Deno.serve(async (req) => {
   const senderName = param(me?.full_name || "l'équipe EduCam", 40);
   const excerpt = param(msg.subject || msg.body || "nouveau message", 70);
 
-  try {
-    const resp = await fetch(`https://graph.facebook.com/${API_VERSION}/${PHONE_ID}/messages`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messaging_product: "whatsapp", to: digits(toPhone), type: "template",
-        template: {
-          name: TEMPLATE, language: { code: LANG },
-          components: [{
-            type: "body",
-            parameters: [
-              { type: "text", text: recipientName },
-              { type: "text", text: senderName },
-              { type: "text", text: excerpt },
-              { type: "text", text: APP_URL },
-            ],
-          }],
-        },
-      }),
-    });
-    const result = await resp.json();
-    if (!resp.ok) {
-      const errMsg = result?.error?.message || `http_${resp.status}`;
-      await admin.from("whatsapp_notifications").insert({ ...logRow, status: "failed", error: errMsg });
-      return json({ ok: false, error: errMsg }, 200);   // best-effort: the in-app message already landed
+  // UN ENVOI APRÈS L'AUTRE, jamais en parallèle : une rafale simultanée vers
+  // Meta fait chuter la note de qualité du numéro. Une ligne de journal par
+  // destinataire, sinon un échec sur le second parent serait muet.
+  let lastId: string | null = null;
+  let anySent = false;
+  for (const to of numbers) {
+    const row = { ...logRow, to_phone: to };
+    try {
+      const resp = await fetch(`https://graph.facebook.com/${API_VERSION}/${PHONE_ID}/messages`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messaging_product: "whatsapp", to: digits(to), type: "template",
+          template: {
+            name: TEMPLATE, language: { code: LANG },
+            components: [{
+              type: "body",
+              parameters: [
+                { type: "text", text: recipientName },
+                { type: "text", text: senderName },
+                { type: "text", text: excerpt },
+                { type: "text", text: APP_URL },
+              ],
+            }],
+          },
+        }),
+      });
+      const result = await resp.json();
+      if (!resp.ok) {
+        const errMsg = result?.error?.message || `http_${resp.status}`;
+        await admin.from("whatsapp_notifications").insert({ ...row, status: "failed", error: errMsg });
+        continue;   // on tente quand même l'autre parent
+      }
+      const providerId = result?.messages?.[0]?.id || null;
+      await admin.from("whatsapp_notifications").insert({ ...row, status: "sent", provider_message_id: providerId });
+      lastId = providerId; anySent = true;
+    } catch (e) {
+      await admin.from("whatsapp_notifications").insert({ ...row, status: "failed", error: String(e) });
     }
-    const providerId = result?.messages?.[0]?.id || null;
-    await admin.from("whatsapp_notifications").insert({ ...logRow, status: "sent", provider_message_id: providerId });
-    return json({ ok: true, provider_message_id: providerId });
-  } catch (e) {
-    await admin.from("whatsapp_notifications").insert({ ...logRow, status: "failed", error: String(e) });
-    return json({ ok: false, error: String(e) }, 200);
   }
+
+  // 200 dans tous les cas : le message dans l'application est déjà arrivé.
+  return json({ ok: anySent, recipients: numbers.length, provider_message_id: lastId });
 });
