@@ -1085,10 +1085,19 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
                         const subj = subjectById(s.subject_id);
                         return (
                           <div key={s.__i} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+                            {/* Bornes 06:00–19:00 ajoutées le 2026-10-01 : sans elles
+                                le sélecteur d'heure propose la journée entière jusqu'à
+                                minuit, et on se retrouve à faire défiler des heures
+                                auxquelles aucune école ne fonctionne. Volontairement
+                                larges — cet écran sert aussi le CM2 (07:30–12:30) et
+                                d'autres écoles : la borne écarte l'absurde, elle
+                                n'impose pas l'horaire d'une école en particulier. */}
                             <input type="time" className="ec-input" aria-label="Heure de début"
+                              min="06:00" max="19:00" step="300"
                               value={s.start_time || ""} onChange={(e) => updateSlot(s.__i, "start_time", e.target.value)}
                               style={{ width: 108 }} />
                             <input type="time" className="ec-input" aria-label="Heure de fin"
+                              min="06:00" max="19:00" step="300"
                               value={s.end_time || ""} onChange={(e) => updateSlot(s.__i, "end_time", e.target.value)}
                               style={{ width: 108 }} />
                             <select className="ec-input" aria-label="Type de créneau" value={slotTypeValue(s)}

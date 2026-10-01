@@ -431,6 +431,14 @@ function renderRichText(text) {
  * on ne l'impose pas, on le MONTRE.
  * ══════════════════════════════════════════════════════════════════════════ */
 
+/* Les matières proposées à l'enseignante. L'anglais en est RETIRÉ : il est
+ * assuré par un enseignant extérieur (décision de Maxime, 2026-10-01). Ses
+ * leçons restent en base pour cet enseignant-là ; elles n'ont simplement rien
+ * à faire dans une liste où elle choisit ce QU'ELLE enseigne. Le créneau
+ * d'anglais existe toujours dans sa journée, en type « English (enseignant
+ * extérieur) » — elle voit quand il tombe, elle ne le remplit pas. */
+const EDT_MATIERES_ENSEIGNANTE = SUBJECTS.filter((s) => s.id !== "english");
+
 const EDT_DEBUT = "07:30";
 const EDT_FIN = "14:30";
 const EDT_DUREES = [15, 30, 45, 60, 75, 90];
@@ -464,6 +472,37 @@ const EDT_JOURS = [
   { n: 1, nom: "Lundi" }, { n: 2, nom: "Mardi" }, { n: 3, nom: "Mercredi" },
   { n: 4, nom: "Jeudi" }, { n: 5, nom: "Vendredi" },
 ];
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * « CETTE SEMAINE SEULEMENT » — la couche d'exception, 2026-10-01.
+ *
+ * `timetable_slots` ne portait AUCUNE date : un jour de la semaine et un rang,
+ * rien d'autre. « À partir de maintenant » y tenait déjà ; « cette semaine
+ * seulement » n'avait nulle part où vivre. D'où la colonne `week_start` :
+ *
+ *   · NULL             → la semaine permanente, le modèle.
+ *   · une date (lundi) → une exception, valable cette semaine-là et périmée
+ *                        d'elle-même le lundi suivant.
+ *
+ * LA RÈGLE DE FUSION EST PAR JOURNÉE, PAS PAR CRÉNEAU. Si une journée porte la
+ * moindre exception, elle REMPLACE entièrement la journée permanente. Un
+ * mélange ligne à ligne serait imprévisible pour elle : elle a modifié « son
+ * lundi », pas « le troisième créneau de son lundi ».
+ * ────────────────────────────────────────────────────────────────────────── */
+
+// Le lundi de la semaine d'une date, en "AAAA-MM-JJ".
+function edtLundiIso(d) {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  x.setDate(x.getDate() - ((x.getDay() + 6) % 7));   // dimanche = 6 jours apres lundi
+  return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
+}
+
+function edtFusionneSemaine(rows, lundiIso) {
+  const joursAvecException = new Set(
+    (rows || []).filter((r) => r.week_start === lundiIso).map((r) => r.day_of_week));
+  return (rows || []).filter((r) =>
+    joursAvecException.has(r.day_of_week) ? r.week_start === lundiIso : !r.week_start);
+}
 
 /* ══════════════════════════════════════════════════════════════════════════
  * LE VOYANT DE RETARD — 2026-10-01
@@ -755,7 +794,6 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
       minutes: 60, ancreDebut: null,
     }];
   });
-
   const retirer = (uid) => modifier((prev) => prev.filter((l) => l.uid !== uid));
 
   const annuler = () => { if (avant) { setLignes(avant); setAvant(null); setMsg(null); } };
@@ -771,8 +809,12 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
      échoue il reste des créneaux en trop — visible, réparable. L'inverse
      laisserait une journée vide.
      ──────────────────────────────────────────────────────────────────────── */
-  const enregistrer = async () => {
+  const enregistrer = async (portee) => {
     if (!online) { setMsg({ t: "Enregistrement impossible sans réseau. Réessayez une fois connectée.", tone: "err" }); return; }
+    // `portee` : "semaine" = une exception pour la semaine en cours seulement,
+    // "toujours" = le modèle permanent. Une exception porte le lundi de la
+    // semaine ; le modèle porte NULL.
+    const lundi = portee === "semaine" ? edtLundiIso(new Date()) : null;
     setSaving(true); setMsg(null);
     try {
       const rows = calc.map((l, i) => {
@@ -788,19 +830,39 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
             ? (matiere?.components.find((c) => c.id === l.component_id)?.name || null)
             : "",
           school_id: teacher.school_id, owner_teacher_id: teacher.id,
+          week_start: lundi,
         };
       });
-      if (rows.length) {
-        const { error } = await supabase.from("timetable_slots")
-          .upsert(rows, { onConflict: "owner_teacher_id,day_of_week,slot_order" });
-        if (error) throw error;
+      // ⚠️ Une exception REMPLACE la journée : on efface d'abord les
+      // exceptions de ce jour-là pour cette semaine, puis on réécrit. Sans
+      // cela, raccourcir la journée laisserait traîner les créneaux de
+      // l'essai précédent. Le modèle permanent, lui, n'est jamais touché ici.
+      if (lundi) {
+        const { error: e0 } = await supabase.from("timetable_slots").delete()
+          .eq("owner_teacher_id", teacher.id).eq("day_of_week", jour).eq("week_start", lundi);
+        if (e0) throw e0;
+        if (rows.length) {
+          const { error } = await supabase.from("timetable_slots").insert(rows);
+          if (error) throw error;
+        }
+      } else {
+        if (rows.length) {
+          const { error } = await supabase.from("timetable_slots")
+            .upsert(rows, { onConflict: "owner_teacher_id,day_of_week,slot_order,week_start" });
+          if (error) throw error;
+        }
+        const { error: e2 } = await supabase.from("timetable_slots").delete()
+          .eq("owner_teacher_id", teacher.id).eq("day_of_week", jour)
+          .is("week_start", null).gt("slot_order", rows.length);
+        if (e2) throw e2;
       }
-      const { error: e2 } = await supabase.from("timetable_slots").delete()
-        .eq("owner_teacher_id", teacher.id).eq("day_of_week", jour)
-        .gt("slot_order", rows.length);
-      if (e2) throw e2;
       setAvant(null);
-      setMsg({ t: "Journée enregistrée.", tone: "ok" });
+      setMsg({
+        t: lundi
+          ? "Enregistré pour cette semaine seulement. Lundi prochain, votre emploi du temps habituel revient."
+          : "Enregistré. C'est votre emploi du temps habituel à partir de maintenant.",
+        tone: "ok",
+      });
       if (onSaved) await onSaved();
     } catch (_) {
       setMsg({ t: "L'enregistrement a échoué. Rien n'a été perdu — réessayez.", tone: "err" });
@@ -979,26 +1041,44 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
               ? `Fin à ${edtHhmm(finJournee)} — ${resteFinJournee} min libres avant ${EDT_FIN}`
               : resteFinJournee === 0
                 ? `La journée se termine juste à ${EDT_FIN}`
-                : `La journée dépasse ${EDT_FIN} de ${-resteFinJournee} min`}
+                : `La journée dépasse ${EDT_FIN} de ${-resteFinJournee} min — raccourcissez un créneau`}
           </div>
-          <button type="button" className="ec-btn ec-btn--ghost" onClick={ajouter}>Ajouter un créneau</button>
+          <button
+            type="button"
+            className="ec-btn ec-btn--ghost"
+            onClick={ajouter}
+            disabled={resteFinJournee <= 0}
+          >
+            Ajouter un créneau
+          </button>
         </div>
       </Card>
 
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, marginTop: 16, flexWrap: "wrap" }}>
-        <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3, maxWidth: 620 }}>
+        <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3, maxWidth: 560 }}>
           {depassements.length > 0
             ? "Des créneaux dépassent une heure fixée par l'école. Vous pouvez enregistrer quand même."
-            : "Les récréations et le programme du matin gardent leur heure : les leçons se placent autour."}
+            : <>Gardez-vous ce {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()} pour cette semaine,
+               ou devient-il votre {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()} habituel ?</>}
         </div>
-        <button
-          type="button"
-          className="ec-btn"
-          onClick={enregistrer}
-          disabled={saving}
-        >
-          {saving ? "Enregistrement…" : `Enregistrer ${EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()}`}
-        </button>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            className="ec-btn ec-btn--ghost"
+            onClick={() => enregistrer("semaine")}
+            disabled={saving}
+          >
+            {saving ? "…" : "Cette semaine seulement"}
+          </button>
+          <button
+            type="button"
+            className="ec-btn"
+            onClick={() => enregistrer("toujours")}
+            disabled={saving}
+          >
+            {saving ? "Enregistrement…" : "À partir de maintenant"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -1992,20 +2072,30 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const usePerClass = PROFILES_ENABLED && teacher?.school_id && teacher?.id;
     let key, run;
     if (parentTeacherId) {
-      key = "timetable_owner_" + parentTeacherId;
+      key = "timetable_owner_" + parentTeacherId + "_" + edtLundiIso(new Date());
       run = () => supabase.from("timetable_slots").select("*")
-        .eq("owner_teacher_id", parentTeacherId).order("day_of_week").order("slot_order");
+        .eq("owner_teacher_id", parentTeacherId)
+        .or(`week_start.is.null,week_start.eq.${edtLundiIso(new Date())}`)
+        .order("day_of_week").order("slot_order");
     } else if (usePerClass) {
-      key = "timetable_owner_" + teacher.id;
+      key = "timetable_owner_" + teacher.id + "_" + edtLundiIso(new Date());
       run = () => supabase.from("timetable_slots").select("*")
-        .eq("owner_teacher_id", teacher.id).order("day_of_week").order("slot_order");
+        .eq("owner_teacher_id", teacher.id)
+        .or(`week_start.is.null,week_start.eq.${edtLundiIso(new Date())}`)
+        .order("day_of_week").order("slot_order");
     } else {
       key = "timetable_" + selectedLevel.id;
       run = () => supabase.from("timetable_slots").select("*")
         .eq("level", selectedLevel.id).order("day_of_week").order("slot_order");
     }
     const data = await cachedQuery(key, run);
-    setTimetable(data || []);
+    // ⚠️ LA CLÉ DE CACHE PORTE LA SEMAINE. Une entrée mise en cache lundi et
+    // resservie la semaine suivante rejouerait l'exception de la semaine
+    // passée comme si elle était en vigueur. Le piège de cache payé le
+    // 2026-09-30 : une entrée change de nom quand sa FORME change, et ici la
+    // forme dépend de la semaine. (La clé est construite plus haut avec
+    // `edtLundiIso`.)
+    setTimetable(edtFusionneSemaine(data || [], edtLundiIso(new Date())));
   };
 
   const fetchTopics = async () => {
@@ -6906,7 +6996,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           <TimetableEditor
             teacher={teacher}
             timetable={timetable}
-            subjects={SUBJECTS}
+            subjects={EDT_MATIERES_ENSEIGNANTE}
             online={online}
             onSaved={fetchTimetable}
             onBack={() => setScreen("calendar")}
