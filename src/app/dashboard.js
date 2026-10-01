@@ -507,8 +507,21 @@ const edtUniteDuMois = (d) => EDT_UNITE_PAR_MOIS[d.getMonth()] || null;
  *
  * 2 = octobre, le mois du démarrage réel. À corriger si la classe démarre un
  * autre mois ; à NE PAS confondre avec l'unité en cours.
+ *
+ * ⚠️ CE NOMBRE SERT À DEUX ENDROITS, et il le faut : il est le PLANCHER de la
+ * file d'attente (`getQueuedLesson`) autant que du voyant de retard. Confirmé
+ * par Maxime le 2026-10-01 : l'année commence le lundi 5 octobre, à l'unité 2
+ * « Le village, la ville ». Sans ce plancher, la file servait sagement la
+ * première leçon non enseignée — c'est-à-dire SEPTEMBRE — le jour de la
+ * rentrée. Un défaut qui ne lève aucune erreur : l'écran aurait simplement
+ * affiché la mauvaise leçon, et personne ne l'aurait su avant la classe.
  */
 const EDT_UNITE_DEPART = 2;
+
+// Premier jour d'école de l'année (confirmé par Maxime : lundi 5 octobre 2026).
+// Le voyant de retard ne compte pas les jours d'école qui le précèdent : ils
+// gonfleraient la capacité de rattrapage d'un mois qui n'a pas commencé.
+const EDT_DEBUT_ANNEE = new Date(2026, 9, 5);
 
 const edtIsoJour = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -516,7 +529,11 @@ const edtIsoJour = (d) =>
 // Les jours d'école qui restent dans le mois en cours, aujourd'hui compris.
 function edtJoursEcoleRestants(aujourdhui) {
   const out = [];
-  const d = new Date(aujourdhui.getFullYear(), aujourdhui.getMonth(), aujourdhui.getDate());
+  // On ne compte jamais un jour d'avant la rentrée : il n'offre aucune
+  // occasion d'enseigner, donc l'inclure ferait croire à une marge qui
+  // n'existe pas.
+  const depart = (aujourdhui < EDT_DEBUT_ANNEE) ? EDT_DEBUT_ANNEE : aujourdhui;
+  const d = new Date(depart.getFullYear(), depart.getMonth(), depart.getDate());
   const mois = d.getMonth();
   while (d.getMonth() === mois) {
     const jour = d.getDay();                       // 0 = dimanche
@@ -2166,6 +2183,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     for (const l of availableLessons) {
       if (l.subject_id !== subjectId || l.component_id !== componentId) continue;
       if (l.taught) continue;
+      // Plancher : l'année commence à l'unité 2. Les unités antérieures ne
+      // sont pas « en retard », elles sont HORS PÉRIMÈTRE — la classe ne les a
+      // jamais abordées sur la plateforme. Sans cette ligne, la rentrée
+      // s'ouvrirait sur une leçon de septembre.
+      if ((l.unit_number || 0) < EDT_UNITE_DEPART) continue;
       if (!next) { next = l; continue; }
       const du = (l.unit_number || 0) - (next.unit_number || 0);
       if (du < 0) { next = l; continue; }
@@ -2182,7 +2204,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // confondues. Sert au voyant de retard et à l'écran de validation.
   const queueDepth = (subjectId, componentId) =>
     availableLessons.filter((l) =>
-      l.subject_id === subjectId && l.component_id === componentId && !l.taught).length;
+      l.subject_id === subjectId && l.component_id === componentId
+      && !l.taught && (l.unit_number || 0) >= EDT_UNITE_DEPART).length;
 
   // Un créneau, une carte. La base a laissé passer des lignes en double —
   // quatre chemins d'écriture différents alimentent `timetable_slots` et aucun
