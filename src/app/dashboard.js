@@ -716,17 +716,39 @@ function RetardNotice({ retard, mois, vendrediLibre, onAjuster }) {
  * ancre (`libre` = minutes creuses, `depasse` = minutes de trop).
  */
 function edtRecalcule(lignes) {
+  const finJour = edtMin(EDT_FIN);
   let curseur = edtMin(EDT_DEBUT);
+  let dehors = false;
+  let dejaDehors = false;        // la banniere « hors journee » ne s'affiche qu'UNE fois
   return lignes.map((l) => {
     const t = edtTypeByKey(l.kind);
     let libre = 0, depasse = 0;
-    if (t?.ancre && l.ancreDebut != null) {
+    if (t?.ancre && l.ancreDebut != null && !dehors) {
       if (curseur < l.ancreDebut) { libre = l.ancreDebut - curseur; curseur = l.ancreDebut; }
       else if (curseur > l.ancreDebut) { depasse = curseur - l.ancreDebut; }
     }
     const debut = curseur;
     curseur += l.minutes;
-    return { ...l, debut, fin: curseur, libre, depasse };
+    /* ⚠️ LA JOURNÉE S'ARRÊTE À 14:30, L'AFFICHAGE AUSSI.
+     *
+     * Signalé par Maxime le 2026-10-01, capture à l'appui : en allongeant des
+     * créneaux, l'écran continuait d'inventer des heures — 19:55, 22:55,
+     * 23:10 — et annonçait « dépassement de 775 min sur Récréation ». Deux
+     * absurdités d'un coup : des heures auxquelles aucune école ne tourne, et
+     * un reproche que l'enseignante ne peut pas suivre.
+     *
+     * Une ligne qui ne tient plus dans la journée ne reçoit donc PLUS d'heure
+     * du tout : elle est marquée `dehors`, et l'écran le dit en une phrase.
+     * On n'empêche rien — elle peut toujours enregistrer, et la règle « on
+     * suggère, on ne refuse jamais » tient — mais on cesse de lui raconter
+     * une journée qui n'existe pas. Les ancres passées ce point ne produisent
+     * plus de « dépassement » : une fois hors journée, le chiffre n'a plus
+     * de sens. */
+    const horsJournee = dehors || debut >= finJour;
+    const premierDehors = horsJournee && !dejaDehors;
+    if (horsJournee) dejaDehors = true;
+    if (curseur > finJour) dehors = true;
+    return { ...l, debut, fin: curseur, libre, depasse, horsJournee, premierDehors };
   });
 }
 
@@ -936,7 +958,16 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
           const matiere = subjects.find((s) => s.id === l.subject_id);
           return (
             <Fragment key={l.uid}>
-              {l.libre > 0 && (
+              {l.premierDehors && (
+                <div style={{
+                  padding: "9px 18px", background: COLORS.critBg,
+                  borderTop: `1px solid ${COLORS.critBrd}`,
+                  fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.crit,
+                }}>
+                  Ce qui suit ne tient plus dans la journée (fin à {EDT_FIN}) — raccourcissez ou retirez un créneau.
+                </div>
+              )}
+              {l.libre > 0 && !l.horsJournee && (
                 <div style={{
                   padding: "7px 18px", background: COLORS.warnBg,
                   fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.warn,
@@ -944,7 +975,7 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
                   {l.libre} min libres avant {t?.nom || "ce créneau"}
                 </div>
               )}
-              {l.depasse > 0 && (
+              {l.depasse > 0 && !l.horsJournee && (
                 <div style={{
                   padding: "7px 18px", background: COLORS.critBg,
                   fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.crit,
@@ -959,8 +990,11 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
                 borderTop: `1px solid ${COLORS.divider}`,
                 background: t?.ancre ? COLORS.panel : COLORS.card,
               }}>
-                <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 700, color: COLORS.ink }}>
-                  {edtHhmm(l.debut)}
+                <div style={{
+                  fontSize: "var(--ec-fs-3)", fontWeight: 700,
+                  color: l.horsJournee ? COLORS.ink3 : COLORS.ink,
+                }}>
+                  {l.horsJournee ? "hors journée" : edtHhmm(l.debut)}
                 </div>
 
                 <select
