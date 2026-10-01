@@ -248,8 +248,10 @@ function isSvg(url) {
  *
  * Demande de Maxime, 2026-10-01 : au fond de la classe, le texte projeté
  * était trop petit pour des CM1, et l'écran restait aux trois quarts vide.
- * Le corps du texte est DOUBLÉ, la trace écrite (« à recopier », section
- * bilan) TRIPLÉE.
+ * Premier essai le 2026-10-01 à ×2 et ×3 : vérifié à l'écran par Maxime,
+ * jugé TROP GROS. Réglé à ×1,5 pour le corps et ×2 pour la trace écrite
+ * (« à recopier », section bilan). ⭐ Ces valeurs-là ont été VUES sur une
+ * vraie projection, pas calculées : ne pas les « corriger » au raisonnement.
  *
  * ⚠️ Ces facteurs multiplient l'échelle AUTOMATIQUE (`fitVw` ci-dessous, qui
  * réduit la taille quand la leçon est longue). Ils ne la remplacent pas :
@@ -257,7 +259,7 @@ function isSvg(url) {
  * elle demanderait dix écrans de défilement.
  *
  * ⚠️ Les PLAFONDS ne sont pas décoratifs. Sans eux, une leçon très courte
- * monterait à ~185 px par lettre et n'afficherait plus qu'une vingtaine de
+ * monterait à ~124 px par lettre et n'afficherait plus qu'une trentaine de
  * caractères par ligne : illisible pour une autre raison. Si Maxime veut
  * encore plus gros, c'est le plafond qu'il faut lever, pas seulement le
  * facteur.
@@ -265,12 +267,12 @@ function isSvg(url) {
  * 📏 Mesuré en base le 2026-10-01, pour ne pas régler à l'aveugle : les 171
  * leçons font de 1 594 à 6 499 signes — AUCUNE n'est dans les bandes
  * « courte » ni « moyenne ». Seules les deux dernières bandes servent
- * réellement, et les plafonds n'y mordent pas : les facteurs ×2 et ×3 sont
+ * réellement, et les plafonds n'y mordent pas : les facteurs ×1,5 et ×2 sont
  * donc appliqués exactement. Les plafonds ne protègent qu'un cas qui
  * n'existe pas encore.
  * ────────────────────────────────────────────────────────────────────────── */
-const PROJ_BODY_X = 2;        // corps du texte           (1 = taille d'avant)
-const PROJ_COPY_X = 3;        // section « à recopier »   (1 = taille d'avant)
+const PROJ_BODY_X = 1.5;      // corps du texte           (1 = taille d'avant)
+const PROJ_COPY_X = 2;        // section « à recopier »   (1 = taille d'avant)
 const PROJ_BODY_MAX_VW = 3.6; // plafond du corps, en vw  (~69 px sur 1920 px)
 const PROJ_COPY_MAX_VW = 6.0; // plafond « à recopier »   (~115 px sur 1920 px)
 const PROJ_BODY_MIN_PX = 28;  // plancher : écran étroit, où 1 vw ne vaut rien
@@ -403,6 +405,586 @@ function renderRichText(text) {
     const m = part.match(/^\*\*([^*]+)\*\*$/);
     return m ? <strong key={i}>{m[1]}</strong> : part;
   });
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * L'ÉDITEUR D'EMPLOI DU TEMPS DE L'ENSEIGNANTE — 2026-10-01
+ *
+ * Décision de Maxime : l'emploi du temps appartient à l'ENSEIGNANTE. Jusqu'ici
+ * il ne s'éditait que depuis l'écran de la direction (`schooladmin.js`) ; elle
+ * n'en avait qu'une vue en lecture seule. Cet écran inverse cela.
+ *
+ * 🔴 AU NIVEAU MODULE, ET PAS AILLEURS. Ce composant a des hooks (`useState`).
+ * Déclaré à l'intérieur du rendu de Dashboard, il serait une nouvelle identité
+ * à chaque rendu : React démonterait tout le sous-arbre et le champ en cours
+ * perdrait le focus à chaque frappe. C'est le piège déjà payé QUATRE fois sur
+ * ce projet. Au niveau module, il se monte normalement en `<TimetableEditor/>`.
+ *
+ * CE QU'ELLE CHOISIT : le type de créneau, la matière, la sous-matière et la
+ * DURÉE. Jamais une heure. Les heures de début se recalculent seules, en
+ * cascade, depuis le début de journée.
+ *
+ * LES ANCRES (récréation, programme du matin, English, TIC) portent une heure
+ * imposée par l'école. Le calcul s'y recale : s'il reste du temps avant une
+ * ancre, la ligne l'annonce (« il reste 30 min ») ; si les leçons la
+ * dépassent, elle le dit aussi. C'est là tout le modèle des « enveloppes » :
+ * on ne l'impose pas, on le MONTRE.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+const EDT_DEBUT = "07:30";
+const EDT_FIN = "14:30";
+const EDT_DUREES = [15, 30, 45, 60, 75, 90];
+
+// Les types non curriculaires. `ancre: true` = heure imposée par l'école, donc
+// le recalcul s'y recale au lieu de la pousser.
+const EDT_TYPES = [
+  { key: "lecon", label: "Leçon", lecon: true },
+  { key: "pause:recreation", label: "Récréation", nom: "Récréation", ancre: true },
+  { key: "pause:programme", label: "Programme de l'école", nom: "Programme de l'école", ancre: true },
+  { key: "pause:english", label: "English (enseignant extérieur)", nom: "English (enseignant extérieur)", ancre: true },
+  { key: "pause:tic", label: "TIC", nom: "TIC", ancre: true },
+  { key: "pause:evaluation", label: "Évaluation", nom: "Évaluation" },
+  { key: "pause:revision", label: "Révision", nom: "Révision" },
+];
+const edtTypeByKey = (k) => EDT_TYPES.find((t) => t.key === k);
+const edtKeyOf = (slot) =>
+  slot.subject_id === "pause" ? `pause:${slot.component_id}` : "lecon";
+
+const edtMin = (hhmm) => {
+  if (!hhmm) return null;
+  const [h, m] = String(hhmm).split(":").map(Number);
+  return (h || 0) * 60 + (m || 0);
+};
+const edtHhmm = (mins) => {
+  const m = Math.max(0, Math.round(mins));
+  return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+};
+
+const EDT_JOURS = [
+  { n: 1, nom: "Lundi" }, { n: 2, nom: "Mardi" }, { n: 3, nom: "Mercredi" },
+  { n: 4, nom: "Jeudi" }, { n: 5, nom: "Vendredi" },
+];
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * LE VOYANT DE RETARD — 2026-10-01
+ *
+ * Décision de Maxime : ce qui n'est pas enseigné dans le mois est REPORTÉ, pas
+ * remis à zéro. Une remise à zéro dirait que la classe est à jour alors
+ * qu'elle ne l'est pas. Le retard s'accumule donc, et c'est précisément
+ * pourquoi le voyant doit être ACTIONNABLE à chaque fois : il dit QUOI
+ * ajouter, pas seulement qu'on est en retard. Un voyant qu'on ne peut pas
+ * suivre devient un voyant qu'on cesse de lire.
+ *
+ * 🔴 LE DÉNOMINATEUR SE COMPTE EN JOURS D'ÉCOLE, JAMAIS EN SEMAINES DE
+ * CALENDRIER. Un mois à deux jours fériés annoncerait « vous rattraperez »
+ * alors que c'est faux. `EDT_FERIES` est VIDE aujourd'hui et c'est voulu :
+ * Maxime fournira les dates (fériés, début et fin de trimestre). Le calcul est
+ * déjà bâti dessus, donc les ajouter sera une SAISIE et pas une réécriture.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+// Jours non travaillés, au format "AAAA-MM-JJ". À remplir quand les dates
+// arrivent — rien d'autre ne change.
+const EDT_FERIES = [];
+
+// Le mois courant, au sens du PROGRAMME (Sept = unité 1 … Avril = unité 8).
+// Hors année scolaire (mai à août) : pas de voyant, il n'y a pas de mois à
+// rattraper. ⚠️ Cette correspondance suppose des mois pleins ; à revoir quand
+// les dates de début et de fin de trimestre arriveront.
+const EDT_UNITE_PAR_MOIS = { 8: 1, 9: 2, 10: 3, 11: 4, 0: 5, 1: 6, 2: 7, 3: 8 };
+const edtUniteDuMois = (d) => EDT_UNITE_PAR_MOIS[d.getMonth()] || null;
+
+/* 🔴 LE MOIS OÙ LA CLASSE COMMENCE SUR LA PLATEFORME.
+ *
+ * Le report (décision de Maxime : ce qui n'est pas enseigné reste dû) veut que
+ * le voyant compte TOUT l'arriéré, pas seulement le mois courant — sinon il
+ * sous-estime exactement ce que le report accumule.
+ *
+ * Mais il ne doit pas compter les mois d'AVANT le pilote. La classe n'a rien
+ * enseigné sur la plateforme en septembre, pour la bonne raison qu'elle ne
+ * l'utilisait pas : démarrer en annonçant « 21 leçons de retard » ferait du
+ * voyant un décor dès le premier jour, et c'est précisément la panne qu'on
+ * cherche à éviter.
+ *
+ * 2 = octobre, le mois du démarrage réel. À corriger si la classe démarre un
+ * autre mois ; à NE PAS confondre avec l'unité en cours.
+ */
+const EDT_UNITE_DEPART = 2;
+
+const edtIsoJour = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+// Les jours d'école qui restent dans le mois en cours, aujourd'hui compris.
+function edtJoursEcoleRestants(aujourdhui) {
+  const out = [];
+  const d = new Date(aujourdhui.getFullYear(), aujourdhui.getMonth(), aujourdhui.getDate());
+  const mois = d.getMonth();
+  while (d.getMonth() === mois) {
+    const jour = d.getDay();                       // 0 = dimanche
+    if (jour >= 1 && jour <= 5 && !EDT_FERIES.includes(edtIsoJour(d))) out.push(jour);
+    d.setDate(d.getDate() + 1);
+  }
+  return out;
+}
+
+/**
+ * Pour chaque sous-matière présente dans l'emploi du temps : ce qui reste dû
+ * ce mois-ci, combien de fois le créneau reviendra d'ici la fin du mois, et
+ * ce qu'il faudrait ajouter. `unite` = le mois en cours, au sens du programme.
+ */
+function edtCalculeRetard({ lessons, timetable, unite, subjects, aujourdhui }) {
+  const joursRestants = edtJoursEcoleRestants(aujourdhui || new Date());
+  const creneaux = (timetable || []).filter(
+    (s) => s.subject_id && s.subject_id !== "pause" && s.subject_id !== "etude");
+
+  // Une entrée par sous-matière réellement programmée.
+  const parCle = new Map();
+  creneaux.forEach((s) => {
+    const cle = `${s.subject_id}·${s.component_id}`;
+    if (!parCle.has(cle)) parCle.set(cle, { subject_id: s.subject_id, component_id: s.component_id, jours: [] });
+    parCle.get(cle).jours.push(s.day_of_week);
+  });
+
+  const lignes = [];
+  parCle.forEach((v) => {
+    // Le REPORT : tout ce qui reste dû depuis le démarrage du pilote jusqu'au
+    // mois en cours, et non le seul mois en cours. Une leçon d'octobre non
+    // tenue est toujours due en novembre — c'est la décision « report, pas
+    // remise à zéro », et la compter ici est la seule façon qu'elle soit vraie.
+    const duMois = (lessons || []).filter((l) =>
+      l.subject_id === v.subject_id && l.component_id === v.component_id &&
+      l.unit_number >= EDT_UNITE_DEPART && l.unit_number <= unite);
+    if (duMois.length === 0) return;               // matière sans contenu : rien à dire
+    const du = duMois.filter((l) => !l.taught).length;
+    if (du === 0) {
+      lignes.push({ ...v, total: duMois.length, du: 0, occurrences: 0, manque: 0, etat: "ok" });
+      return;
+    }
+    // Combien de fois ce créneau revient d'ici la fin du mois.
+    const occurrences = joursRestants.reduce(
+      (n, jour) => n + v.jours.filter((j) => j === jour).length, 0);
+    const manque = Math.max(0, du - occurrences);
+    const semaines = Math.max(1, Math.ceil(joursRestants.length / 5));
+    const parSemaine = Math.ceil(manque / semaines);
+    // Rattrapable ? On s'autorise au plus deux créneaux ajoutés par jour
+    // d'école restant. Au-delà, ce n'est plus un problème d'emploi du temps.
+    const capacite = joursRestants.length * 2;
+    const matiere = (subjects || []).find((s) => s.id === v.subject_id);
+    lignes.push({
+      ...v,
+      nomMatiere: matiere?.name || v.subject_id,
+      nomComposante: matiere?.components.find((c) => c.id === v.component_id)?.name || v.component_id,
+      total: duMois.length, du, occurrences, manque, parSemaine,
+      etat: manque === 0 ? "ok" : (manque > capacite ? "perdu" : "retard"),
+    });
+  });
+
+  lignes.sort((a, b) => b.manque - a.manque);
+  return {
+    lignes,
+    enRetard: lignes.filter((l) => l.etat === "retard"),
+    perdues: lignes.filter((l) => l.etat === "perdu"),
+    joursRestants: joursRestants.length,
+  };
+}
+
+/** Le voyant lui-même. Deux visages — voir l'en-tête ci-dessus. */
+function RetardNotice({ retard, mois, vendrediLibre, onAjuster }) {
+  if (!retard || (retard.enRetard.length === 0 && retard.perdues.length === 0)) return null;
+  const perdu = retard.perdues.length > 0;
+
+  return (
+    <div style={{
+      marginTop: 16, padding: "16px 18px", borderRadius: 12,
+      background: perdu ? COLORS.card : COLORS.critBg,
+      border: `1px solid ${perdu ? COLORS.negBrd : COLORS.critBrd}`,
+      borderLeft: `5px solid ${perdu ? COLORS.neg : COLORS.crit}`,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ width: 11, height: 11, borderRadius: "50%", background: perdu ? COLORS.neg : COLORS.crit, flexShrink: 0 }} />
+        <div style={{ fontSize: "var(--ec-fs-5)", fontWeight: 800, color: perdu ? COLORS.ink : COLORS.crit, letterSpacing: "-.01em" }}>
+          {perdu
+            ? `${mois} ne peut plus être rattrapé`
+            : `Retard sur le programme de ${mois.toLowerCase()}`}
+        </div>
+      </div>
+
+      {perdu ? (
+        <>
+          <div style={{ fontSize: "var(--ec-fs-3)", color: COLORS.ink2, marginTop: 10, lineHeight: 1.55 }}>
+            Il reste {retard.joursRestants} jour{retard.joursRestants > 1 ? "s" : ""} d'école ce mois-ci,
+            et trop de leçons dues pour qu'un emploi du temps y suffise.
+            Ce n'est plus à vous de le résoudre.
+          </div>
+          <div style={{
+            marginTop: 12, padding: "12px 14px", background: COLORS.panel,
+            border: `1px solid ${COLORS.divider}`, borderRadius: 10,
+            fontSize: "var(--ec-fs-3)", color: COLORS.ink2,
+          }}>
+            Le référent et l'équipe EduCam en sont informés. Les leçons non enseignées ne sont pas
+            perdues : elles passent au mois suivant.
+          </div>
+        </>
+      ) : (
+        <>
+          {retard.enRetard.slice(0, 3).map((l) => (
+            <div key={`${l.subject_id}·${l.component_id}`} style={{
+              marginTop: 10, padding: "12px 14px", background: COLORS.card,
+              border: `1px solid ${COLORS.critBrd}`, borderRadius: 10,
+            }}>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 9, flexWrap: "wrap" }}>
+                <div style={{ fontSize: "var(--ec-fs-4)", fontWeight: 800, color: COLORS.ink }}>{l.nomComposante}</div>
+                <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 700, color: COLORS.neg }}>
+                  {l.manque} leçon{l.manque > 1 ? "s" : ""} de retard
+                </div>
+              </div>
+              <div style={{ fontSize: "var(--ec-fs-3)", color: COLORS.ink2, marginTop: 4 }}>
+                Ajoutez <strong style={{ color: COLORS.ink }}>{l.parSemaine} créneau{l.parSemaine > 1 ? "x" : ""} par semaine</strong>
+                {vendrediLibre ? ", ou utilisez un vendredi en rattrapage." : "."}
+              </div>
+            </div>
+          ))}
+          {onAjuster && (
+            <button type="button" className="ec-btn" style={{ marginTop: 14 }} onClick={onAjuster}>
+              Ajuster mon emploi du temps
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Recalcule les heures d'une journée. Une seule passe, de haut en bas.
+ * Rend, pour chaque ligne : son début, sa fin, et l'écart constaté avant une
+ * ancre (`libre` = minutes creuses, `depasse` = minutes de trop).
+ */
+function edtRecalcule(lignes) {
+  let curseur = edtMin(EDT_DEBUT);
+  return lignes.map((l) => {
+    const t = edtTypeByKey(l.kind);
+    let libre = 0, depasse = 0;
+    if (t?.ancre && l.ancreDebut != null) {
+      if (curseur < l.ancreDebut) { libre = l.ancreDebut - curseur; curseur = l.ancreDebut; }
+      else if (curseur > l.ancreDebut) { depasse = curseur - l.ancreDebut; }
+    }
+    const debut = curseur;
+    curseur += l.minutes;
+    return { ...l, debut, fin: curseur, libre, depasse };
+  });
+}
+
+function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack, retard, moisCourant }) {
+  const [jour, setJour] = useState(1);
+  const [lignes, setLignes] = useState([]);
+  const [avant, setAvant] = useState(null);          // une seule marche arrière
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  // Charge la journée demandée depuis l'emploi du temps en vigueur.
+  useEffect(() => {
+    const dujour = (timetable || [])
+      .filter((s) => s.day_of_week === jour)
+      .slice()
+      .sort((a, b) => (a.slot_order || 0) - (b.slot_order || 0));
+    setLignes(dujour.map((s, i) => ({
+      uid: `${jour}-${i}-${s.id || "n"}`,
+      kind: edtKeyOf(s),
+      subject_id: s.subject_id,
+      component_id: s.component_id,
+      minutes: Math.max(15, (edtMin(s.end_time) || 0) - (edtMin(s.start_time) || 0) || 60),
+      ancreDebut: edtMin(s.start_time),
+    })));
+    setAvant(null);
+    setMsg(null);
+  }, [jour, timetable]);
+
+  const calc = edtRecalcule(lignes);
+  const finJournee = calc.length ? calc[calc.length - 1].fin : edtMin(EDT_DEBUT);
+  const resteFinJournee = edtMin(EDT_FIN) - finJournee;
+  const depassements = calc.filter((l) => l.depasse > 0);
+
+  // Toute modification passe par ici : c'est le seul endroit qui mémorise
+  // l'état précédent, donc le seul qui rend « annuler » fiable.
+  const modifier = (fn) => {
+    setAvant(lignes);
+    setLignes(fn(lignes));
+    setMsg(null);
+  };
+
+  const changeType = (uid, key) => modifier((prev) => prev.map((l) => {
+    if (l.uid !== uid) return l;
+    const t = edtTypeByKey(key);
+    if (t?.lecon) {
+      const s0 = subjects[0];
+      return { ...l, kind: key, subject_id: s0.id, component_id: s0.components[0].id };
+    }
+    return { ...l, kind: key, subject_id: "pause", component_id: key.split(":")[1] };
+  }));
+
+  const changeMatiere = (uid, sid) => modifier((prev) => prev.map((l) =>
+    l.uid === uid
+      ? { ...l, subject_id: sid, component_id: (subjects.find((s) => s.id === sid)?.components[0]?.id || "") }
+      : l));
+
+  const changeChamp = (uid, champ, valeur) => modifier((prev) =>
+    prev.map((l) => (l.uid === uid ? { ...l, [champ]: valeur } : l)));
+
+  const ajouter = () => modifier((prev) => {
+    const s0 = subjects[0];
+    return [...prev, {
+      uid: `n-${Date.now()}`, kind: "lecon",
+      subject_id: s0.id, component_id: s0.components[0].id,
+      minutes: 60, ancreDebut: null,
+    }];
+  });
+
+  const retirer = (uid) => modifier((prev) => prev.filter((l) => l.uid !== uid));
+
+  const annuler = () => { if (avant) { setLignes(avant); setAvant(null); setMsg(null); } };
+
+  /* ────────────────────────────────────────────────────────────────────────
+     ENREGISTRER — UNE SEULE JOURNÉE, et jamais par « tout supprimer ».
+     L'écran de la direction efface tout l'emploi du temps puis le réinsère :
+     une coupure au milieu, et la semaine est perdue. Ici on écrit les lignes
+     de CETTE journée par `upsert` sur l'index unique
+     (owner_teacher_id, day_of_week, slot_order), PUIS on retire la queue
+     devenue inutile si la journée a raccourci.
+     ⚠️ L'ORDRE COMPTE. Upsert d'abord, suppression ensuite : si la seconde
+     échoue il reste des créneaux en trop — visible, réparable. L'inverse
+     laisserait une journée vide.
+     ──────────────────────────────────────────────────────────────────────── */
+  const enregistrer = async () => {
+    if (!online) { setMsg({ t: "Enregistrement impossible sans réseau. Réessayez une fois connectée.", tone: "err" }); return; }
+    setSaving(true); setMsg(null);
+    try {
+      const rows = calc.map((l, i) => {
+        const t = edtTypeByKey(l.kind);
+        const matiere = subjects.find((s) => s.id === l.subject_id);
+        return {
+          level: teacher.level, day_of_week: jour, slot_order: i + 1,
+          start_time: edtHhmm(l.debut), end_time: edtHhmm(l.fin),
+          subject_id: t?.lecon ? l.subject_id : "pause",
+          component_id: t?.lecon ? l.component_id : l.kind.split(":")[1],
+          subject_name: t?.lecon ? (matiere?.name || null) : t.nom,
+          component_name: t?.lecon
+            ? (matiere?.components.find((c) => c.id === l.component_id)?.name || null)
+            : "",
+          school_id: teacher.school_id, owner_teacher_id: teacher.id,
+        };
+      });
+      if (rows.length) {
+        const { error } = await supabase.from("timetable_slots")
+          .upsert(rows, { onConflict: "owner_teacher_id,day_of_week,slot_order" });
+        if (error) throw error;
+      }
+      const { error: e2 } = await supabase.from("timetable_slots").delete()
+        .eq("owner_teacher_id", teacher.id).eq("day_of_week", jour)
+        .gt("slot_order", rows.length);
+      if (e2) throw e2;
+      setAvant(null);
+      setMsg({ t: "Journée enregistrée.", tone: "ok" });
+      if (onSaved) await onSaved();
+    } catch (_) {
+      setMsg({ t: "L'enregistrement a échoué. Rien n'a été perdu — réessayez.", tone: "err" });
+    }
+    setSaving(false);
+  };
+
+  const cellSel = {
+    width: "100%", minHeight: 44, boxSizing: "border-box", padding: "9px 10px",
+    fontSize: "var(--ec-fs-3)", fontWeight: 600, color: COLORS.ink,
+    background: COLORS.card, border: `1px solid ${COLORS.border2}`, borderRadius: 10,
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+        <div>
+          <h1 className="ec-h1">Modifier mon emploi du temps</h1>
+          <p className="ec-sub">
+            Vous choisissez les matières et les durées. Les heures se recalculent seules.
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button type="button" className="ec-btn ec-btn--ghost" onClick={onBack}>Retour</button>
+          <button type="button" className="ec-btn ec-btn--ghost" onClick={annuler} disabled={!avant}>
+            Annuler ma dernière modification
+          </button>
+        </div>
+      </div>
+
+      <RetardNotice retard={retard} mois={moisCourant} vendrediLibre={true} />
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 16 }}>
+        {EDT_JOURS.map((j) => (          <button
+            key={j.n}
+            type="button"
+            onClick={() => setJour(j.n)}
+            aria-current={jour === j.n}
+            style={{
+              minHeight: 44, padding: "10px 18px", borderRadius: 10, cursor: "pointer",
+              fontFamily: "inherit", fontSize: "var(--ec-fs-3)", fontWeight: 700,
+              border: `1px solid ${jour === j.n ? COLORS.g700 : COLORS.border}`,
+              background: jour === j.n ? COLORS.g700 : COLORS.card,
+              color: jour === j.n ? "#FFFFFF" : COLORS.ink2,
+            }}
+          >
+            {j.nom}
+          </button>
+        ))}
+      </div>
+
+      {msg && (
+        <div style={{
+          marginTop: 14, padding: "12px 14px", borderRadius: 10,
+          background: msg.tone === "ok" ? COLORS.g50 : COLORS.critBg,
+          border: `1px solid ${msg.tone === "ok" ? COLORS.g200 : COLORS.critBrd}`,
+          color: msg.tone === "ok" ? COLORS.good : COLORS.crit,
+          fontSize: "var(--ec-fs-3)", fontWeight: 700,
+        }}>{msg.t}</div>
+      )}
+
+      <Card style={{ marginTop: 16, padding: 0, overflow: "hidden" }}>
+        {calc.length === 0 && (
+          <div style={{ padding: 22, fontSize: "var(--ec-fs-3)", color: COLORS.ink3 }}>
+            Aucun créneau ce jour-là. Ajoutez-en un ci-dessous.
+          </div>
+        )}
+
+        {calc.map((l) => {
+          const t = edtTypeByKey(l.kind);
+          const matiere = subjects.find((s) => s.id === l.subject_id);
+          return (
+            <Fragment key={l.uid}>
+              {l.libre > 0 && (
+                <div style={{
+                  padding: "7px 18px", background: COLORS.warnBg,
+                  fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.warn,
+                }}>
+                  {l.libre} min libres avant {t?.nom || "ce créneau"}
+                </div>
+              )}
+              {l.depasse > 0 && (
+                <div style={{
+                  padding: "7px 18px", background: COLORS.critBg,
+                  fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.crit,
+                }}>
+                  Dépassement de {l.depasse} min sur {t?.nom || "ce créneau"} — raccourcissez un créneau au-dessus.
+                </div>
+              )}
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: "92px 110px minmax(0,1fr) minmax(0,1fr) 44px",
+                gap: 10, alignItems: "center", padding: "12px 18px",
+                borderTop: `1px solid ${COLORS.divider}`,
+                background: t?.ancre ? COLORS.panel : COLORS.card,
+              }}>
+                <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 700, color: COLORS.ink }}>
+                  {edtHhmm(l.debut)}
+                </div>
+
+                <select
+                  aria-label={`Durée du créneau de ${edtHhmm(l.debut)}`}
+                  style={cellSel}
+                  value={l.minutes}
+                  onChange={(e) => changeChamp(l.uid, "minutes", Number(e.target.value))}
+                >
+                  {EDT_DUREES.map((d) => <option key={d} value={d}>{d} min</option>)}
+                </select>
+
+                <select
+                  aria-label={`Type du créneau de ${edtHhmm(l.debut)}`}
+                  style={cellSel}
+                  value={l.kind}
+                  onChange={(e) => changeType(l.uid, e.target.value)}
+                >
+                  {EDT_TYPES.map((tt) => <option key={tt.key} value={tt.key}>{tt.label}</option>)}
+                </select>
+
+                {t?.lecon ? (
+                  <div style={{ display: "flex", gap: 8, minWidth: 0 }}>
+                    <select
+                      aria-label={`Matière du créneau de ${edtHhmm(l.debut)}`}
+                      style={{ ...cellSel, flex: "1 1 0" }}
+                      value={l.subject_id}
+                      onChange={(e) => changeMatiere(l.uid, e.target.value)}
+                    >
+                      {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+                    <select
+                      aria-label={`Sous-matière du créneau de ${edtHhmm(l.debut)}`}
+                      style={{ ...cellSel, flex: "1 1 0" }}
+                      value={l.component_id}
+                      onChange={(e) => changeChamp(l.uid, "component_id", e.target.value)}
+                    >
+                      {(matiere?.components || []).map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: "var(--ec-fs-3)", color: COLORS.ink3, fontWeight: 600 }}>
+                    {t?.ancre ? "Horaire fixé par l'école" : "Pas de leçon à projeter"}
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  aria-label={`Retirer le créneau de ${edtHhmm(l.debut)}`}
+                  onClick={() => retirer(l.uid)}
+                  style={{
+                    minHeight: 44, minWidth: 44, borderRadius: 10, cursor: "pointer",
+                    border: `1px solid ${COLORS.border2}`, background: COLORS.card,
+                    color: COLORS.ink2, fontSize: "var(--ec-fs-4)", fontWeight: 700,
+                  }}
+                >×</button>
+              </div>
+
+              {l.minutes < 60 && t?.lecon && (
+                <div style={{
+                  padding: "0 18px 10px 212px", fontSize: "var(--ec-fs-2)", color: COLORS.warn,
+                }}>
+                  {l.minutes} min : une leçon complète en demande environ 60.
+                </div>
+              )}
+            </Fragment>
+          );
+        })}
+
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          gap: 14, padding: "14px 18px", borderTop: `1px solid ${COLORS.divider}`,
+          background: COLORS.panel, flexWrap: "wrap",
+        }}>
+          <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 700, color: resteFinJournee < 0 ? COLORS.crit : COLORS.ink2 }}>
+            {resteFinJournee > 0
+              ? `Fin à ${edtHhmm(finJournee)} — ${resteFinJournee} min libres avant ${EDT_FIN}`
+              : resteFinJournee === 0
+                ? `La journée se termine juste à ${EDT_FIN}`
+                : `La journée dépasse ${EDT_FIN} de ${-resteFinJournee} min`}
+          </div>
+          <button type="button" className="ec-btn ec-btn--ghost" onClick={ajouter}>Ajouter un créneau</button>
+        </div>
+      </Card>
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, marginTop: 16, flexWrap: "wrap" }}>
+        <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3, maxWidth: 620 }}>
+          {depassements.length > 0
+            ? "Des créneaux dépassent une heure fixée par l'école. Vous pouvez enregistrer quand même."
+            : "Les récréations et le programme du matin gardent leur heure : les leçons se placent autour."}
+        </div>
+        <button
+          type="button"
+          className="ec-btn"
+          onClick={enregistrer}
+          disabled={saving}
+        >
+          {saving ? "Enregistrement…" : `Enregistrer ${EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()}`}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 export default function Dashboard({ teacher, parent, onLogout, impersonating, impersonationName, onExitImpersonation, onImpersonate }) {
@@ -1458,7 +2040,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const handleDownloadWeek = async () => {
     const ids = Array.from(new Set(
       (timetable || [])
-        .map((s) => getLessonForTopic(s.subject_id, s.component_id, selectedUnit, selectedWeek))
+        .map((s) => getQueuedLesson(s.subject_id, s.component_id))
         .filter(Boolean)
         .map((l) => l.id)
     ));
@@ -1495,17 +2077,27 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     if (dl && !dl.finished) return;                 // a manual download is running
     if (!teacher?.id || !(timetable || []).length) return;
 
-    const key = `${selectedLevel?.id}·${selectedUnit}·${selectedWeek}`;
-    if (autoTopUpRef.current === key) return;
-    autoTopUpRef.current = key;
-
+    // ⚠️ 2026-10-01 — LA CLÉ DOIT SUIVRE LA FILE, PAS LE CALENDRIER.
+    // Avant la file d'attente, la clé était `niveau·unité·semaine` : elle
+    // changeait quand l'enseignante changeait de semaine, et c'était le bon
+    // repère puisque le contenu d'un créneau dépendait de la semaine.
+    // Désormais le contenu dépend de ce qui RESTE À ENSEIGNER : marquer une
+    // leçon enseignée fait avancer la file sans toucher ni l'unité ni la
+    // semaine. Avec l'ancienne clé, les leçons suivantes ne se seraient donc
+    // JAMAIS préchargées — et l'enseignante serait arrivée en classe sans
+    // réseau avec un créneau vide. La clé est maintenant la LISTE des leçons
+    // à avoir sous la main : elle change exactement quand la file avance.
     const ids = Array.from(new Set(
       (timetable || [])
-        .map((s) => getLessonForTopic(s.subject_id, s.component_id, selectedUnit, selectedWeek))
+        .map((s) => getQueuedLesson(s.subject_id, s.component_id))
         .filter(Boolean)
         .map((l) => l.id)
     ));
     if (ids.length === 0) return;
+
+    const key = `${selectedLevel?.id}·${ids.slice().sort((a, b) => a - b).join(",")}`;
+    if (autoTopUpRef.current === key) return;
+    autoTopUpRef.current = key;
 
     let cancelled = false;
     (async () => {
@@ -1519,7 +2111,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       }
     })();
     return () => { cancelled = true; };
-  }, [online, timetable, selectedUnit, selectedWeek, selectedLevel?.id, teacher?.id, isParent, isAdmin, dl]);
+  }, [online, timetable, availableLessons, selectedLevel?.id, teacher?.id, isParent, isAdmin, dl]);
 
   const getTopic = (unitNum, weekNum, subjectId, componentId) => {
     return topics.find(t => t.unit_number === unitNum && t.week_number === weekNum && t.subject_id === subjectId && t.component_id === componentId)
@@ -1542,6 +2134,55 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       (weekNumber == null || (l.week_number || 1) === weekNumber)
     );
   };
+
+  /* ──────────────────────────────────────────────────────────────────────────
+   * LA FILE D'ATTENTE — décision de Maxime, 2026-10-01.
+   *
+   * `getLessonForTopic` ci-dessus répond par ADRESSE : « la leçon de Grammaire
+   * d'octobre, semaine 2 ». Si l'enseignante n'a pas tenu ce créneau-là cette
+   * semaine-là, le calendrier avance et **elle ne rencontrera jamais cette
+   * leçon** — sans le moindre message. La leçon n'est pas perdue en base : elle
+   * est perdue pour elle.
+   *
+   * Un créneau demande désormais : « la PROCHAINE leçon de Grammaire que je
+   * n'ai pas encore enseignée ». Prendre du retard RALENTIT la file, ne la
+   * troue pas, et le report d'un mois sur l'autre devient naturel — la file ne
+   * se vide pas au 31.
+   *
+   * ⚠️ `getLessonForTopic` RESTE, et doit rester : l'écran « Programme », où
+   * l'enseignante parcourt le curriculum unité par unité, a besoin de l'adresse.
+   * Seuls les CRÉNEAUX de l'emploi du temps passent par la file.
+   *
+   * 📏 `availableLessons` porte déjà tout le niveau, toutes unités confondues
+   * (`fetchAllLessons` ne filtre pas sur l'unité) et chaque leçon y porte son
+   * drapeau `taught`. La file ne coûte donc aucune requête de plus.
+   *
+   * L'ordre est celui du programme : unité, puis semaine, puis `id` pour que
+   * deux leçons de même rang sortent toujours dans le même ordre.
+   * ────────────────────────────────────────────────────────────────────────── */
+  const getQueuedLesson = (subjectId, componentId) => {
+    if (!subjectId || !componentId) return undefined;
+    let next;
+    for (const l of availableLessons) {
+      if (l.subject_id !== subjectId || l.component_id !== componentId) continue;
+      if (l.taught) continue;
+      if (!next) { next = l; continue; }
+      const du = (l.unit_number || 0) - (next.unit_number || 0);
+      if (du < 0) { next = l; continue; }
+      if (du > 0) continue;
+      const dw = (l.week_number || 1) - (next.week_number || 1);
+      if (dw < 0) { next = l; continue; }
+      if (dw > 0) continue;
+      if ((l.id || 0) < (next.id || 0)) next = l;
+    }
+    return next;
+  };
+
+  // Combien de leçons restent dues dans cette sous-matière, toutes unités
+  // confondues. Sert au voyant de retard et à l'écran de validation.
+  const queueDepth = (subjectId, componentId) =>
+    availableLessons.filter((l) =>
+      l.subject_id === subjectId && l.component_id === componentId && !l.taught).length;
 
   // Un créneau, une carte. La base a laissé passer des lignes en double —
   // quatre chemins d'écriture différents alimentent `timetable_slots` et aucun
@@ -1781,7 +2422,20 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   });
 
   const slotLesson = (sl) =>
-    sl ? getLessonForTopic(sl.subject_id, sl.component_id, selectedUnit, selectedWeek) : null;
+    sl ? getQueuedLesson(sl.subject_id, sl.component_id) : null;
+
+  /* Le voyant de retard. Calculé sur le MOIS EN COURS — pas sur le mois
+     qu'elle est en train de consulter : un retard d'octobre ne disparaît pas
+     parce qu'on feuillette novembre. Rien n'est affiché pour les parents, la
+     direction ou l'administrateur : c'est son outil de pilotage à elle. */
+  const uniteCourante = edtUniteDuMois(new Date());
+  const moisCourant = MONTH_UNIT_MAP.find((m) => m.unit === uniteCourante)?.month || "";
+  const retard = (!isParent && !isAdmin && !isSchoolAdmin && uniteCourante)
+    ? edtCalculeRetard({
+        lessons: availableLessons, timetable,
+        unite: uniteCourante, subjects: SUBJECTS, aujourdhui: new Date(),
+      })
+    : null;
 
   const minutesUntil = upcomingSlot && !currentSlot
     ? (toMinutes(upcomingSlot.start_time) || 0) - minutesNow
@@ -1793,7 +2447,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
      hors ligne : l'accueil doit rester lisible sans réseau.
      ------------------------------------------------------------------------ */
   const heroLessonId = upcomingSlot
-    ? (getLessonForTopic(upcomingSlot.subject_id, upcomingSlot.component_id, selectedUnit, selectedWeek) || {}).id
+    ? (getQueuedLesson(upcomingSlot.subject_id, upcomingSlot.component_id) || {}).id
     : null;
 
   useEffect(() => {
@@ -3349,7 +4003,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const showingToday = todayDow !== 0 && selectedDay === todayDow;
 
     const weekIds = Array.from(new Set((timetable || [])
-      .map((sl) => getLessonForTopic(sl.subject_id, sl.component_id, selectedUnit, selectedWeek))
+      .map((sl) => getQueuedLesson(sl.subject_id, sl.component_id))
       .filter(Boolean).map((l) => l.id)));
     const already = weekIds.filter((id) => cachedIds.includes(id)).length;
     const downloading = dl && !dl.finished;
@@ -3366,7 +4020,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                 : `${selectedLevel.name} — ${selectedLevel.full}`}
             </p>
           </div>
-          {!isParent && (
+          {!isParent && !isAdmin && !isSchoolAdmin && (
+            <button
+              type="button"
+              className="ec-btn ec-btn--ghost"
+              onClick={() => setScreen("timetable")}
+            >
+              Modifier mon emploi du temps
+            </button>
+          )}          {!isParent && (
             <div>
               <label htmlFor="ec-cal-level" className="ec-sr">Niveau</label>
               <select
@@ -3381,6 +4043,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             </div>
           )}
         </div>
+
+        <RetardNotice
+          retard={retard}
+          mois={moisCourant}
+          vendrediLibre={true}
+          onAjuster={() => setScreen("timetable")}
+        />
 
         {/* ---- Période (unité / mois) ---- */}
         <div className="ec-grid" style={{ marginTop: 18 }}>
@@ -3566,7 +4235,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                   const topic = getTopic(selectedUnit, selectedWeek, slot.subject_id, slot.component_id);
                   const color = getSubjectColor(slot.subject_id);
                   const tt = isTeacherTaught(slot.subject_id);
-                  const lesson = (topic && !tt) ? getLessonForTopic(slot.subject_id, slot.component_id, selectedUnit, selectedWeek) : null;
+                  const lesson = (topic && !tt) ? getQueuedLesson(slot.subject_id, slot.component_id) : null;
                   const st = toMinutes(slot.start_time), en = toMinutes(slot.end_time);
                   const isNow = showingToday && st != null && en != null && minutesNow >= st && minutesNow < en;
                   const isPast = showingToday && en != null && minutesNow >= en;
@@ -6207,6 +6876,21 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             hook, it must be lifted to module level instead, NOT switched back to
             <Element /> form. */}
         {screen === "calendar" && CalendarView()}
+        {/* L'éditeur appartient à l'enseignante : ni parent, ni administrateur,
+            ni direction. Monté en `<TimetableEditor/>` SANS risque, parce qu'il
+            est déclaré au niveau module (voir son en-tête). */}
+        {screen === "timetable" && !isParent && !isAdmin && !isSchoolAdmin && (
+          <TimetableEditor
+            teacher={teacher}
+            timetable={timetable}
+            subjects={SUBJECTS}
+            online={online}
+            onSaved={fetchTimetable}
+            onBack={() => setScreen("calendar")}
+            retard={retard}
+            moisCourant={moisCourant}
+          />
+        )}
         {screen === "programme" && ProgrammeView()}
         {screen === "readiness" && currentLesson && <ReadinessQuiz lesson={currentLesson} teacherId={teacher?.id} onPass={() => { setLessonPassed(true); setScreen("lesson"); }} onBack={() => setScreen("lesson")} />}
         {screen === "lesson" && LessonScreen()}

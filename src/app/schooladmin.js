@@ -80,6 +80,16 @@ const componentName = (subjId, compId) => (subjectById(subjId)?.components.find(
 const BREAK_TYPES = [
   { subject_id: "pause", component_id: "recreation", name: "Récréation", comp: "" },
   { subject_id: "pause", component_id: "dejeuner", name: "Pause déjeuner", comp: "" },
+  // Ajoutés le 2026-10-01 avec l'emploi du temps de l'enseignante. Ces types
+  // existaient DÉJÀ en base (chargés dans CM1-A le même jour) mais pas ici :
+  // un « Enregistrer » depuis cet écran aurait remis leur libellé à null, et
+  // la journée aurait affiché des créneaux sans nom. Qui ajoute un type de
+  // créneau côté enseignante l'ajoute ICI dans le même lot.
+  { subject_id: "pause", component_id: "programme", name: "Programme de l'école", comp: "" },
+  { subject_id: "pause", component_id: "english", name: "English (enseignant extérieur)", comp: "" },
+  { subject_id: "pause", component_id: "tic", name: "TIC", comp: "" },
+  { subject_id: "pause", component_id: "evaluation", name: "Évaluation", comp: "" },
+  { subject_id: "pause", component_id: "revision", name: "Révision", comp: "" },
   { subject_id: "etude", component_id: "devoirs", name: "Étude surveillée", comp: "Devoirs" },
 ];
 const isBreak = (sid) => sid === "pause" || sid === "etude";
