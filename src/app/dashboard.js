@@ -1095,6 +1095,202 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
   );
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * LA BOÎTE DE DIALOGUE VERS L'ADMINISTRATEUR — 2026-10-01
+ *
+ * Demande de Maxime : une fenêtre flottante, présente sur TOUTES les pages,
+ * par laquelle un utilisateur lui écrit directement. Surtout les parents — les
+ * enseignants ont d'autres moyens — mais ouverte à tous.
+ *
+ * 🔴 CE QUI TIENT LA CONFIDENTIALITÉ, C'EST `school_id` À NULL, PAS L'ÉCRAN.
+ * La politique `messages read scoped` laisse un directeur lire tout message
+ * portant le `school_id` de son école. Sans `school_id`, cette branche ne
+ * s'applique jamais : seuls l'expéditeur, le destinataire et l'administrateur
+ * lisent. Vérifié en base le 2026-10-01 en se faisant passer pour un référent :
+ * 0 ligne. **Ne JAMAIS ajouter de `school_id` à ces messages** — ce serait
+ * rendre tout le fil visible à l'école, rétroactivement et en silence.
+ *
+ * Le message est ADRESSÉ à l'administrateur (`recipient_id`), et pas laissé
+ * sans destinataire : c'est ce qui fait qu'il arrive dans sa messagerie et que
+ * `send-direct-message` sait quel numéro notifier.
+ *
+ * 🔴 AU NIVEAU MODULE : ce composant a des hooks. Déclaré dans le rendu, il
+ * serait une identité neuve à chaque frappe et le champ perdrait le focus —
+ * le piège React payé quatre fois sur ce projet.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+function AdminChat({ moiId, online, pushToast }) {
+  const [ouvert, setOuvert] = useState(false);
+  const [fil, setFil] = useState([]);
+  const [texte, setTexte] = useState("");
+  const [envoi, setEnvoi] = useState(false);
+  const [adminId, setAdminId] = useState(null);
+  const basRef = useRef(null);
+
+  // Le fil complet : tout ce qui circule entre cette personne et
+  // l'administration, c'est-à-dire tout message sans école où elle est
+  // expéditrice ou destinataire. La RLS a déjà restreint la lecture ; ce
+  // filtre ne fait qu'écarter les messages de l'école.
+  const charger = async () => {
+    if (!moiId) return;
+    const { data } = await supabase.from("messages").select("*")
+      .is("school_id", null)
+      .or(`sender_id.eq.${moiId},recipient_id.eq.${moiId}`)
+      .order("created_at", { ascending: true });
+    setFil(data || []);
+  };
+
+  useEffect(() => {
+    if (!ouvert) return;
+    charger();
+    supabase.rpc("educam_support_admin").then(({ data }) => setAdminId(data || null));
+  }, [ouvert, moiId]);
+
+  // Toujours montrer le dernier message : un fil qui s'ouvre en haut oblige à
+  // faire défiler pour voir la réponse qu'on attendait.
+  useEffect(() => {
+    if (ouvert && basRef.current) basRef.current.scrollTop = basRef.current.scrollHeight;
+  }, [ouvert, fil.length]);
+
+  const envoyer = async () => {
+    const corps = texte.trim();
+    if (!corps || envoi) return;
+    if (!online) { pushToast("Pas de réseau. Réessayez une fois connectée.", "error"); return; }
+    if (!adminId) { pushToast("Destinataire introuvable. Réessayez dans un instant.", "error"); return; }
+    setEnvoi(true);
+    try {
+      // Le premier message d'un échange EST la racine du fil : on fixe son id
+      // nous-mêmes pour que `thread_id` vaille `id` sans second aller-retour.
+      const racine = fil.find((m) => m.thread_id)?.thread_id || newId();
+      const { data, error } = await supabase.from("messages").insert({
+        id: fil.length === 0 ? racine : undefined,
+        sender_id: moiId,
+        recipient_id: adminId,
+        audience: "admin",
+        school_id: null,          // 🔴 voir l'en-tête : c'est la confidentialité
+        student_id: null,
+        thread_id: racine,
+        subject: "Message à l'administration",
+        body: corps,
+      }).select().single();
+      if (error) throw error;
+      setTexte("");
+      setFil((prev) => [...prev, data]);
+      // La notification WhatsApp est un PLUS, jamais une dépendance : le
+      // message est déjà parti. On n'échoue pas si elle échoue.
+      notifyDirectMessage({ messageId: data.id }).catch(() => {});
+    } catch (_) {
+      pushToast("Impossible d'envoyer. Rien n'est perdu, réessayez.", "error");
+    }
+    setEnvoi(false);
+  };
+
+  if (!moiId) return null;
+
+  return (
+    <>
+      {!ouvert && (
+        <button
+          type="button"
+          onClick={() => setOuvert(true)}
+          aria-label="Écrire à l'administration"
+          style={{
+            position: "fixed", right: 20, bottom: 20, zIndex: 9000,
+            minHeight: 56, minWidth: 56, padding: "0 20px", borderRadius: 28,
+            border: `1px solid ${COLORS.g700}`, background: COLORS.g500, color: "#FFFFFF",
+            fontFamily: "inherit", fontSize: "var(--ec-fs-3)", fontWeight: 700,
+            boxShadow: SHADOW.md, cursor: "pointer",
+          }}
+        >
+          Nous écrire
+        </button>
+      )}
+
+      {ouvert && (
+        <div style={{
+          position: "fixed", right: 20, bottom: 20, zIndex: 9000,
+          width: "min(380px, calc(100vw - 32px))", maxHeight: "min(560px, calc(100vh - 40px))",
+          display: "flex", flexDirection: "column",
+          background: COLORS.card, border: `1px solid ${COLORS.border}`,
+          borderRadius: 14, boxShadow: SHADOW.md, overflow: "hidden",
+        }}>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            gap: 10, padding: "12px 14px", background: COLORS.g700,
+          }}>
+            <div>
+              <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 800, color: "#FFFFFF" }}>
+                Écrire à l'administration
+              </div>
+              <div style={{ fontSize: "var(--ec-fs-1)", color: COLORS.g100 }}>
+                Votre école ne voit pas ces messages.
+              </div>
+            </div>
+            <button
+              type="button" onClick={() => setOuvert(false)} aria-label="Fermer"
+              style={{
+                minHeight: 40, minWidth: 40, borderRadius: 10, cursor: "pointer",
+                border: "1px solid rgba(255,255,255,.35)", background: "transparent",
+                color: "#FFFFFF", fontSize: "var(--ec-fs-4)", fontWeight: 700,
+              }}
+            >×</button>
+          </div>
+
+          <div ref={basRef} style={{ flexGrow: 1, overflowY: "auto", padding: 14, background: COLORS.panel }}>
+            {fil.length === 0 ? (
+              <div style={{ fontSize: "var(--ec-fs-3)", color: COLORS.ink3, padding: "8px 2px" }}>
+                Posez votre question ici. Elle arrive directement à l'administration
+                d'EduCam, qui vous répond dans cette même fenêtre.
+              </div>
+            ) : fil.map((m) => {
+              const demoi = m.sender_id === moiId;
+              return (
+                <div key={m.id} style={{ display: "flex", justifyContent: demoi ? "flex-end" : "flex-start", marginBottom: 9 }}>
+                  <div style={{
+                    maxWidth: "85%", padding: "9px 12px", borderRadius: 12,
+                    background: demoi ? COLORS.g50 : COLORS.card,
+                    border: `1px solid ${demoi ? COLORS.g200 : COLORS.border}`,
+                  }}>
+                    <div style={{ fontSize: "var(--ec-fs-1)", fontWeight: 700, color: COLORS.ink3, textTransform: "uppercase", letterSpacing: ".06em" }}>
+                      {demoi ? "Vous" : "Administration"}
+                    </div>
+                    <div style={{ fontSize: "var(--ec-fs-3)", color: COLORS.ink, marginTop: 2, whiteSpace: "pre-wrap" }}>
+                      {m.body}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ padding: 12, borderTop: `1px solid ${COLORS.divider}`, display: "flex", gap: 8, alignItems: "flex-end" }}>
+            <label htmlFor="ec-adminchat" className="ec-sr">Votre message</label>
+            <textarea
+              id="ec-adminchat"
+              value={texte}
+              onChange={(e) => setTexte(e.target.value)}
+              rows={2}
+              placeholder="Votre message…"
+              style={{
+                flexGrow: 1, resize: "none", minHeight: 44, padding: "10px 12px",
+                fontFamily: "inherit", fontSize: "var(--ec-fs-3)", color: COLORS.ink,
+                border: `1px solid ${COLORS.border2}`, borderRadius: 10, background: COLORS.card,
+              }}
+            />
+            <button
+              type="button" className="ec-btn" onClick={envoyer}
+              disabled={envoi || !texte.trim()}
+              style={{ minHeight: 44 }}
+            >
+              {envoi ? "…" : "Envoyer"}
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function Dashboard({ teacher, parent, onLogout, impersonating, impersonationName, onExitImpersonation, onImpersonate }) {
   // Only admins may edit base content; everyone else is a read-only reviewer
   // who can leave feedback. Defaults to reviewer if role is missing.
@@ -1118,6 +1314,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [parentResults, setParentResults] = useState([]);      // the child's daily results
   // ---- Unified inbox (parents AND teachers) ----
   const [inbox, setInbox] = useState([]);                      // messages received by the current user
+  const [adminReply, setAdminReply] = useState("");            // reponse de l'administrateur dans un fil
+  const [adminSending, setAdminSending] = useState(false);
   const [openMsg, setOpenMsg] = useState(null);                // the message opened in the reading pane
 
   // ─── ÉCHANGES DE L'ÉCOLE (direction et référent) — LOT D ───────────────────
@@ -1203,6 +1401,10 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         q = supabase.from("messages").select("*")
           .or(`student_id.eq.${parent.student_id},recipient_id.eq.${parent.id}`);
       } else if (!isParent && teacher?.id) {
+        // ⚠️ `eq` et non `or` : un administrateur reçoit les messages de la
+        // boîte de dialogue comme n'importe quel autre message, parce qu'ils
+        // lui sont ADRESSÉS (recipient_id). C'est exactement pourquoi ils
+        // portent un destinataire au lieu d'être laissés anonymes.
         q = supabase.from("messages").select("*").eq("recipient_id", teacher.id);
       }
       if (!q) { if (!cancelled) setInbox([]); return; }
@@ -1233,6 +1435,36 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     }
   };
   const unreadCount = inbox.filter((m) => !m.read_at).length;
+
+  /* Répondre dans un fil de la boîte de dialogue. La réponse part vers
+     l'expéditeur d'origine, garde le `thread_id` du fil (ou, pour un fil
+     ancien sans racine, prend l'id du message auquel on répond) et ne porte
+     🔴 AUCUN `school_id`. */
+  const repondreAdmin = async (m) => {
+    const corps = adminReply.trim();
+    if (!corps || adminSending) return;
+    if (!online) { pushToast("Pas de réseau. Réessayez une fois connecté.", "error"); return; }
+    setAdminSending(true);
+    try {
+      const { data, error } = await supabase.from("messages").insert({
+        sender_id: teacher.id,
+        recipient_id: m.sender_id,
+        audience: "admin",
+        school_id: null,
+        student_id: null,
+        thread_id: m.thread_id || m.id,
+        subject: m.subject || "Réponse de l'administration",
+        body: corps,
+      }).select().single();
+      if (error) throw error;
+      setAdminReply("");
+      pushToast("Réponse envoyée.", "success");
+      notifyDirectMessage({ messageId: data.id }).catch(() => {});
+    } catch (_) {
+      pushToast("Impossible d'envoyer la réponse. Réessayez.", "error");
+    }
+    setAdminSending(false);
+  };
 
   // ---- LOT D : charger les échanges enseignant → parent de l'école ----------
   // Tout est fait par `educam_school_exchanges` : le contrôle de rôle, le
@@ -3612,6 +3844,36 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                 Ouvrir le lien ↗
               </a>
             )}
+          </div>
+        )}
+
+        {/* RÉPONSE À UN MESSAGE DE LA BOÎTE DE DIALOGUE (2026-10-01).
+            Seulement pour l'administrateur, et seulement sur un message qui
+            vient de ce canal (`audience === "admin"`). La réponse reste dans
+            le MÊME fil et, surtout, SANS `school_id` : c'est lui qui tient la
+            confidentialité vis-à-vis de la direction. L'ajouter ici ouvrirait
+            tout l'échange à l'école, rétroactivement. */}
+        {isAdmin && m.audience === "admin" && m.sender_id && (
+          <div style={{ marginTop: 22, paddingTop: 18, borderTop: `1px solid ${COLORS.border}` }}>
+            <CardLabel>Répondre</CardLabel>
+            <label htmlFor="ec-admin-reply" className="ec-sr">Votre réponse</label>
+            <textarea
+              id="ec-admin-reply"
+              value={adminReply}
+              onChange={(e) => setAdminReply(e.target.value)}
+              rows={3}
+              placeholder="Votre réponse arrive dans sa fenêtre de dialogue…"
+              style={{
+                width: "100%", boxSizing: "border-box", resize: "vertical", marginTop: 8,
+                padding: "11px 13px", fontFamily: "inherit", fontSize: FONT.md, color: COLORS.ink,
+                border: `1px solid ${COLORS.border2}`, borderRadius: 10, background: COLORS.card,
+              }}
+            />
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
+              <Button onClick={() => repondreAdmin(m)} disabled={adminSending || !adminReply.trim()}>
+                {adminSending ? "Envoi…" : "Envoyer la réponse"}
+              </Button>
+            </div>
           </div>
         )}
       </Card>
@@ -7440,6 +7702,18 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
 
       {/* Proposée seulement après quelques ouvertures, et un refus est respecté 30 jours. */}
       <InstallPrompt enabled={OFFLINE_ENABLED && screen !== "lesson"} />
+
+      {/* La boîte de dialogue vers l'administration : sur toutes les pages, pour
+          tout le monde SAUF l'administrateur lui-même — il n'a pas à s'écrire.
+          Masquée pendant une leçon projetée : rien ne doit flotter devant une
+          classe. Montée en `<AdminChat/>` sans risque : niveau module. */}
+      {PROFILES_ENABLED && !isAdmin && screen !== "lesson" && (
+        <AdminChat
+          moiId={isParent ? parent?.id : teacher?.id}
+          online={online}
+          pushToast={pushToast}
+        />
+      )}
       <ToastViewport />
     </div>
   );
