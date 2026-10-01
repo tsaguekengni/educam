@@ -243,6 +243,48 @@ function isSvg(url) {
   return !!url && /\.svg(\?|#|$)/i.test(url);
 }
 
+/* ──────────────────────────────────────────────────────────────────────────
+ * TAILLES DE LA PROJECTION — les seuls nombres à toucher pour réajuster.
+ *
+ * Demande de Maxime, 2026-10-01 : au fond de la classe, le texte projeté
+ * était trop petit pour des CM1, et l'écran restait aux trois quarts vide.
+ * Le corps du texte est DOUBLÉ, la trace écrite (« à recopier », section
+ * bilan) TRIPLÉE.
+ *
+ * ⚠️ Ces facteurs multiplient l'échelle AUTOMATIQUE (`fitVw` ci-dessous, qui
+ * réduit la taille quand la leçon est longue). Ils ne la remplacent pas :
+ * une leçon de 6 000 signes reste plus petite qu'une leçon de 300, sinon
+ * elle demanderait dix écrans de défilement.
+ *
+ * ⚠️ Les PLAFONDS ne sont pas décoratifs. Sans eux, une leçon très courte
+ * monterait à ~185 px par lettre et n'afficherait plus qu'une vingtaine de
+ * caractères par ligne : illisible pour une autre raison. Si Maxime veut
+ * encore plus gros, c'est le plafond qu'il faut lever, pas seulement le
+ * facteur.
+ *
+ * 📏 Mesuré en base le 2026-10-01, pour ne pas régler à l'aveugle : les 171
+ * leçons font de 1 594 à 6 499 signes — AUCUNE n'est dans les bandes
+ * « courte » ni « moyenne ». Seules les deux dernières bandes servent
+ * réellement, et les plafonds n'y mordent pas : les facteurs ×2 et ×3 sont
+ * donc appliqués exactement. Les plafonds ne protègent qu'un cas qui
+ * n'existe pas encore.
+ * ────────────────────────────────────────────────────────────────────────── */
+const PROJ_BODY_X = 2;        // corps du texte           (1 = taille d'avant)
+const PROJ_COPY_X = 3;        // section « à recopier »   (1 = taille d'avant)
+const PROJ_BODY_MAX_VW = 3.6; // plafond du corps, en vw  (~69 px sur 1920 px)
+const PROJ_COPY_MAX_VW = 6.0; // plafond « à recopier »   (~115 px sur 1920 px)
+const PROJ_BODY_MIN_PX = 28;  // plancher : écran étroit, où 1 vw ne vaut rien
+const PROJ_COPY_MIN_PX = 40;
+// Largeur de la colonne. Elle était à 1200 px (et le texte à 1000 px) : sur un
+// vidéoprojecteur 1920, c'était 40 % de l'écran perdu en marges — la moitié du
+// « trop de blanc » signalé par Maxime. Le reste vient de l'interligne, réduit
+// ci-dessous puisque les lettres, elles, ont grossi.
+const PROJ_MAX_W = 1760;
+// La vidéo garde SON propre plafond, et il est plus bas que celui du texte :
+// une vidéo 16/9 étalée sur 1760 px fait 990 px de haut et ne tient plus dans
+// un écran de 1080 px. 1400 px → 787 px de haut, ça tient.
+const PROJ_VIDEO_MAX_W = 1400;
+
 /**
  * A lesson video, played from the copy stored on this device whenever there is
  * one.
@@ -302,7 +344,7 @@ function LessonVideo({ url, caption, online, variant = "reader", baseFontVw = 1 
     : { fontSize: "var(--ec-fs-3)", color: "#6B7280", marginTop: 6, textAlign: "center" };
 
   const frame = (inner) => (
-    <div style={proj ? { width: "100%", maxWidth: 1000, margin: "0 auto" } : undefined}>
+    <div style={proj ? { width: "100%", maxWidth: PROJ_VIDEO_MAX_W, margin: "0 auto" } : undefined}>
       {inner}
       {caption && <div style={captionStyle}>{caption}</div>}
     </div>
@@ -4876,8 +4918,17 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       (sectionBlocks[s.id] || []).filter(b => b.block_type === "text").map(b => b.text_content || "")
     ).join("");
     const len = allText.length;
-    const baseFontVw = len < 500 ? 2.8 : len < 1500 ? 2.2 : len < 4000 ? 1.7 : 1.4;
-    const basePx = `max(18px, ${baseFontVw}vw)`;
+    // Échelle automatique : plus la leçon est longue, plus les lettres sont
+    // petites, sinon la classe passerait la séance à défiler.
+    const fitVw = len < 500 ? 2.8 : len < 1500 ? 2.2 : len < 4000 ? 1.7 : 1.4;
+    // Puis les facteurs de 2026-10-01 (voir PROJ_* en haut du fichier).
+    // `baseFontVw` garde son nom : titres, sous-titres, légendes et la peau
+    // « projecteur » de LessonVideo s'y accrochent déjà et grossissent donc
+    // dans la même proportion que le corps du texte.
+    const baseFontVw = Math.min(fitVw * PROJ_BODY_X, PROJ_BODY_MAX_VW);
+    const copyFontVw = Math.min(fitVw * 1.15 * PROJ_COPY_X, PROJ_COPY_MAX_VW);
+    const basePx = `max(${PROJ_BODY_MIN_PX}px, ${baseFontVw}vw)`;
+    const copyPx = `max(${PROJ_COPY_MIN_PX}px, ${copyFontVw}vw)`;
 
     return (
       <div ref={projectorScrollRef} tabIndex={-1} style={{
@@ -4905,7 +4956,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         </div>
 
         {/* Content */}
-        <div style={{ maxWidth: 1200, margin: "0 auto", padding: isMobile ? "72px 16px 60px" : "60px 48px 80px" }}>
+        <div style={{ maxWidth: PROJ_MAX_W, margin: "0 auto", padding: isMobile ? "72px 16px 60px" : "48px 40px 72px" }}>
           {/* Lesson header */}
           <div style={{
             background: `linear-gradient(135deg, ${color}18, ${color}08)`,
@@ -4971,12 +5022,19 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                           const isCopyText = section.section_type === "bilan";
                           return (
                             <div key={k} style={{
-                              fontSize: isCopyText ? `max(21px, ${baseFontVw * 1.15}vw)` : basePx,
+                              fontSize: isCopyText ? copyPx : basePx,
                               color: "#1F2937",
                               fontWeight: isCopyText ? 600 : 400,
-                              lineHeight: isCopyText ? 2.1 : 1.9,
+                              // Interligne resserré depuis 2026-10-01 : à 2,1 et
+                              // 1,9 il était calibré pour de petites lettres.
+                              // Avec des lettres deux à trois fois plus hautes,
+                              // le même rapport faisait des trous entre les
+                              // lignes plus grands que les lettres elles-mêmes.
+                              lineHeight: isCopyText ? 1.8 : 1.6,
                               whiteSpace: "pre-wrap",
-                              maxWidth: 1000
+                              // Plus de colonne à 1000 px : le texte occupe
+                              // toute la largeur utile de la projection.
+                              maxWidth: "100%"
                             }}>
                               {renderRichText(block.text_content)}
                             </div>
