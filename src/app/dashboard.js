@@ -1275,7 +1275,7 @@ function AdminChat({ moiId, online, pushToast, usurpation }) {
         school_id: null,          // 🔴 voir l'en-tête : c'est la confidentialité
         student_id: null,
         thread_id: racine,
-        subject: "Message à l'administration",
+        subject: "Communiquer avec la plateforme",
         body: corps,
       }).select().single();
       if (error) throw error;
@@ -1307,7 +1307,7 @@ function AdminChat({ moiId, online, pushToast, usurpation }) {
         <button
           type="button"
           onClick={() => setOuvert(true)}
-          aria-label="Écrire à l'administration"
+          aria-label="Communiquer avec la plateforme"
           className="ec-adminchat"
           style={{
             minHeight: 56, minWidth: 56, padding: "0 20px", borderRadius: 28,
@@ -1333,7 +1333,7 @@ function AdminChat({ moiId, online, pushToast, usurpation }) {
           }}>
             <div>
               <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 800, color: "#FFFFFF" }}>
-                Écrire à l'administration
+                Communiquer avec la plateforme
               </div>
               <div style={{ fontSize: "var(--ec-fs-1)", color: COLORS.g100 }}>
                 Votre école ne voit pas ces messages.
@@ -1352,8 +1352,9 @@ function AdminChat({ moiId, online, pushToast, usurpation }) {
           <div ref={basRef} style={{ flexGrow: 1, overflowY: "auto", padding: 14, background: COLORS.panel }}>
             {fil.length === 0 ? (
               <div style={{ fontSize: "var(--ec-fs-3)", color: COLORS.ink3, padding: "8px 2px" }}>
-                Posez votre question ici. Elle arrive directement à l'administration
-                d'EduCam, qui vous répond dans cette même fenêtre.
+                Posez votre question ici. Elle arrive directement à l'équipe
+                d'EduCam — pas à votre école — et la réponse revient dans cette
+                même fenêtre.
               </div>
             ) : fil.map((m) => {
               const demoi = m.sender_id === moiId;
@@ -1439,6 +1440,12 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [parentResults, setParentResults] = useState([]);      // the child's daily results
   // ---- Unified inbox (parents AND teachers) ----
   const [inbox, setInbox] = useState([]);                      // messages received by the current user
+  // Qui a écrit : { [id]: { nom, role } }. Rempli après coup, parce que la
+  // table `messages` ne porte qu'un `sender_id` et qu'un expéditeur peut être
+  // un ENSEIGNANT ou un PARENT — deux tables différentes, donc pas de jointure
+  // unique possible. Vide tant que la recherche n'a pas répondu : l'affichage
+  // retombe alors sur l'ancien libellé, jamais sur un blanc.
+  const [senderNames, setSenderNames] = useState({});
   const [adminReply, setAdminReply] = useState("");            // reponse de l'administrateur dans un fil
   const [adminSending, setAdminSending] = useState(false);
   const [openMsg, setOpenMsg] = useState(null);                // the message opened in the reading pane
@@ -1542,6 +1549,67 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     return () => { cancelled = true; };
   }, [isParent, parent?.student_id, parent?.id, teacher?.id]);
 
+  // ---- Qui a écrit ? (2026-10-02) ----
+  // Signalé par Maxime en recevant le premier message de la boîte de dialogue :
+  // « doesn't reference the sender, so am not able to recognize who is sending
+  // the message ». L'écran affichait « École » pour tout le monde — le libellé
+  // était déduit de l'AUDIENCE et de l'école de celui qui REGARDE, jamais de
+  // l'expéditeur. Avec un seul canal école→administration ça passait ; avec une
+  // boîte de dialogue ouverte à tous, c'est devenu faux pour tout le monde.
+  //
+  // ⚠️ VOLONTAIREMENT SANS CACHE HORS LIGNE. On aurait pu ranger ces noms à
+  // côté de la boîte de réception, mais cela aurait changé la FORME de l'entrée
+  // en cache, donc obligé à en changer le NOM — le piège payé le 2026-09-30.
+  // Comme l'absence de nom retombe proprement sur l'ancien libellé, le gain ne
+  // valait pas le risque. Sans réseau, on lit « École » comme avant.
+  useEffect(() => {
+    const ids = Array.from(new Set((inbox || []).map((m) => m.sender_id).filter(Boolean)))
+      .filter((id) => !senderNames[id]);
+    if (ids.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const trouve = {};
+      try {
+        const { data: ens } = await supabase.from("teachers")
+          .select("id, full_name, role").in("id", ids);
+        (ens || []).forEach((t) => {
+          // « plateforme » et non « administration » : c'est la qualité affichée
+          // À CÔTÉ DU NOM, donc lue par des parents et des enseignants. Dans une
+          // école, « l'administration » désigne la direction — exactement la
+          // confusion que Maxime a signalée le 2026-10-02 sur le titre du canal.
+          const role = t.role === "admin" ? "plateforme"
+            : t.role === "school_admin" ? "direction"
+            : t.role === "referent" ? "référent"
+            : "enseignant";
+          trouve[t.id] = { nom: t.full_name || "Membre du personnel", role };
+        });
+      } catch (_) {}
+      // Les parents vivent dans une AUTRE table. On ne cherche que ceux qui
+      // n'ont pas été trouvés côté personnel, pour ne pas demander pour rien.
+      const restants = ids.filter((id) => !trouve[id]);
+      if (restants.length) {
+        try {
+          const { data: par } = await supabase.from("parents")
+            .select("id, full_name").in("id", restants);
+          (par || []).forEach((p) => {
+            trouve[p.id] = { nom: p.full_name || "Parent", role: "parent" };
+          });
+        } catch (_) {}
+      }
+      // ⚠️ On n'écrit QUE si on a trouvé quelque chose. Sans ce garde-fou,
+      // l'effet se redéclencherait en boucle sur un expéditeur introuvable.
+      if (!cancelled && Object.keys(trouve).length) {
+        setSenderNames((prev) => ({ ...prev, ...trouve }));
+      }
+    })();
+    return () => { cancelled = true; };
+    // Dépendance sur `inbox` SEULEMENT, à dessein. `senderNames` est lu pour
+    // savoir qui reste à chercher, mais l'ajouter ici ferait repasser l'effet à
+    // chaque nom trouvé. Ce n'est pas une boucle — la liste d'identifiants
+    // serait vide et l'effet s'arrêterait aussitôt — mais c'est du bruit pour
+    // rien. Si un contrôle de dépendances le signale, ne pas « corriger ».
+  }, [inbox]);
+
   // Open a message in the reading pane, marking it read on first open.
   const openMessage = (m) => {
     setOpenMsg(m);
@@ -1578,7 +1646,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         school_id: null,
         student_id: null,
         thread_id: m.thread_id || m.id,
-        subject: m.subject || "Réponse de l'administration",
+        subject: m.subject || "Réponse de la plateforme",
         body: corps,
       }).select().single();
       if (error) throw error;
@@ -3883,7 +3951,19 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // fait plus disparaître la boîte. Sur téléphone, où deux volets ne tiennent
   // pas, le comportement d'avant est conservé — la lecture remplace la liste.
   const MessagesInbox = () => {
-    const senderLabel = (m) => (m.audience === "teacher" ? "Administration" : (schoolContext?.name || "École"));
+    // Le NOM d'abord ; à défaut, exactement l'ancien libellé. Écrit dans cet
+    // ordre exprès : si la recherche échoue — hors ligne, droits refusés,
+    // compte supprimé — l'écran revient au comportement d'avant au lieu
+    // d'afficher un vide ou un identifiant technique.
+    const senderLabel = (m) =>
+      senderNames[m.sender_id]?.nom
+      || (m.audience === "teacher" ? "Administration" : (schoolContext?.name || "École"));
+    // La qualité de l'expéditeur, quand on la connaît : un nom seul ne suffit
+    // pas toujours à savoir à qui on répond.
+    const senderMeta = (m) => {
+      const r = senderNames[m.sender_id]?.role;
+      return r ? `${senderLabel(m)} · ${r}` : senderLabel(m);
+    };
     const fmtDate = (s) => (s || "").slice(0, 10);
     const lessonLink = (m) => m.link_url && /^\d+$/.test(m.link_url);
 
@@ -3896,7 +3976,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         icon={senderLabel(m).slice(0, 1).toUpperCase()}
         iconColor={m.read_at ? undefined : COLORS.g500}
         title={m.subject || "Sans objet"}
-        meta={`${senderLabel(m)} · ${fmtDate(m.created_at)}`}
+        meta={`${senderMeta(m)} · ${fmtDate(m.created_at)}`}
         onClick={() => openMessage(m)}
         style={openMsg?.id === m.id ? { borderColor: COLORS.g500, background: COLORS.g50 } : undefined}
         right={m.read_at ? undefined : <Badge tone="brand">Nouveau</Badge>}
@@ -3968,7 +4048,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           </span>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: FONT.md, fontWeight: 700, color: COLORS.ink }}>{senderLabel(m)}</div>
-            <div style={{ fontSize: FONT.sm, color: COLORS.ink3, marginTop: 2 }}>{fmtDate(m.created_at)}</div>
+            <div style={{ fontSize: FONT.sm, color: COLORS.ink3, marginTop: 2 }}>
+              {senderNames[m.sender_id]?.role
+                ? `${senderNames[m.sender_id].role} · ${fmtDate(m.created_at)}`
+                : fmtDate(m.created_at)}
+            </div>
           </div>
         </div>
         <div style={{
@@ -4478,7 +4562,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         <h1 className="ec-h1">Échanges de l'école</h1>
         <p className="ec-sub">
           Tous les messages envoyés aux parents par les enseignants et la direction
-          de {schoolContext?.name || "l'école"}. Les messages de l'administration EduCam
+          de {schoolContext?.name || "l'école"}. Les messages de la plateforme EduCam
           n'y figurent pas.
         </p>
 
