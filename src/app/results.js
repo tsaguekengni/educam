@@ -236,7 +236,7 @@ export function StudentTrajectory({ results = [], classAverages20, showTranche, 
   return (
     <>
       {/* Vue d'ensemble */}
-      <div className="ec-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
+      <div className="ec-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))" }}>
         <StatTile label="Moyenne générale" value={fr(avg20)} unit="/20" delta={delta} deltaDir={deltaDir}>
           {band && <div style={{ marginTop: 9 }}><Badge tone={band.tone}>{band.label}</Badge></div>}
         </StatTile>
@@ -844,7 +844,7 @@ function TeacherResults({ teacher, school, backLink, initialTab }) {
       {tab === "entry" ? (
         <div className="ec-grid">
           <Card className="ec-c4" style={{ alignSelf: "start" }}>
-            <div className="ec-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
+            <div className="ec-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))" }}>
               <div style={{ gridColumn: "1 / -1" }}>
                 <SelectField
                   label="Leçon du jour"
@@ -902,7 +902,7 @@ function TeacherResults({ teacher, school, backLink, initialTab }) {
                 <span style={{ fontWeight: 600 }}>↑ ↓ pour changer d'élève</span>
               </div>
 
-              <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(330px, 1fr))" }}>
+              <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(min(330px, 100%), 1fr))" }}>
                 {students.map((s, idx) => {
                   const r = rowOf(s.id);
                   return (
@@ -957,7 +957,7 @@ function TeacherResults({ teacher, school, backLink, initialTab }) {
               const ordered = [...shown].sort((a, b) => (a.avg20 ?? 99) - (b.avg20 ?? 99));
               return (
                 <>
-                  <div className="ec-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 14 }}>
+                  <div className="ec-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))", marginBottom: 14 }}>
                     <StatTile label="Moyenne de la classe" value={classAvg20 == null ? "—" : fr(classAvg20)} unit={classAvg20 == null ? "" : "/20"} />
                     <StatTile label="Élèves évalués" value={evaluated.length} />
                     <StatTile label="En difficulté" value={watch} />

@@ -4876,7 +4876,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               </EmptyState>
             </Card>
           ) : (
-            <div style={{ display: "grid", gap: 8, marginTop: 18, gridTemplateColumns: "repeat(auto-fit, minmax(390px, 1fr))" }}>
+            <div style={{ display: "grid", gap: 8, marginTop: 18, gridTemplateColumns: "repeat(auto-fit, minmax(min(390px, 100%), 1fr))" }}>
               {weekTopics.map((t, i) => {
                 const subject = SUBJECTS.find((sb) => sb.id === t.subject_id);
                 const comp = subject?.components.find((c) => c.id === t.component_id);
@@ -5004,7 +5004,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
 
               <CardLabel>Matières</CardLabel>
               {loadingData && <SkeletonRows rows={4} />}
-              <div style={{ display: "grid", gap: 9, gridTemplateColumns: "repeat(auto-fit, minmax(390px, 1fr))" }}>
+              <div style={{ display: "grid", gap: 9, gridTemplateColumns: "repeat(auto-fit, minmax(min(390px, 100%), 1fr))" }}>
                 {SUBJECTS.map((subject) => {
                   const tt = isTeacherTaught(subject.id);
                   const subjTopics = topics.filter((t) => t.subject_id === subject.id).length;
@@ -6513,7 +6513,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               return (
                 <div style={{
                   display: "grid", gap: 12,
-                  gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))",
                 }}>
                   <StatTile label="Moyenne" tint="blue"
                     value={avg20 != null ? fr(avg20) : "—"}
@@ -7030,7 +7030,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                       Trois gestes suffisent pour que l'application vous serve dès demain matin.
                       Les indicateurs de votre classe apparaîtront ensuite ici.
                     </p>
-                    <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
+                    <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(min(300px, 100%), 1fr))" }}>
                       {[
                         { n: 1, done: cachedIds.length > 0, icon: "▤",
                           title: "Télécharger les leçons de la semaine",
@@ -7217,7 +7217,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
 
               {/* ---- INDICATEURS D'ADOPTION ---- */}
               <div className="ec-c12">
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 18 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(180px, 100%), 1fr))", gap: 18 }}>
                   <StatTile label="Écoles" tint="green"
                     value={adminStats ? adminStats.schools : "—"}
                     foot={adminStats

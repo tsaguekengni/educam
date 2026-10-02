@@ -938,7 +938,7 @@ export default function Admin({ onBack }) {
               {loadingLessons ? (
                 <p style={{ textAlign: "center", color: COLORS.ink3, padding: "40px 0" }}>Chargement...</p>
               ) : (
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(240px, 100%), 1fr))", gap: 14 }}>
                   {SUBJECTS.map(subject => {
                     const count = allLessons.filter(l => l.level === browseLevel && l.subject_id === subject.id).length;
                     return (
@@ -1211,7 +1211,7 @@ export default function Admin({ onBack }) {
         <div style={sectionCardStyle}>
           <h3 style={cardTitleStyle}>Informations de la leçon</h3>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(240px, 100%), 1fr))", gap: 14 }}>
               <div>
                 <label style={labelStyle}>Discipline *</label>
                 <select value={subjectId} onChange={(e) => {
@@ -1316,7 +1316,7 @@ export default function Admin({ onBack }) {
                     )}
                   </div>
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12, marginBottom: 12 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(240px, 100%), 1fr))", gap: 12, marginBottom: 12 }}>
                   <div>
                     <label style={labelStyle}>Type</label>
                     <select value={section.type} onChange={(e) => updateSection(i, "type", e.target.value)} style={inputStyle}>
@@ -1552,7 +1552,7 @@ export default function Admin({ onBack }) {
                   />
                 </div>
 
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 10, marginBottom: 12 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(240px, 100%), 1fr))", gap: 10, marginBottom: 12 }}>
                   {["a", "b", "c", "d"].map((letter) => (
                     <div key={letter}>
                       <label style={labelStyle}>Option {letter.toUpperCase()}</label>

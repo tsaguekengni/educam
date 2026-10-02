@@ -348,7 +348,7 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
           {/* ---- Synthèse ---- */}
           <div className="ec-grid" style={{ marginTop: 18 }}>
           <div className="ec-c12">
-           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 18 }}>
+           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(170px, 100%), 1fr))", gap: 18 }}>
             <StatTile label="Événements récents" value={data.totalEvents} />
             <StatTile label="Enseignants à vérifier" value={data.flaggedTeachers} />
             <StatTile label="Parents à relancer" value={data.followUp} />
@@ -399,7 +399,7 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
                 const list = flaggedOnly ? data.teacherStats.filter((t) => t.flags.length) : data.teacherStats;
                 if (!list.length) return <Card><EmptyState icon="🧑‍🏫" title="Aucun enseignant à afficher" /></Card>;
                 return (
-                  <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(430px, 1fr))" }}>
+                  <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(min(430px, 100%), 1fr))" }}>
                     {list.map((t) => {
                       const act = onActAsTeacher ? () => onActAsTeacher(t.id, t.name) : undefined;
                       return (
@@ -443,7 +443,7 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
                 const list = flaggedOnly ? data.parentStats.filter((p) => p.flags.length) : data.parentStats;
                 if (!list.length) return <Card><EmptyState icon="👪" title="Aucun parent à afficher" /></Card>;
                 return (
-                  <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(430px, 1fr))" }}>
+                  <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(min(430px, 100%), 1fr))" }}>
                     {list.map((p) => {
                       const act = onActAsParent ? () => onActAsParent(p.id, `Parent de ${p.child}`) : undefined;
                       return (
@@ -477,7 +477,7 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
             </>
           ) : (
             <>
-              <div className="ec-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
+              <div className="ec-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(160px, 100%), 1fr))" }}>
                 <SelectField label="Type d'action" value={jEvent} onChange={(e) => setJEvent(e.target.value)}>
                   <option value="all">Toutes les actions</option>
                   {Object.entries(EVENT_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}

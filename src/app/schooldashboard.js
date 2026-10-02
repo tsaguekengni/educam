@@ -346,7 +346,7 @@ export default function SchoolDashboard({ school, onBack, onOpenTab }) {
       ) : noData ? (
         <div className="ec-grid" style={{ marginTop: 18 }}>
           <div className="ec-c12">
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 18 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(170px, 100%), 1fr))", gap: 18 }}>
               <StatTile label="Élèves enregistrés" tint="green" value={studentCount}
                 foot={studentCount ? "prêts à être suivis" : "aucun élève enregistré"}
                 onClick={onOpenTab ? () => onOpenTab("students") : undefined} />
@@ -366,7 +366,7 @@ export default function SchoolDashboard({ school, onBack, onOpenTab }) {
               apparaîtront ici dès les premiers contrôles saisis. En attendant, voici ce qu'il
               reste à faire.
             </p>
-            <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
+            <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(min(300px, 100%), 1fr))" }}>
               {[
                 { done: classCount > 0, title: "Inviter les enseignants",
                   meta: "Partagez le code de l'école pour qu'ils rattachent leur compte" },
@@ -423,7 +423,7 @@ export default function SchoolDashboard({ school, onBack, onOpenTab }) {
 
           {/* ---- Indicateurs ---- */}
           <div className="ec-c12">
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 18 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(170px, 100%), 1fr))", gap: 18 }}>
               <StatTile label="Élèves suivis" tint="green" value={studentCount}
                 foot={`${evaluated} avec au moins un résultat`}
                 onClick={() => scrollToSection("sd-classes")} />

@@ -954,3 +954,42 @@ button, [role="button"], .ec-btn, .ec-row, .ec-choice, .ec-bottomnav button, .ec
   /* Au-delà, la navigation est un rail à GAUCHE : le coin bas-droit est libre. */
   .ec-adminchat { bottom: 20px; }
 }
+
+/* ── LA PAGE NE DÉPASSE JAMAIS LA LARGEUR DE L'ÉCRAN (2026-10-02) ───────────
+   Signalé par Maxime depuis un téléphone : on pouvait faire défiler la page
+   dans les quatre directions et il fallait parfois dézoomer. Sur un téléphone,
+   on attend de ne faire défiler que de haut en bas.
+
+   La déclaration de fenêtre (`width=device-width`, échelle 1, dans layout.js)
+   était déjà correcte : ce n'était pas elle. C'était du CONTENU plus large que
+   l'écran, qui élargit la page en la poussant. Trois causes trouvées, trois
+   remèdes — et un filet par-dessus.
+
+   ⚠️ Le filet (3) ne remplace PAS les remèdes (1) et (2). Masquer le
+   débordement sans le corriger rendrait le contenu débordant inatteignable :
+   on ne verrait plus le défaut, l'utilisateur le subirait quand même. */
+
+/* 1. Un mot trop long se coupe au lieu d'élargir la page.
+      Il n'existait AUCUNE règle de césure dans tout le projet : une adresse
+      courriel, un lien ou un mot sans espace dans un message de parent
+      suffisait à pousser la largeur. */
+body { overflow-wrap: break-word; }
+
+/* 2. Un média ne dépasse jamais son conteneur.
+      Aucune règle globale n'existait non plus : une image de leçon plus large
+      que l'écran élargissait la page. `height: auto` garde les proportions
+      quand la largeur est ramenée. (Pas de `height` sur les SVG en ligne :
+      beaucoup portent des dimensions explicites qu'on ne veut pas écraser.) */
+img, video, canvas { max-width: 100%; height: auto; }
+svg { max-width: 100%; }
+
+/* 3. Le filet, SOUS 900 px seulement.
+      ⚠️ La borne n'est pas décorative : `overflow-x: hidden` sur `html`
+      désactive `position: sticky` chez les descendants. Le seul élément
+      collant du projet (`.ec-topbar`) vit dans `@media (min-width: 900px)` :
+      en bornant le filet en dessous, les deux ne se rencontrent jamais.
+      Les conteneurs à défilement horizontal voulu (onglets de matières)
+      gardent leur propre `overflow-x: auto` et continuent de fonctionner. */
+@media (max-width: 899.98px) {
+  html, body { max-width: 100%; overflow-x: hidden; }
+}

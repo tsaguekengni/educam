@@ -1064,7 +1064,7 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
                   Charger l'emploi du temps standard
                 </button>
               </div>
-              <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))" }}>
+              <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(min(320px, 100%), 1fr))" }}>
                 {[1, 2, 3, 4, 5].map((day) => {
                   const daySlots = slots.map((s, i) => ({ ...s, __i: i })).filter((s) => s.day_of_week === day);
                   return (
