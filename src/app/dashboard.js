@@ -2652,6 +2652,31 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [selectedWeek, setSelectedWeek] = useState(1);
   const [selectedDay, setSelectedDay] = useState(1);
 
+  /* ══════════════════════════════════════════════════════════════════════════
+   * L'ÉCRAN DE CONSULTATION DEVIENT DATÉ ET HEBDOMADAIRE — 2026-10-02.
+   *
+   * 🔴 Signalé par Maxime : le sélecteur de semaine, les dates et la vue de la
+   * semaine n'existaient QUE dans « Modifier mon emploi du temps ». Pour les
+   * voir, l'enseignante devait entrer en mode modification — et un parent, qui
+   * n'y a pas accès, ne les voyait jamais du tout. Elle devait donc ouvrir
+   * l'éditeur pour une simple question de lecture : « c'est quel lundi ? »
+   *
+   * ⚠️ ET « SEMAINE 1-2-3-4 » SUR CET ÉCRAN N'EST PAS UNE SEMAINE DU
+   * CALENDRIER. C'est la semaine du PROGRAMME à l'intérieur du mois (unité).
+   * Deux notions différentes portaient le même mot sur le même écran : c'est la
+   * source exacte du « on n'est pas sûrs de la référence ». Les onglets du
+   * programme gardent leur nom, et la semaine du calendrier est désormais
+   * affichée à part, avec ses dates, pour qu'on ne puisse plus les confondre.
+   *
+   * 🔴 CES TROIS ÉTATS VIVENT ICI, PAS DANS `CalendarView`. Ce composant est
+   * APPELÉ (`{CalendarView()}`) et non monté, précisément pour qu'il n'ait
+   * AUCUN hook : c'est le piège React déjà payé quatre fois sur ce projet. Y
+   * mettre un `useState` casserait le focus et le défilement à chaque rendu.
+   * ══════════════════════════════════════════════════════════════════════════ */
+  const [calLundi, setCalLundi] = useState(null);   // lundi consulté ; null = la semaine en cours
+  const [calVue, setCalVue] = useState("jour");     // "jour" | "semaine"
+  const [calBrut, setCalBrut] = useState([]);       // lignes NON fusionnées, toutes semaines à venir
+
   // Programme state
   const [selectedSubject, setSelectedSubject] = useState(null);
   const [selectedComponent, setSelectedComponent] = useState(null);
@@ -3019,7 +3044,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   useEffect(() => {
     let cancelled = false;
     setLoadingData(true);
-    Promise.all([fetchTimetable(), fetchTopics(), fetchAllLessons(), fetchCoverage()])
+    Promise.all([fetchTimetable(), fetchTimetableBrut(), fetchTopics(), fetchAllLessons(), fetchCoverage()])
       .finally(() => { if (!cancelled) setLoadingData(false); });
     return () => { cancelled = true; };
   }, [selectedLevel, parentStudent?.teacher_id]);
@@ -3049,7 +3074,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       setOnline(true);
       // Le réseau revient : on rafraîchit les listes — et on le DIT.
       // Auparavant la synchronisation était totalement silencieuse.
-      Promise.all([fetchTimetable(), fetchTopics(), fetchAllLessons(), fetchCoverage()])
+      Promise.all([fetchTimetable(), fetchTimetableBrut(), fetchTopics(), fetchAllLessons(), fetchCoverage()])
         .then(() => pushToast("Connexion rétablie · contenu synchronisé", "success"))
         .catch(() => pushToast("Connexion rétablie, mais la synchronisation a échoué.", "error"));
       sync();
@@ -3101,6 +3126,42 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     // forme dépend de la semaine. (La clé est construite plus haut avec
     // `edtLundiIso`.)
     setTimetable(edtFusionneSemaine(data || [], edtLundiIso(new Date())));
+  };
+
+  /* Les lignes BRUTES (non fusionnées) pour l'écran de consultation, afin qu'il
+     puisse montrer une AUTRE semaine que celle en cours — sans quoi le férié du
+     5 octobre serait invisible depuis la consultation jusqu'au jour même.
+
+     ⚠️ PASSE PAR LE CACHE, comme tout le reste de cet écran. L'écran de
+     consultation doit fonctionner hors ligne (décision Maxime, 2026-09-29 :
+     « LECTURE — tout est mis en cache ») ; une requête réseau nue ici aurait
+     vidé la bande de jours dès la première coupure, et personne ne l'aurait
+     relié à ce lot.
+
+     ⚠️ La clé porte la semaine en cours, comme celle de `fetchTimetable`, parce
+     que le filtre `week_start >= ce lundi` change de contenu chaque lundi. Sans
+     ça, une entrée gardée en cache resservirait des exceptions périmées.
+     Le filtre borne aussi la taille : les exceptions passées sont mortes et
+     n'ont aucune raison de voyager. */
+  const fetchTimetableBrut = async () => {
+    const parentTeacherId = isParent ? parentStudent?.teacher_id : null;
+    const ownerId = parentTeacherId || ((PROFILES_ENABLED && teacher?.school_id && teacher?.id) ? teacher.id : null);
+    const lundi = edtLundiIso(new Date());
+    if (!ownerId) {
+      // Emploi du temps partagé par niveau : il ne porte aucune exception de
+      // semaine, donc le brut et le fusionné sont la même chose.
+      const data = await cachedQuery("timetable_" + selectedLevel.id, () =>
+        supabase.from("timetable_slots").select("*")
+          .eq("level", selectedLevel.id).order("day_of_week").order("slot_order"));
+      setCalBrut(data || []);
+      return;
+    }
+    const data = await cachedQuery("timetable_raw_" + ownerId + "_" + lundi, () =>
+      supabase.from("timetable_slots").select("*")
+        .eq("owner_teacher_id", ownerId)
+        .or(`week_start.is.null,week_start.gte.${lundi}`)
+        .order("day_of_week").order("slot_order"));
+    setCalBrut(data || []);
   };
 
   const fetchTopics = async () => {
@@ -3308,9 +3369,12 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // même cours cinq fois de suite. `demo/demo-02-emploi-du-temps-reparation.sql`
   // pose l'index qui manque ; ce filtre est la ceinture par-dessus la bretelle,
   // parce qu'un écran qui se répète devant une salle ne se rattrape pas.
-  const getDaySlots = (dayNum) => {
+  /* `source` permet à l'écran de consultation de passer la semaine qu'il
+     affiche. Par défaut on reste sur `timetable`, la semaine en cours : c'est
+     ce que veulent l'écran d'accueil et « les cours d'aujourd'hui ». */
+  const getDaySlots = (dayNum, source) => {
     const vus = new Set();
-    return timetable.filter((s) => {
+    return (source || timetable).filter((s) => {
       if (s.day_of_week !== dayNum) return false;
       const cle = `${s.slot_order}|${s.start_time}|${s.subject_id}|${s.component_id}`;
       if (vus.has(cle)) return false;
@@ -3514,6 +3578,18 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // 1 = lundi … 5 = vendredi ; 0 le week-end (pas de cours).
   const todayDow = now ? (now.getDay() >= 1 && now.getDay() <= 5 ? now.getDay() : 0) : 0;
   const minutesNow = now ? now.getHours() * 60 + now.getMinutes() : 0;
+
+  /* La semaine de calendrier consultée. ⚠️ Dérivée de `now`, qui est posé dans
+     un effet et vaut null au premier rendu : c'est ce qui évite une date
+     calculée sur le serveur et une autre dans le navigateur (l'erreur
+     d'hydratation de Next). Tant que `now` est null, aucune date n'est
+     affichée — exactement comme `todayDow` qui vaut 0. */
+  const calLundiCourant = now ? edtLundiIso(now) : null;
+  const calLundiEff = calLundi || calLundiCourant;
+  const calSemaineCourante = !!calLundiEff && calLundiEff === calLundiCourant;
+  // Ce qu'elle VIVRA la semaine consultée : exception si la journée en porte
+  // une, sinon le modèle permanent. Même règle que partout ailleurs.
+  const calSlots = calLundiEff ? edtFusionneSemaine(calBrut, calLundiEff) : (timetable || []);
 
   const todaySlots = (todayDow ? getDaySlots(todayDow) : [])
     .slice()
@@ -5158,13 +5234,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // ============ CALENDAR VIEW ============
   const CalendarView = () => {
     const isIntegrationWeek = selectedWeek === 4;
-    const daySlots = getDaySlots(selectedDay).slice().sort(
-      (a, b) => (a.slot_order || 0) - (b.slot_order || 0)
-        || (toMinutes(a.start_time) || 0) - (toMinutes(b.start_time) || 0));
+    const trier = (a, b) => (a.slot_order || 0) - (b.slot_order || 0)
+      || (toMinutes(a.start_time) || 0) - (toMinutes(b.start_time) || 0);
+    const daySlots = getDaySlots(selectedDay, calSlots).slice().sort(trier);
 
-    // Le surlignage « en cours » n'a de sens que si le jour affiché est
-    // réellement aujourd'hui.
-    const showingToday = todayDow !== 0 && selectedDay === todayDow;
+    /* ⚠️ Le surlignage « en cours » exige DEUX conditions, pas une : le bon
+       jour ET la bonne semaine. Avant le sélecteur de semaine la seconde allait
+       de soi ; depuis, consulter le lundi de la semaine prochaine un lundi
+       aurait encadré un créneau en vert comme s'il avait lieu maintenant. */
+    const showingToday = todayDow !== 0 && selectedDay === todayDow && calSemaineCourante;
 
     const weekIds = Array.from(new Set((timetable || [])
       .map((sl) => getQueuedLesson(sl.subject_id, sl.component_id))
@@ -5214,6 +5292,73 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           vendrediLibre={true}
           onAjuster={() => setScreen("timetable")}
         />
+
+        {/* ══════════════════════════════════════════════════════════════════
+          * LA SEMAINE DU CALENDRIER — ajoutée le 2026-10-02 à la CONSULTATION.
+          * Elle n'existait que dans l'éditeur, donc un parent ne la voyait
+          * jamais et l'enseignante devait entrer en mode modification pour
+          * lire une date. ⚠️ À ne pas confondre avec les onglets
+          * « Semaine 1-2-3-4 » plus bas, qui sont les semaines du PROGRAMME
+          * dans le mois : c'est ce doublon de vocabulaire qui a créé le
+          * malentendu. D'où deux blocs séparés, chacun nommé.
+          * ══════════════════════════════════════════════════════════════════ */}
+        {calLundiEff && (
+          <Card style={{
+            marginTop: 14, padding: "10px 12px", display: "flex", alignItems: "center",
+            justifyContent: "space-between", gap: 10, flexWrap: "wrap",
+          }}>
+            <button
+              type="button"
+              className="ec-btn ec-btn--ghost"
+              onClick={() => setCalLundi(edtDecaleSemaine(calLundiEff, -1))}
+              disabled={calLundiEff <= calLundiCourant}
+              aria-label="Semaine précédente"
+              style={{ minWidth: 52 }}
+            >‹</button>
+
+            <div style={{ textAlign: "center", flex: "1 1 180px", minWidth: 0 }}>
+              <div style={{ fontSize: "var(--ec-fs-4)", fontWeight: 800, color: COLORS.ink }}>
+                {edtLibelleSemaine(calLundiEff)}
+              </div>
+              <div style={{
+                fontSize: "var(--ec-fs-2)", fontWeight: calSemaineCourante ? 600 : 700,
+                color: calSemaineCourante ? COLORS.ink3 : COLORS.warn,
+              }}>
+                {edtLibelleEcart(calLundiEff)}
+                {" · du "}{edtLibelleJourCourt(calLundiEff, 1)}
+                {" au "}{edtLibelleJourCourt(calLundiEff, 5)}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {!calSemaineCourante && (
+                <button
+                  type="button"
+                  className="ec-btn ec-btn--ghost ec-btn--sm"
+                  onClick={() => setCalLundi(null)}
+                >
+                  Cette semaine
+                </button>
+              )}
+              <button
+                type="button"
+                className="ec-btn ec-btn--ghost"
+                onClick={() => setCalLundi(edtDecaleSemaine(calLundiEff, 1))}
+                aria-label="Semaine suivante"
+                style={{ minWidth: 52 }}
+              >›</button>
+              <span aria-hidden="true" style={{ width: 1, background: COLORS.border, margin: "2px 2px" }} />
+              <button
+                type="button"
+                className={calVue === "semaine" ? "ec-btn" : "ec-btn ec-btn--ghost"}
+                onClick={() => setCalVue(calVue === "semaine" ? "jour" : "semaine")}
+                aria-pressed={calVue === "semaine"}
+              >
+                {calVue === "semaine" ? "Voir un jour" : "Voir ma semaine"}
+              </button>
+            </div>
+          </Card>
+        )}
 
         {/* ---- Période (unité / mois) ---- */}
         <div className="ec-grid" style={{ marginTop: 18 }}>
@@ -5348,6 +5493,97 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           </Card>
         ) : (
           <>
+            {/* ══════════════════════════════════════════════════════════════
+              * VUE DE LA SEMAINE, EN LECTURE SEULE — 2026-10-02.
+              * La même semaine que l'éditeur, mais sans aucune pastille d'état
+              * d'enregistrement : ici il n'y a rien à enregistrer, et « cette
+              * semaine seulement » n'aurait aucun sens pour un parent. On ne
+              * montre que ce qui se passe, heure par heure.
+              * ══════════════════════════════════════════════════════════════ */}
+            {calVue === "semaine" && (
+              <div style={{
+                display: "grid", gap: 12, marginTop: 18,
+                gridTemplateColumns: "repeat(auto-fit, minmax(min(200px, 100%), 1fr))",
+              }}>
+                {[1, 2, 3, 4, 5].map((d) => {
+                  const sl = getDaySlots(d, calSlots).slice().sort(trier);
+                  const ferie = sl.some((s) => s.component_id === "ferie");
+                  const cestAujourdhui = calSemaineCourante && todayDow === d;
+                  return (
+                    <Card key={d} style={{
+                      padding: 0, overflow: "hidden",
+                      borderColor: cestAujourdhui ? COLORS.g500 : undefined,
+                      boxShadow: cestAujourdhui ? `0 0 0 2px ${COLORS.g100}` : undefined,
+                    }}>
+                      <div style={{
+                        padding: "10px 13px", borderBottom: `1px solid ${COLORS.divider}`,
+                        background: cestAujourdhui ? COLORS.g50 : COLORS.panel,
+                      }}>
+                        <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 800, color: COLORS.ink }}>
+                          {DAY_NAMES[d]}
+                          {calLundiEff && (
+                            <span style={{ fontWeight: 600, color: COLORS.ink3 }}>
+                              {" "}{edtLibelleJourCourt(calLundiEff, d)}
+                            </span>
+                          )}
+                        </div>
+                        {cestAujourdhui && (
+                          <div style={{ fontSize: "var(--ec-fs-1)", fontWeight: 700, color: COLORS.g600, marginTop: 2 }}>
+                            aujourd'hui
+                          </div>
+                        )}
+                      </div>
+                      <div style={{ padding: "8px 0" }}>
+                        {ferie ? (
+                          <div style={{
+                            padding: "12px 13px", fontSize: "var(--ec-fs-2)",
+                            fontWeight: 700, color: COLORS.crit,
+                          }}>
+                            Jour férié — pas de classe
+                          </div>
+                        ) : sl.length === 0 ? (
+                          <div style={{ padding: "10px 13px", fontSize: "var(--ec-fs-2)", color: COLORS.ink3 }}>
+                            Aucun créneau.
+                          </div>
+                        ) : sl.map((s) => {
+                          const pause = s.subject_id === "pause" || s.subject_id === "etude";
+                          return (
+                            <div key={s.id} style={{
+                              display: "flex", gap: 8, alignItems: "baseline", padding: "5px 13px",
+                              background: pause ? COLORS.panel : undefined,
+                            }}>
+                              <span style={{
+                                fontSize: "var(--ec-fs-1)", fontWeight: 700, color: COLORS.ink3,
+                                minWidth: 36, fontVariantNumeric: "tabular-nums",
+                              }}>{String(s.start_time || "").slice(0, 5)}</span>
+                              <span style={{
+                                fontSize: "var(--ec-fs-2)", minWidth: 0,
+                                color: pause ? COLORS.ink3 : COLORS.ink,
+                                fontWeight: pause ? 600 : 700,
+                              }}>
+                                {pause ? s.subject_name : (s.component_name || s.subject_name)}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div style={{ padding: "9px 13px", borderTop: `1px solid ${COLORS.divider}` }}>
+                        <button
+                          type="button"
+                          className="ec-btn ec-btn--ghost ec-btn--sm"
+                          onClick={() => { setSelectedDay(d); setCalVue("jour"); }}
+                          style={{ width: "100%" }}
+                        >
+                          Ouvrir {DAY_NAMES[d].toLowerCase()}
+                        </button>
+                      </div>
+                    </Card>
+                  );
+                })}
+              </div>
+            )}
+
+            {calVue === "jour" && (<>
             {/* ---- Bande de jours ---- */}
             <div style={{ display: "flex", gap: 6, overflowX: "auto", margin: "20px 0 6px", paddingBottom: 3 }}>
               {[1, 2, 3, 4, 5].map((d) => {
@@ -5367,8 +5603,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                   >
                     <span style={{ display: "block", fontSize: isMobile ? 15 : 14.5, fontWeight: 800 }}>
                       {isMobile ? DAY_NAMES_SHORT[d] : DAY_NAMES[d]}
+                      {/* La DATE, pas seulement le nom du jour : « Lundi » tout
+                          seul ne dit pas quel lundi. */}
+                      {calLundiEff && (
+                        <span style={{ fontWeight: 600, opacity: 0.8 }}>
+                          {" "}{edtDateDuJour(calLundiEff, d).getDate()}
+                        </span>
+                      )}
                     </span>
-                    {isToday && (
+                    {isToday && calSemaineCourante && (
                       <span style={{
                         display: "block", fontSize: "var(--ec-fs-1)", fontWeight: 700, marginTop: 2,
                         color: on ? "rgba(255,255,255,.85)" : COLORS.g600,
@@ -5379,8 +5622,20 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               })}
             </div>
 
+            {/* 🔴 Le titre disait « Lundi — Semaine 1 », et les deux moitiés
+                parlaient de choses différentes : un jour de la semaine sans
+                date, et une semaine du PROGRAMME prise pour une semaine du
+                calendrier. Il porte maintenant la vraie date, et nomme l'autre
+                pour ce qu'elle est. */}
             <h2 style={{ fontSize: "var(--ec-fs-4)", fontWeight: 800, letterSpacing: "-.02em", margin: "18px 0 12px" }}>
-              {DAY_NAMES[selectedDay]} — Semaine {selectedWeek}
+              {DAY_NAMES[selectedDay]}
+              {calLundiEff && (() => {
+                const d = edtDateDuJour(calLundiEff, selectedDay);
+                return ` ${d.getDate()} ${EDT_MOIS[d.getMonth()]}`;
+              })()}
+              <span style={{ fontWeight: 600, color: COLORS.ink3 }}>
+                {" "}· semaine {selectedWeek} du programme
+              </span>
             </h2>
 
             {loadingData ? (
@@ -5498,6 +5753,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                 })}
               </div>
             )}
+            </>)}{/* fin de la vue « un jour » */}
           </>
         )}
           </div>
@@ -8174,7 +8430,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             timetable={timetable}
             subjects={EDT_MATIERES_ENSEIGNANTE}
             online={online}
-            onSaved={fetchTimetable}
+            /* Les DEUX lectures sont rafraîchies après un enregistrement.
+               Sans `fetchTimetableBrut`, elle enregistrait une journée, revenait
+               à la consultation, et y retrouvait son ancienne semaine — un écran
+               qui contredit celui d'à côté, sans aucune erreur pour le dire. */
+            onSaved={async () => { await Promise.all([fetchTimetable(), fetchTimetableBrut()]); }}
             onBack={() => setScreen("calendar")}
             retard={retard}
             moisCourant={moisCourant}
