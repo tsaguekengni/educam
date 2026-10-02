@@ -1020,6 +1020,29 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
       });
       if (error) throw error;
 
+      /* 🔴 « À PARTIR DE MAINTENANT » INCLUT CETTE SEMAINE (2026-10-02).
+       *
+       * Sans ceci, l'exception de la semaine en cours survivait à
+       * l'enregistrement permanent. Conséquences, toutes vues le jour même :
+       * la semaine continuait de tourner sur l'exception, le modèle permanent
+       * n'entrait en vigueur que le lundi suivant, et la vue semaine affichait
+       * éternellement « modifiée cette semaine » — l'enseignante a enregistré
+       * trois journées et aucune pastille n'a bougé.
+       *
+       * C'est surtout une contradiction avec le libellé du bouton : « à partir
+       * de maintenant » veut dire MAINTENANT, pas lundi prochain. On efface
+       * donc l'exception de la semaine pour cette journée.
+       *
+       * Fait ici et non dans la fonction SQL faute de pouvoir la modifier :
+       * à déplacer dans `educam_save_timetable_day` dès que possible, pour
+       * que l'ensemble redevienne une seule transaction. */
+      if (!lundi) {
+        await supabase.from("timetable_slots").delete()
+          .eq("owner_teacher_id", teacher.id)
+          .eq("day_of_week", jour)
+          .not("week_start", "is", null);
+      }
+
       setAvant(null);
       setMsg({
         t: lundi
