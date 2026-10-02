@@ -973,28 +973,53 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
           week_start: lundi,
         };
       });
-      // ⚠️ Une exception REMPLACE la journée : on efface d'abord les
-      // exceptions de ce jour-là pour cette semaine, puis on réécrit. Sans
-      // cela, raccourcir la journée laisserait traîner les créneaux de
-      // l'essai précédent. Le modèle permanent, lui, n'est jamais touché ici.
-      if (lundi) {
-        const { error: e0 } = await supabase.from("timetable_slots").delete()
-          .eq("owner_teacher_id", teacher.id).eq("day_of_week", jour).eq("week_start", lundi);
-        if (e0) throw e0;
-        if (rows.length) {
-          const { error } = await supabase.from("timetable_slots").insert(rows);
-          if (error) throw error;
+      /* ⚠️ EFFACER LA JOURNÉE PUIS LA RÉÉCRIRE — les deux portées, même chemin.
+       *
+       * 🔴 Défaut payé le 2026-10-02, en direct avec l'enseignante : « à partir
+       * de maintenant » échouait à TOUS les coups, « cette semaine seulement »
+       * passait. La cause était un `upsert ... onConflict` sur les colonnes
+       * (owner_teacher_id, day_of_week, slot_order, week_start), alors que
+       * l'index unique porte sur une EXPRESSION — `coalesce(week_start,
+       * '1900-01-01')` — parce qu'en SQL deux NULL ne sont jamais « égaux » et
+       * qu'un index sur la colonne nue ne protégerait donc pas le modèle
+       * permanent. PostgreSQL ne peut pas relier les deux et refuse avec
+       * **42P10**. Reproduit en base avant correction, pas deviné.
+       *
+       * On abandonne donc l'upsert : on efface la journée (pour CETTE portée
+       * seulement) puis on la réécrit, exactement comme le faisait déjà la
+       * branche « cette semaine », qui marchait.
+       *
+       * ⚠️ `is("week_start", null)` et NON `eq(..., null)` : en SQL une
+       * comparaison d'égalité à NULL ne renvoie jamais vrai, et la suppression
+       * n'effacerait rien — on réinsérerait par-dessus l'ancienne journée.
+       *
+       * ⚠️ Deux requêtes, donc une fenêtre où la journée est vide en base. Si
+       * l'insertion échoue, on REMET ce qui vient d'être effacé (`avantBase`)
+       * plutôt que de laisser la journée vide. Et si cette remise échoue à son
+       * tour, le message le dit franchement : voir le `catch`. */
+      const supprimer = supabase.from("timetable_slots").delete()
+        .eq("owner_teacher_id", teacher.id).eq("day_of_week", jour);
+      const { data: avantBase } = await (lundi
+        ? supabase.from("timetable_slots").select("*")
+            .eq("owner_teacher_id", teacher.id).eq("day_of_week", jour).eq("week_start", lundi)
+        : supabase.from("timetable_slots").select("*")
+            .eq("owner_teacher_id", teacher.id).eq("day_of_week", jour).is("week_start", null));
+
+      const { error: e0 } = await (lundi
+        ? supprimer.eq("week_start", lundi)
+        : supprimer.is("week_start", null));
+      if (e0) throw e0;
+
+      if (rows.length) {
+        const { error } = await supabase.from("timetable_slots").insert(rows);
+        if (error) {
+          // Remise en l'état : la journée ne doit pas rester vide.
+          if (avantBase && avantBase.length) {
+            await supabase.from("timetable_slots")
+              .insert(avantBase.map(({ id, ...r }) => r));
+          }
+          throw error;
         }
-      } else {
-        if (rows.length) {
-          const { error } = await supabase.from("timetable_slots")
-            .upsert(rows, { onConflict: "owner_teacher_id,day_of_week,slot_order,week_start" });
-          if (error) throw error;
-        }
-        const { error: e2 } = await supabase.from("timetable_slots").delete()
-          .eq("owner_teacher_id", teacher.id).eq("day_of_week", jour)
-          .is("week_start", null).gt("slot_order", rows.length);
-        if (e2) throw e2;
       }
       setAvant(null);
       setMsg({
@@ -1005,7 +1030,15 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
       });
       if (onSaved) await onSaved();
     } catch (_) {
-      setMsg({ t: "L'enregistrement a échoué. Rien n'a été perdu — réessayez.", tone: "err" });
+      /* ⚠️ Message HONNÊTE. L'ancien disait « Rien n'a été perdu » : faux, et
+         Maxime l'a vu le 2026-10-02 — l'enseignante rafraîchissait la page et
+         sa journée avait disparu. Ce qui reste à l'écran n'est PAS enregistré.
+         Ne jamais rassurer sur ce qu'on n'a pas vérifié. */
+      setMsg({
+        t: "L'enregistrement a échoué. Votre journée est encore affichée mais PAS enregistrée : "
+         + "ne quittez pas la page et réessayez.",
+        tone: "err",
+      });
     }
     setSaving(false);
   };
