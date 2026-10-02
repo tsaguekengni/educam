@@ -90,6 +90,13 @@ const BREAK_TYPES = [
   { subject_id: "pause", component_id: "tic", name: "TIC", comp: "" },
   { subject_id: "pause", component_id: "evaluation", name: "Évaluation", comp: "" },
   { subject_id: "pause", component_id: "revision", name: "Révision", comp: "" },
+  // Ajouté le 2026-10-02 avec le créneau « jour férié » de l'enseignante.
+  // ⚠️ Côté enseignante, le férié prend la journée entière (07:30 → 14:30) et ne
+  // s'enregistre que pour UNE semaine. Ici, cet écran ne connaît pas la notion
+  // de semaine : il n'écrit que le modèle permanent. Poser un férié depuis la
+  // direction fermerait donc ce jour-là TOUTES les semaines de l'année — le
+  // libellé le dit, et c'est la seule protection disponible à cet endroit.
+  { subject_id: "pause", component_id: "ferie", name: "Jour férié (toutes les semaines !)", comp: "" },
   { subject_id: "etude", component_id: "devoirs", name: "Étude surveillée", comp: "Devoirs" },
 ];
 const isBreak = (sid) => sid === "pause" || sid === "etude";

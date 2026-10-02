@@ -560,7 +560,27 @@ const EDT_TYPES = [
   { key: "pause:tic", label: "TIC", nom: "TIC", ancre: true },
   { key: "pause:evaluation", label: "Évaluation", nom: "Évaluation" },
   { key: "pause:revision", label: "Révision", nom: "Révision" },
+  /* 🔴 LE JOUR FÉRIÉ PREND LA JOURNÉE ENTIÈRE — demande de Maxime, 2026-10-02
+   * (« lundi le 05 serait férié, et ça prend toute la journée, on a besoin d'un
+   * slot férié qui va prendre toute la journée UNE FOIS »).
+   *
+   * `journeeEntiere: true` n'est pas un simple libellé : il change trois
+   * comportements, et il le faut, sinon le férié devient une pièce qu'on
+   * bricole à la main.
+   *   · le choisir REMPLACE la journée au lieu de s'ajouter dedans ;
+   *   · sa durée n'est pas réglable (07:30 → 14:30, soit 420 min, bien au-delà
+   *     des durées de `EDT_DUREES`) ;
+   *   · « À partir de maintenant » est INTERDIT dessus — ce serait fermer
+   *     l'école tous les lundis de l'année. « Une fois » est dans la demande.
+   *
+   * ⚠️ Deux mécanismes distincts, et les deux sont nécessaires : CE créneau dit
+   * à l'enseignante que sa journée est fermée ; `EDT_FERIES` dit au voyant de
+   * retard de ne pas compter ce jour comme une occasion d'enseigner. L'un sans
+   * l'autre, soit elle voit un lundi normal, soit le voyant lui promet un
+   * rattrapage qui n'aura pas lieu. */
+  { key: "pause:ferie", label: "Jour férié (toute la journée)", nom: "Jour férié", journeeEntiere: true },
 ];
+const EDT_FERIE_KEY = "pause:ferie";
 const edtTypeByKey = (k) => EDT_TYPES.find((t) => t.key === k);
 const edtKeyOf = (slot) =>
   slot.subject_id === "pause" ? `pause:${slot.component_id}` : "lecon";
@@ -604,6 +624,83 @@ function edtLundiIso(d) {
   return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
 }
 
+/* ──────────────────────────────────────────────────────────────────────────
+ * LES DATES, 2026-10-02.
+ *
+ * 🔴 Maxime, mot pour mot : « l'emploi du temps n'a pas de date, ça montre
+ * juste semaine 1-2-3-4 et le mois, sans la date on n'est pas sûrs de la
+ * référence ou la journée qu'on est en train de modifier. Et ça fait qu'on ne
+ * sait pas quel lundi correspond au 5 octobre. »
+ *
+ * Mais le vrai défaut était pire que l'affichage, et il n'avait pas encore été
+ * vu : l'exception « cette semaine seulement » était câblée sur
+ * `edtLundiIso(new Date())`, donc sur la semaine EN COURS, toujours. Nous
+ * sommes le vendredi 2 octobre (semaine du 28 septembre) ; le férié tombe le
+ * lundi 5 octobre, c'est-à-dire la semaine SUIVANTE. L'enseignante n'avait
+ * aucun moyen de l'y poser — pas « c'était malcommode » : impossible.
+ *
+ * D'où le sélecteur de semaine. Les dates affichées ne sont pas une décoration
+ * ajoutée à côté : elles sont la lecture de l'état que ce sélecteur choisit.
+ * ────────────────────────────────────────────────────────────────────────── */
+const EDT_MOIS = ["janvier", "février", "mars", "avril", "mai", "juin",
+  "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
+const EDT_MOIS_COURT = ["janv.", "févr.", "mars", "avril", "mai", "juin",
+  "juil.", "août", "sept.", "oct.", "nov.", "déc."];
+
+// "AAAA-MM-JJ" → Date LOCALE. ⚠️ `new Date("2026-10-05")` serait lu en UTC et
+// reculerait d'un jour à l'ouest de Greenwich : le lundi deviendrait dimanche.
+function edtDateIso(iso) {
+  const [a, m, j] = String(iso || "").split("-").map(Number);
+  return new Date(a || 1970, (m || 1) - 1, j || 1);
+}
+// Le lundi n semaines plus loin (n négatif = en arrière).
+function edtDecaleSemaine(lundiIso, n) {
+  const d = edtDateIso(lundiIso);
+  d.setDate(d.getDate() + n * 7);
+  return edtLundiIso(d);
+}
+// La date du jour n (1 = lundi … 5 = vendredi) dans la semaine d'un lundi.
+function edtDateDuJour(lundiIso, n) {
+  const d = edtDateIso(lundiIso);
+  d.setDate(d.getDate() + (n - 1));
+  return d;
+}
+const edtLibelleSemaine = (lundiIso) => {
+  const d = edtDateIso(lundiIso);
+  return `Semaine du ${d.getDate()} ${EDT_MOIS[d.getMonth()]}`;
+};
+const edtLibelleJourCourt = (lundiIso, n) => {
+  const d = edtDateDuJour(lundiIso, n);
+  return `${d.getDate()} ${EDT_MOIS_COURT[d.getMonth()]}`;
+};
+// « cette semaine », « la semaine prochaine », « dans 3 semaines ».
+const edtEcartSemaines = (lundiIso) => {
+  const a = edtDateIso(edtLundiIso(new Date()));
+  const b = edtDateIso(lundiIso);
+  return Math.round((b - a) / (7 * 24 * 3600 * 1000));
+};
+const edtLibelleEcart = (lundiIso) => {
+  const n = edtEcartSemaines(lundiIso);
+  if (n === 0) return "cette semaine";
+  if (n === 1) return "la semaine prochaine";
+  return `dans ${n} semaines`;
+};
+
+/* Des lignes de `timetable_slots` vers les lignes éditables de l'écran.
+   Factorisé parce que DEUX chemins en ont besoin et doivent donner le même
+   résultat : le chargement d'une journée, et le retour au modèle permanent
+   quand on retire un jour férié. Deux copies divergeraient. */
+function edtLignesDepuisSlots(slots, prefixe) {
+  return (slots || []).map((s, i) => ({
+    uid: `${prefixe}-${i}-${s.id || "n"}`,
+    kind: edtKeyOf(s),
+    subject_id: s.subject_id,
+    component_id: s.component_id,
+    minutes: Math.max(15, (edtMin(s.end_time) || 0) - (edtMin(s.start_time) || 0) || 60),
+    ancreDebut: edtMin(s.start_time),
+  }));
+}
+
 function edtFusionneSemaine(rows, lundiIso) {
   const joursAvecException = new Set(
     (rows || []).filter((r) => r.week_start === lundiIso).map((r) => r.day_of_week));
@@ -628,9 +725,18 @@ function edtFusionneSemaine(rows, lundiIso) {
  * déjà bâti dessus, donc les ajouter sera une SAISIE et pas une réécriture.
  * ══════════════════════════════════════════════════════════════════════════ */
 
-// Jours non travaillés, au format "AAAA-MM-JJ". À remplir quand les dates
-// arrivent — rien d'autre ne change.
-const EDT_FERIES = [];
+/* Jours non travaillés, au format "AAAA-MM-JJ". À compléter quand les dates du
+ * calendrier scolaire arriveront — rien d'autre ne change.
+ *
+ * ⚠️ CETTE LISTE EST DISTINCTE DU CRÉNEAU « Jour férié » DE L'EMPLOI DU TEMPS,
+ * et il faut les deux. Celle-ci retire le jour du DÉNOMINATEUR du voyant de
+ * retard (combien de fois le créneau reviendra d'ici la fin du mois) ; le
+ * créneau, lui, ferme la journée À L'ÉCRAN pour l'enseignante. Poser le
+ * créneau sans inscrire la date ici laisserait le voyant promettre un
+ * rattrapage sur un jour où l'école est fermée. */
+const EDT_FERIES = [
+  "2026-10-05",   // férié annoncé par Maxime le 2026-10-02 (lundi de la rentrée)
+];
 
 // Le mois courant, au sens du PROGRAMME (Sept = unité 1 … Avril = unité 8).
 // Hors année scolaire (mai à août) : pas de voyant, il n'y a pas de mois à
@@ -861,6 +967,14 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
   const [vue, setVue] = useState("semaine");   // "semaine" d'abord : on regarde avant d'éditer
   const [brut, setBrut] = useState([]);       // lignes NON fusionnées : voir la vue semaine
   const [lignes, setLignes] = useState([]);
+  /* 🔴 LA SEMAINE QU'ELLE MODIFIE, et non « la semaine en cours » (2026-10-02).
+     Avant, l'exception portait toujours sur `edtLundiIso(new Date())` : poser un
+     férié au 5 octobre depuis le 2 octobre était IMPOSSIBLE, pas seulement
+     malcommode. Ce `useState` est la correction ; tout le reste de l'écran —
+     dates des onglets, vue semaine, portée de l'enregistrement — en découle. */
+  const lundiCourant = edtLundiIso(new Date());
+  const [lundiSel, setLundiSel] = useState(lundiCourant);
+  const semaineFuture = lundiSel !== lundiCourant;
   const [avant, setAvant] = useState(null);          // une seule marche arrière
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState(null);
@@ -873,34 +987,38 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
   const chargerBrut = async () => {
     if (!teacher?.id) return;
     const { data } = await supabase.from("timetable_slots")
-      .select("id, day_of_week, slot_order, start_time, end_time, subject_id, subject_name, component_name, week_start")
+      // ⚠️ `component_id` est indispensable ici depuis que l'éditeur charge la
+      // journée depuis `brut` : sans lui, `edtKeyOf` ne sait pas distinguer une
+      // récréation d'une évaluation, et toute pause rechargée deviendrait une
+      // « pause:undefined » — un type absent de la liste, donc un menu vide.
+      .select("id, day_of_week, slot_order, start_time, end_time, subject_id, component_id, subject_name, component_name, week_start")
       .eq("owner_teacher_id", teacher.id)
       .order("day_of_week").order("slot_order");
     setBrut(data || []);
   };
   useEffect(() => { chargerBrut(); }, [teacher?.id, timetable]);
 
-  // Charge la journée demandée depuis l'emploi du temps en vigueur.
+  /* Charge la journée demandée POUR LA SEMAINE SÉLECTIONNÉE.
+     On lit `brut` (toutes les lignes) refusionné pour `lundiSel`, et non plus
+     `timetable` : ce dernier est fusionné pour la semaine EN COURS par le
+     tableau de bord, donc il ne pourrait jamais montrer la semaine suivante.
+     Pour la semaine en cours les deux donnent le même résultat — même
+     fonction, mêmes données — donc il n'y a qu'un seul chemin de code. */
   useEffect(() => {
-    const dujour = (timetable || [])
+    const dujour = edtFusionneSemaine(brut, lundiSel)
       .filter((s) => s.day_of_week === jour)
       .slice()
       .sort((a, b) => (a.slot_order || 0) - (b.slot_order || 0));
-    setLignes(dujour.map((s, i) => ({
-      uid: `${jour}-${i}-${s.id || "n"}`,
-      kind: edtKeyOf(s),
-      subject_id: s.subject_id,
-      component_id: s.component_id,
-      minutes: Math.max(15, (edtMin(s.end_time) || 0) - (edtMin(s.start_time) || 0) || 60),
-      ancreDebut: edtMin(s.start_time),
-    })));
+    setLignes(edtLignesDepuisSlots(dujour, jour));
     setAvant(null);
     setMsg(null);
-  }, [jour, timetable]);
+  }, [jour, lundiSel, brut]);
 
   const calc = edtRecalcule(lignes);
   const finJournee = calc.length ? calc[calc.length - 1].fin : edtMin(EDT_DEBUT);
   const resteFinJournee = edtMin(EDT_FIN) - finJournee;
+  // Une journée fériée n'accepte rien d'autre, et ne peut pas devenir permanente.
+  const estFerie = lignes.some((l) => edtTypeByKey(l.kind)?.journeeEntiere);
 
   // Toute modification passe par ici : c'est le seul endroit qui mémorise
   // l'état précédent, donc le seul qui rend « annuler » fiable.
@@ -910,15 +1028,43 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
     setMsg(null);
   };
 
-  const changeType = (uid, key) => modifier((prev) => prev.map((l) => {
-    if (l.uid !== uid) return l;
-    const t = edtTypeByKey(key);
-    if (t?.lecon) {
-      const s0 = subjects[0];
-      return { ...l, kind: key, subject_id: s0.id, component_id: s0.components[0].id };
-    }
-    return { ...l, kind: key, subject_id: "pause", component_id: key.split(":")[1] };
-  }));
+  // La ligne unique d'une journée fériée : 07:30 → 14:30, rien d'autre.
+  const ligneFerie = () => ({
+    uid: `ferie-${Date.now()}`, kind: EDT_FERIE_KEY,
+    subject_id: "pause", component_id: "ferie",
+    minutes: edtMin(EDT_FIN) - edtMin(EDT_DEBUT),
+    ancreDebut: edtMin(EDT_DEBUT),
+  });
+  const marquerFerie = () => modifier(() => [ligneFerie()]);
+
+  /* Retirer le férié REND LA JOURNÉE HABITUELLE, il ne laisse pas un écran vide.
+     Vider aurait obligé l'enseignante à retaper toute une journée pour corriger
+     un seul clic — et un écran vide juste après « ce n'est pas un jour férié »
+     ressemble à une perte de données, pas à une annulation. */
+  const retirerFerie = () => modifier(() => edtLignesDepuisSlots(
+    (brut || [])
+      .filter((s) => s.day_of_week === jour && !s.week_start)
+      .slice().sort((a, b) => (a.slot_order || 0) - (b.slot_order || 0)),
+    `perm${jour}`,
+  ));
+
+  const changeType = (uid, key) => modifier((prev) => {
+    /* ⚠️ « Jour férié » REMPLACE la journée, il ne s'y ajoute pas. C'est la
+       demande telle quelle — « ça prend toute la journée » — et c'est aussi la
+       seule issue honnête : laissé comme une ligne parmi d'autres, il serait
+       poussé à 14:30 par la coupe de fin de journée et disparaîtrait, ou bien
+       il écraserait les créneaux suivants sans le dire. */
+    if (edtTypeByKey(key)?.journeeEntiere) return [ligneFerie()];
+    return prev.map((l) => {
+      if (l.uid !== uid) return l;
+      const t = edtTypeByKey(key);
+      if (t?.lecon) {
+        const s0 = subjects[0];
+        return { ...l, kind: key, subject_id: s0.id, component_id: s0.components[0].id };
+      }
+      return { ...l, kind: key, subject_id: "pause", component_id: key.split(":")[1] };
+    });
+  });
 
   const changeMatiere = (uid, sid) => modifier((prev) => prev.map((l) =>
     l.uid === uid
@@ -968,10 +1114,22 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
      ──────────────────────────────────────────────────────────────────────── */
   const enregistrer = async (portee) => {
     if (!online) { setMsg({ t: "Enregistrement impossible sans réseau. Réessayez une fois connectée.", tone: "err" }); return; }
-    // `portee` : "semaine" = une exception pour la semaine en cours seulement,
-    // "toujours" = le modèle permanent. Une exception porte le lundi de la
-    // semaine ; le modèle porte NULL.
-    const lundi = portee === "semaine" ? edtLundiIso(new Date()) : null;
+    /* `portee` : "semaine" = une exception pour LA SEMAINE AFFICHÉE seulement,
+       "toujours" = le modèle permanent. Une exception porte le lundi de cette
+       semaine-là ; le modèle porte NULL.
+       🔴 `lundiSel`, PAS `new Date()` : c'est ce qui rend le férié du 5 octobre
+       possible depuis le 2 octobre. */
+    const lundi = portee === "semaine" ? lundiSel : null;
+    /* Garde-fou : un férié permanent fermerait l'école tous les lundis de
+       l'année. Le bouton est déjà désactivé, on refuse aussi ici — un bouton
+       désactivé peut être contourné, une règle au point d'écriture non. */
+    if (!lundi && estFerie) {
+      setMsg({
+        t: "Un jour férié ne s'enregistre que pour une semaine : utilisez « Seulement cette semaine-là ».",
+        tone: "err",
+      });
+      return;
+    }
     setSaving(true); setMsg(null);
     try {
       const rows = calc.map((l, i) => {
@@ -1037,16 +1195,26 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
        * à déplacer dans `educam_save_timetable_day` dès que possible, pour
        * que l'ensemble redevienne une seule transaction. */
       if (!lundi) {
+        /* ⚠️ ON N'EFFACE QUE DEUX SEMAINES, PAS TOUTES (corrigé le 2026-10-02
+           en même temps que le sélecteur). Un `.not("week_start","is",null)`
+           balayait TOUTES les exceptions de cette journée — y compris le férié
+           du 5 octobre qu'elle venait de poser, et sans un mot. Une
+           suppression silencieuse de travail délibéré.
+           Les deux seules qui doivent céder sont celles qui contrediraient
+           l'écran : la semaine en cours (sinon « à partir de maintenant »
+           n'entre en vigueur que lundi prochain) et la semaine affichée
+           (sinon la pastille ne bouge pas sous ses yeux). */
+        const aEffacer = Array.from(new Set([lundiCourant, lundiSel]));
         await supabase.from("timetable_slots").delete()
           .eq("owner_teacher_id", teacher.id)
           .eq("day_of_week", jour)
-          .not("week_start", "is", null);
+          .in("week_start", aEffacer);
       }
 
       setAvant(null);
       setMsg({
         t: lundi
-          ? "Enregistré pour cette semaine seulement. Lundi prochain, votre emploi du temps habituel revient."
+          ? `Enregistré pour la ${edtLibelleSemaine(lundi).toLowerCase()} seulement. Les autres semaines gardent votre emploi du temps habituel.`
           : "Enregistré. C'est votre emploi du temps habituel à partir de maintenant.",
         tone: "ok",
       });
@@ -1090,6 +1258,57 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
 
       <RetardNotice retard={retard} mois={moisCourant} vendrediLibre={true} />
 
+      {/* ══════════════════════════════════════════════════════════════════
+        * LE SÉLECTEUR DE SEMAINE — 2026-10-02.
+        * Il répond à « on ne sait pas quel lundi correspond au 5 octobre », mais
+        * il fait bien plus que l'afficher : il est le seul moyen de MODIFIER une
+        * autre semaine que celle en cours. On ne recule pas avant la semaine
+        * courante — modifier un lundi déjà passé ne change rien pour personne et
+        * ne ferait que créer des exceptions périmées en base.
+        * ══════════════════════════════════════════════════════════════════ */}
+      <Card style={{
+        marginTop: 16, padding: "10px 12px", display: "flex", alignItems: "center",
+        justifyContent: "space-between", gap: 12, flexWrap: "wrap",
+      }}>
+        <button
+          type="button"
+          className="ec-btn ec-btn--ghost"
+          onClick={() => setLundiSel(edtDecaleSemaine(lundiSel, -1))}
+          disabled={lundiSel <= lundiCourant}
+          aria-label="Semaine précédente"
+          style={{ minWidth: 52 }}
+        >‹</button>
+
+        <div style={{ textAlign: "center", flex: "1 1 200px", minWidth: 0 }}>
+          <div style={{ fontSize: "var(--ec-fs-4)", fontWeight: 800, color: COLORS.ink }}>
+            {edtLibelleSemaine(lundiSel)}
+          </div>
+          <div style={{ fontSize: "var(--ec-fs-2)", color: semaineFuture ? COLORS.warn : COLORS.ink3, fontWeight: semaineFuture ? 700 : 600 }}>
+            {edtLibelleEcart(lundiSel)}
+            {" · du "}{edtLibelleJourCourt(lundiSel, 1)}{" au "}{edtLibelleJourCourt(lundiSel, 5)}
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 8 }}>
+          {semaineFuture && (
+            <button
+              type="button"
+              className="ec-btn ec-btn--ghost ec-btn--sm"
+              onClick={() => setLundiSel(lundiCourant)}
+            >
+              Revenir à cette semaine
+            </button>
+          )}
+          <button
+            type="button"
+            className="ec-btn ec-btn--ghost"
+            onClick={() => setLundiSel(edtDecaleSemaine(lundiSel, 1))}
+            aria-label="Semaine suivante"
+            style={{ minWidth: 52 }}
+          >›</button>
+        </div>
+      </Card>
+
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 16 }}>
         <button
           type="button"
@@ -1121,6 +1340,12 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
             }}
           >
             {j.nom}
+            {/* 🔴 La date, pas seulement le nom du jour. « Lundi » tout seul ne
+                dit pas QUEL lundi : c'est exactement ce qui empêchait de savoir
+                où poser le férié du 5 octobre. */}
+            <span style={{ fontWeight: 600, opacity: 0.75 }}>
+              {" "}{edtDateDuJour(lundiSel, j.n).getDate()}
+            </span>
           </button>
         ))}
       </div>
@@ -1158,7 +1383,7 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
         * quand une modification n'est pas enregistrée.
         * ══════════════════════════════════════════════════════════════════ */}
       {vue === "semaine" && (() => {
-        const lundiIso = edtLundiIso(new Date());
+        const lundiIso = lundiSel;      // la semaine CHOISIE, plus « aujourd'hui »
         const parJour = EDT_JOURS.map((j) => {
           const duJour = (brut || []).filter((sl) => sl.day_of_week === j.n);
           const perm = duJour.filter((sl) => !sl.week_start);
@@ -1169,6 +1394,7 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
             .slice().sort((a, b) => (a.slot_order || 0) - (b.slot_order || 0));
           return {
             ...j, slots,
+            ferie: slots.some((sl) => sl.component_id === "ferie"),
             aExc: exc.length > 0,
             aPerm: perm.length > 0,
             // 🔴 Le seul cas vraiment dangereux : une exception SANS modèle
@@ -1182,8 +1408,13 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
            modèle permanent dessous — mais c'était l'ANCIEN modèle, pas le
            travail de l'enseignante. Ne prévenir que pour les journées qui
            deviennent vides aurait donc laissé passer exactement son cas. */
-        const nbException = parJour.filter((d) => d.aExc).length;
-        const nbOrphelines = parJour.filter((d) => d.orpheline).length;
+        /* ⚠️ Les journées fériées sont exclues du décompte. Ce sont bien des
+           exceptions d'une semaine, mais c'est leur raison d'être : les
+           signaler reviendrait à réclamer « gardez votre travail » pour un jour
+           où l'école est fermée — et à pousser l'enseignante vers le seul geste
+           qu'il faut éviter ici, « À partir de maintenant ». */
+        const nbException = parJour.filter((d) => d.aExc && !d.ferie).length;
+        const nbOrphelines = parJour.filter((d) => d.orpheline && !d.ferie).length;
 
         return (
           <div style={{ marginTop: 16 }}>
@@ -1195,16 +1426,17 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
               }}>
                 <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 800, color: COLORS.warn }}>
                   {nbException === 1
-                    ? "1 journée changera lundi prochain"
-                    : `${nbException} journées changeront lundi prochain`}
+                    ? "1 journée ne vaut que pour cette semaine-là"
+                    : `${nbException} journées ne valent que pour cette semaine-là`}
                 </div>
                 <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink2, marginTop: 4 }}>
-                  Elles ne sont enregistrées que pour cette semaine.
+                  Elles sont enregistrées pour la {edtLibelleSemaine(lundiIso).toLowerCase()} uniquement.
                   {nbOrphelines > 0
-                    ? " Certaines deviendront VIDES, les autres reviendront à votre ancien emploi du temps."
-                    : " Lundi prochain, elles reviendront à votre ancien emploi du temps."}
-                  {" "}Pour garder votre travail, ouvrez chaque journée marquée en bleu ou en orange
+                    ? " Les autres semaines : certaines journées seront VIDES, les autres garderont votre ancien emploi du temps."
+                    : " Les autres semaines gardent votre ancien emploi du temps."}
+                  {" "}Pour qu'une journée devienne votre journée habituelle, ouvrez-la
                   et appuyez sur « À partir de maintenant ».
+                  {" "}Un jour férié, lui, doit rester sur cette seule semaine.
                 </div>
               </div>
             )}
@@ -1215,8 +1447,9 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
                 background: COLORS.critBg, border: `1px solid ${COLORS.critBrd}`,
                 fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.crit,
               }}>
-                Vous avez une modification non enregistrée sur {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()}.
-                Elle n'apparaît pas ci-dessous.
+                Vous avez une modification non enregistrée sur le{" "}
+                {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()}{" "}
+                {edtLibelleJourCourt(lundiSel, jour)}. Elle n'apparaît pas ci-dessous.
               </div>
             )}
 
@@ -1232,6 +1465,9 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
                   }}>
                     <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 800, color: COLORS.ink }}>
                       {d.nom}
+                      <span style={{ fontWeight: 600, color: COLORS.ink3 }}>
+                        {" "}{edtLibelleJourCourt(lundiIso, d.n)}
+                      </span>
                     </div>
                     <div style={{ marginTop: 5 }}>
                       {d.slots.length === 0 ? (
@@ -1240,6 +1476,16 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
                           background: COLORS.track, border: `1px solid ${COLORS.border}`,
                           fontSize: "var(--ec-fs-1)", fontWeight: 700, color: COLORS.ink3,
                         }}>Vide</span>
+                      ) : d.ferie ? (
+                        /* Le férié passe AVANT « cette semaine seulement » :
+                           techniquement c'est bien une exception d'une semaine,
+                           mais le dire ainsi laisserait croire à un travail en
+                           danger alors que c'est justement l'effet voulu. */
+                        <span style={{
+                          display: "inline-block", padding: "3px 9px", borderRadius: 999,
+                          background: COLORS.critBg, border: `1px solid ${COLORS.critBrd}`,
+                          fontSize: "var(--ec-fs-1)", fontWeight: 700, color: COLORS.crit,
+                        }}>Jour férié</span>
                       ) : d.orpheline ? (
                         <span style={{
                           display: "inline-block", padding: "3px 9px", borderRadius: 999,
@@ -1338,6 +1584,14 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
                   {edtHhmm(l.debut)}
                 </div>
 
+                {t?.journeeEntiere ? (
+                  /* Pas de menu de durée pour un férié : 420 minutes n'est pas
+                     dans `EDT_DUREES`, et une durée réglable inviterait à
+                     fabriquer un « férié de 30 minutes » qui ne veut rien dire. */
+                  <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 700, color: COLORS.ink2 }}>
+                    Toute la journée
+                  </div>
+                ) : (
                 <select
                   aria-label={`Durée du créneau de ${edtHhmm(l.debut)}`}
                   style={cellSel}
@@ -1351,6 +1605,7 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
                   {EDT_DUREES.filter((d) => d <= (edtMin(EDT_FIN) - l.debut) || d === l.minutes)
                     .map((d) => <option key={d} value={d}>{d} min</option>)}
                 </select>
+                )}
 
                 <select
                   aria-label={`Type du créneau de ${edtHhmm(l.debut)}`}
@@ -1384,7 +1639,9 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
                   </div>
                 ) : (
                   <div style={{ fontSize: "var(--ec-fs-3)", color: COLORS.ink3, fontWeight: 600 }}>
-                    {t?.ancre ? "Horaire fixé par l'école" : "Pas de leçon à projeter"}
+                    {t?.journeeEntiere
+                      ? "L'école est fermée — aucune leçon"
+                      : t?.ancre ? "Horaire fixé par l'école" : "Pas de leçon à projeter"}
                   </div>
                 )}
 
@@ -1417,40 +1674,70 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
           background: COLORS.panel, flexWrap: "wrap",
         }}>
           <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 700, color: resteFinJournee < 0 ? COLORS.crit : COLORS.ink2 }}>
-            {resteFinJournee > 0
-              ? `Fin à ${edtHhmm(finJournee)} — ${resteFinJournee} min libres avant ${EDT_FIN}`
-              : `La journée est complète : elle se termine à ${EDT_FIN}`}
+            {estFerie
+              ? "Journée fériée : l'école est fermée du matin au soir"
+              : resteFinJournee > 0
+                ? `Fin à ${edtHhmm(finJournee)} — ${resteFinJournee} min libres avant ${EDT_FIN}`
+                : `La journée est complète : elle se termine à ${EDT_FIN}`}
           </div>
-          <button
-            type="button"
-            className="ec-btn ec-btn--ghost"
-            onClick={ajouter}
-            disabled={resteFinJournee < EDT_DUREES[0]}
-          >
-            Ajouter un créneau
-          </button>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {/* Le férié est aussi dans le menu « Type de créneau », mais en un
+                geste depuis ici : c'est une journée entière qu'on déclare, pas
+                un créneau qu'on règle. */}
+            <button
+              type="button"
+              className="ec-btn ec-btn--ghost"
+              onClick={estFerie ? retirerFerie : marquerFerie}
+            >
+              {estFerie ? "Ce n'est pas un jour férié" : "Jour férié"}
+            </button>
+            <button
+              type="button"
+              className="ec-btn ec-btn--ghost"
+              onClick={ajouter}
+              disabled={estFerie || resteFinJournee < EDT_DUREES[0]}
+            >
+              Ajouter un créneau
+            </button>
+          </div>
         </div>
       </Card>
 
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, marginTop: 16, flexWrap: "wrap" }}>
         <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3, maxWidth: 560 }}>
-          Gardez-vous ce {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()} pour cette semaine,
-          ou devient-il votre {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()} habituel ?
+          {estFerie ? (
+            <>
+              Le {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()}{" "}
+              {edtLibelleJourCourt(lundiSel, jour)} sera férié. Un jour férié ne s'enregistre
+              que pour sa semaine : les autres {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()}s
+              de l'année gardent votre emploi du temps habituel.
+            </>
+          ) : (
+            <>
+              Gardez-vous ce {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()}{" "}
+              {edtLibelleJourCourt(lundiSel, jour)} pour cette seule semaine, ou devient-il
+              votre {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()} habituel,
+              toutes les semaines ?
+            </>
+          )}
         </div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          {/* 🔴 Le libellé NOMME la semaine. « Cette semaine seulement » était
+              faux dès qu'on en modifiait une autre — et maintenant on peut. */}
           <button
             type="button"
-            className="ec-btn ec-btn--ghost"
+            className={estFerie ? "ec-btn" : "ec-btn ec-btn--ghost"}
             onClick={() => enregistrer("semaine")}
             disabled={saving}
           >
-            {saving ? "…" : "Cette semaine seulement"}
+            {saving ? "…" : `Seulement la semaine du ${edtLibelleJourCourt(lundiSel, 1)}`}
           </button>
           <button
             type="button"
             className="ec-btn"
             onClick={() => enregistrer("toujours")}
-            disabled={saving}
+            disabled={saving || estFerie}
+            title={estFerie ? "Un jour férié ne se répète pas chaque semaine." : undefined}
           >
             {saving ? "Enregistrement…" : "À partir de maintenant"}
           </button>
