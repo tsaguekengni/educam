@@ -969,58 +969,40 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
           component_name: t?.lecon
             ? (matiere?.components.find((c) => c.id === l.component_id)?.name || null)
             : "",
-          school_id: teacher.school_id, owner_teacher_id: teacher.id,
-          week_start: lundi,
+          school_id: teacher.school_id,
+          // owner_teacher_id et week_start sont posés par la fonction côté
+          // base — ne pas les envoyer d'ici : ils y seraient ignorés, et les
+          // écrire donnerait l'illusion qu'on peut les choisir.
         };
       });
-      /* ⚠️ EFFACER LA JOURNÉE PUIS LA RÉÉCRIRE — les deux portées, même chemin.
+      /* ✅ UN SEUL APPEL, UNE SEULE TRANSACTION (2026-10-02).
        *
-       * 🔴 Défaut payé le 2026-10-02, en direct avec l'enseignante : « à partir
-       * de maintenant » échouait à TOUS les coups, « cette semaine seulement »
-       * passait. La cause était un `upsert ... onConflict` sur les colonnes
-       * (owner_teacher_id, day_of_week, slot_order, week_start), alors que
-       * l'index unique porte sur une EXPRESSION — `coalesce(week_start,
-       * '1900-01-01')` — parce qu'en SQL deux NULL ne sont jamais « égaux » et
-       * qu'un index sur la colonne nue ne protégerait donc pas le modèle
-       * permanent. PostgreSQL ne peut pas relier les deux et refuse avec
-       * **42P10**. Reproduit en base avant correction, pas deviné.
+       * 🔴 Ce qu'il y avait avant et pourquoi ça échouait : un
+       * `upsert ... onConflict` sur les colonnes (owner_teacher_id,
+       * day_of_week, slot_order, week_start), alors que l'index unique porte
+       * sur une EXPRESSION — `coalesce(week_start,'1900-01-01')` — parce qu'en
+       * SQL deux NULL ne sont jamais « égaux » et qu'un index sur la colonne
+       * nue ne protégerait pas le modèle permanent. PostgreSQL ne peut pas
+       * relier les deux et refuse avec **42P10**. « À partir de maintenant »
+       * échouait donc à tous les coups, « cette semaine seulement » passait
+       * (insertion simple). Reproduit en base, pas deviné.
        *
-       * On abandonne donc l'upsert : on efface la journée (pour CETTE portée
-       * seulement) puis on la réécrit, exactement comme le faisait déjà la
-       * branche « cette semaine », qui marchait.
+       * `educam_save_timetable_day` efface la journée pour CETTE portée puis
+       * la réécrit — le tout dans le corps d'une fonction, donc **une seule
+       * transaction** : si l'insertion échoue, la suppression est annulée avec
+       * elle. Une journée ne peut plus se retrouver vide ni à moitié écrite,
+       * ce que deux requêtes depuis le navigateur ne pouvaient pas garantir.
        *
-       * ⚠️ `is("week_start", null)` et NON `eq(..., null)` : en SQL une
-       * comparaison d'égalité à NULL ne renvoie jamais vrai, et la suppression
-       * n'effacerait rien — on réinsérerait par-dessus l'ancienne journée.
-       *
-       * ⚠️ Deux requêtes, donc une fenêtre où la journée est vide en base. Si
-       * l'insertion échoue, on REMET ce qui vient d'être effacé (`avantBase`)
-       * plutôt que de laisser la journée vide. Et si cette remise échoue à son
-       * tour, le message le dit franchement : voir le `catch`. */
-      const supprimer = supabase.from("timetable_slots").delete()
-        .eq("owner_teacher_id", teacher.id).eq("day_of_week", jour);
-      const { data: avantBase } = await (lundi
-        ? supabase.from("timetable_slots").select("*")
-            .eq("owner_teacher_id", teacher.id).eq("day_of_week", jour).eq("week_start", lundi)
-        : supabase.from("timetable_slots").select("*")
-            .eq("owner_teacher_id", teacher.id).eq("day_of_week", jour).is("week_start", null));
+       * `owner_teacher_id` est forcé à `auth.uid()` côté base : la charge utile
+       * envoyée d'ici ne peut pas désigner l'emploi du temps de quelqu'un
+       * d'autre. */
+      const { error } = await supabase.rpc("educam_save_timetable_day", {
+        p_day: jour,
+        p_week_start: lundi,
+        p_rows: rows,
+      });
+      if (error) throw error;
 
-      const { error: e0 } = await (lundi
-        ? supprimer.eq("week_start", lundi)
-        : supprimer.is("week_start", null));
-      if (e0) throw e0;
-
-      if (rows.length) {
-        const { error } = await supabase.from("timetable_slots").insert(rows);
-        if (error) {
-          // Remise en l'état : la journée ne doit pas rester vide.
-          if (avantBase && avantBase.length) {
-            await supabase.from("timetable_slots")
-              .insert(avantBase.map(({ id, ...r }) => r));
-          }
-          throw error;
-        }
-      }
       setAvant(null);
       setMsg({
         t: lundi
