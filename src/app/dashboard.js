@@ -858,10 +858,27 @@ function edtRecalcule(lignes) {
 
 function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack, retard, moisCourant }) {
   const [jour, setJour] = useState(1);
+  const [vue, setVue] = useState("semaine");   // "semaine" d'abord : on regarde avant d'éditer
+  const [brut, setBrut] = useState([]);       // lignes NON fusionnées : voir la vue semaine
   const [lignes, setLignes] = useState([]);
   const [avant, setAvant] = useState(null);          // une seule marche arrière
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState(null);
+
+  /* Les lignes TELLES QU'ELLES SONT EN BASE, sans la fusion semaine.
+     La vue semaine en a besoin : `timetable` est déjà fusionné, et une journée
+     qui possède À LA FOIS un modèle permanent et une exception n'y apparaît
+     que sous sa forme d'exception. Impossible alors de dire si le permanent
+     existe — or c'est précisément ce que l'enseignante doit savoir. */
+  const chargerBrut = async () => {
+    if (!teacher?.id) return;
+    const { data } = await supabase.from("timetable_slots")
+      .select("id, day_of_week, slot_order, start_time, end_time, subject_id, subject_name, component_name, week_start")
+      .eq("owner_teacher_id", teacher.id)
+      .order("day_of_week").order("slot_order");
+    setBrut(data || []);
+  };
+  useEffect(() => { chargerBrut(); }, [teacher?.id, timetable]);
 
   // Charge la journée demandée depuis l'emploi du temps en vigueur.
   useEffect(() => {
@@ -1051,17 +1068,33 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
       <RetardNotice retard={retard} mois={moisCourant} vendrediLibre={true} />
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 16 }}>
-        {EDT_JOURS.map((j) => (          <button
+        <button
+          type="button"
+          onClick={() => setVue("semaine")}
+          aria-current={vue === "semaine"}
+          style={{
+            minHeight: 44, padding: "10px 18px", borderRadius: 10, cursor: "pointer",
+            fontFamily: "inherit", fontSize: "var(--ec-fs-3)", fontWeight: 700,
+            border: `1px solid ${vue === "semaine" ? COLORS.g700 : COLORS.border}`,
+            background: vue === "semaine" ? COLORS.g700 : COLORS.card,
+            color: vue === "semaine" ? "#FFFFFF" : COLORS.ink2,
+          }}
+        >
+          Ma semaine
+        </button>
+        <span aria-hidden="true" style={{ width: 1, background: COLORS.border, margin: "4px 4px" }} />
+        {EDT_JOURS.map((j) => (
+          <button
             key={j.n}
             type="button"
-            onClick={() => setJour(j.n)}
-            aria-current={jour === j.n}
+            onClick={() => { setJour(j.n); setVue("jour"); }}
+            aria-current={vue === "jour" && jour === j.n}
             style={{
               minHeight: 44, padding: "10px 18px", borderRadius: 10, cursor: "pointer",
               fontFamily: "inherit", fontSize: "var(--ec-fs-3)", fontWeight: 700,
-              border: `1px solid ${jour === j.n ? COLORS.g700 : COLORS.border}`,
-              background: jour === j.n ? COLORS.g700 : COLORS.card,
-              color: jour === j.n ? "#FFFFFF" : COLORS.ink2,
+              border: `1px solid ${vue === "jour" && jour === j.n ? COLORS.g700 : COLORS.border}`,
+              background: vue === "jour" && jour === j.n ? COLORS.g700 : COLORS.card,
+              color: vue === "jour" && jour === j.n ? "#FFFFFF" : COLORS.ink2,
             }}
           >
             {j.nom}
@@ -1079,6 +1112,178 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
         }}>{msg.t}</div>
       )}
 
+      {/* ══════════════════════════════════════════════════════════════════
+        * VUE DE LA SEMAINE — ajoutée le 2026-10-02.
+        *
+        * 🔴 Elle manquait, et ça s'est payé le jour même. L'écran de
+        * validation prévu à la conception devait montrer LA SEMAINE avant de
+        * poser la question de la portée. Construit jour par jour, il a produit
+        * exactement le malentendu annoncé : l'enseignante a cru valider sa
+        * semaine « à partir de maintenant » alors qu'elle n'avait validé QUE
+        * le lundi affiché. Mardi et mercredi sont restés en exception d'une
+        * semaine — c'est-à-dire voués à disparaître le lundi suivant, sans que
+        * rien ne le signale.
+        *
+        * D'où le repère par journée, qui est le vrai apport de cet écran :
+        * « enregistré » (modèle permanent) · « cette semaine seulement »
+        * (exception qui expire) · « vide ». Un emploi du temps à moitié
+        * permanent est invisible autrement.
+        *
+        * La vue lit `timetable` (ce qui est EN BASE), jamais `lignes` (ce qui
+        * est à l'écran pour la journée en cours) : elle doit montrer ce qui est
+        * enregistré, pas ce qui est en train d'être tapé. D'où l'avertissement
+        * quand une modification n'est pas enregistrée.
+        * ══════════════════════════════════════════════════════════════════ */}
+      {vue === "semaine" && (() => {
+        const lundiIso = edtLundiIso(new Date());
+        const parJour = EDT_JOURS.map((j) => {
+          const duJour = (brut || []).filter((sl) => sl.day_of_week === j.n);
+          const perm = duJour.filter((sl) => !sl.week_start);
+          const exc  = duJour.filter((sl) => sl.week_start === lundiIso);
+          // Ce qu'elle VIT cette semaine : l'exception si elle existe, sinon
+          // le modèle permanent. Même règle que `edtFusionneSemaine`.
+          const slots = (exc.length ? exc : perm)
+            .slice().sort((a, b) => (a.slot_order || 0) - (b.slot_order || 0));
+          return {
+            ...j, slots,
+            aExc: exc.length > 0,
+            aPerm: perm.length > 0,
+            // 🔴 Le seul cas vraiment dangereux : une exception SANS modèle
+            // permanent derrière. Lundi prochain, la journée devient vide.
+            orpheline: exc.length > 0 && perm.length === 0,
+          };
+        });
+        /* ⚠️ L'avertissement porte sur TOUTE journée en exception, pas sur les
+           seules journées orphelines. Vérifié sur les vraies données du
+           2026-10-02 : aucune n'était orpheline — mardi et mercredi avaient un
+           modèle permanent dessous — mais c'était l'ANCIEN modèle, pas le
+           travail de l'enseignante. Ne prévenir que pour les journées qui
+           deviennent vides aurait donc laissé passer exactement son cas. */
+        const nbException = parJour.filter((d) => d.aExc).length;
+        const nbOrphelines = parJour.filter((d) => d.orpheline).length;
+
+        return (
+          <div style={{ marginTop: 16 }}>
+            {nbException > 0 && (
+              <div style={{
+                marginBottom: 14, padding: "13px 16px", borderRadius: 12,
+                background: COLORS.warnBg, border: `1px solid ${COLORS.border}`,
+                borderLeft: `5px solid ${COLORS.warn}`,
+              }}>
+                <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 800, color: COLORS.warn }}>
+                  {nbException === 1
+                    ? "1 journée changera lundi prochain"
+                    : `${nbException} journées changeront lundi prochain`}
+                </div>
+                <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink2, marginTop: 4 }}>
+                  Elles ne sont enregistrées que pour cette semaine.
+                  {nbOrphelines > 0
+                    ? " Certaines deviendront VIDES, les autres reviendront à votre ancien emploi du temps."
+                    : " Lundi prochain, elles reviendront à votre ancien emploi du temps."}
+                  {" "}Pour garder votre travail, ouvrez chaque journée marquée en bleu ou en orange
+                  et appuyez sur « À partir de maintenant ».
+                </div>
+              </div>
+            )}
+
+            {avant && (
+              <div style={{
+                marginBottom: 14, padding: "11px 14px", borderRadius: 10,
+                background: COLORS.critBg, border: `1px solid ${COLORS.critBrd}`,
+                fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.crit,
+              }}>
+                Vous avez une modification non enregistrée sur {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()}.
+                Elle n'apparaît pas ci-dessous.
+              </div>
+            )}
+
+            <div style={{
+              display: "grid", gap: 12,
+              gridTemplateColumns: "repeat(auto-fit, minmax(min(210px, 100%), 1fr))",
+            }}>
+              {parJour.map((d) => (
+                <Card key={d.n} style={{ padding: 0, overflow: "hidden" }}>
+                  <div style={{
+                    padding: "11px 14px", borderBottom: `1px solid ${COLORS.divider}`,
+                    background: COLORS.panel,
+                  }}>
+                    <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 800, color: COLORS.ink }}>
+                      {d.nom}
+                    </div>
+                    <div style={{ marginTop: 5 }}>
+                      {d.slots.length === 0 ? (
+                        <span style={{
+                          display: "inline-block", padding: "3px 9px", borderRadius: 999,
+                          background: COLORS.track, border: `1px solid ${COLORS.border}`,
+                          fontSize: "var(--ec-fs-1)", fontWeight: 700, color: COLORS.ink3,
+                        }}>Vide</span>
+                      ) : d.orpheline ? (
+                        <span style={{
+                          display: "inline-block", padding: "3px 9px", borderRadius: 999,
+                          background: COLORS.warnBg, border: `1px solid ${COLORS.warn}`,
+                          fontSize: "var(--ec-fs-1)", fontWeight: 700, color: COLORS.warn,
+                        }}>Cette semaine seulement</span>
+                      ) : d.aExc ? (
+                        <span style={{
+                          display: "inline-block", padding: "3px 9px", borderRadius: 999,
+                          background: COLORS.posBg, border: `1px solid ${COLORS.posBrd}`,
+                          fontSize: "var(--ec-fs-1)", fontWeight: 700, color: COLORS.pos,
+                        }}>Modifiée cette semaine</span>
+                      ) : (
+                        <span style={{
+                          display: "inline-block", padding: "3px 9px", borderRadius: 999,
+                          background: COLORS.g50, border: `1px solid ${COLORS.g200}`,
+                          fontSize: "var(--ec-fs-1)", fontWeight: 700, color: COLORS.good,
+                        }}>Enregistré</span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div style={{ padding: "8px 0" }}>
+                    {d.slots.length === 0 ? (
+                      <div style={{ padding: "10px 14px", fontSize: "var(--ec-fs-2)", color: COLORS.ink3 }}>
+                        Aucun créneau.
+                      </div>
+                    ) : d.slots.map((sl) => {
+                      const pause = sl.subject_id === "pause" || sl.subject_id === "etude";
+                      return (
+                        <div key={sl.id} style={{
+                          display: "flex", gap: 9, alignItems: "baseline",
+                          padding: "5px 14px", background: pause ? COLORS.panel : undefined,
+                        }}>
+                          <span style={{
+                            fontSize: "var(--ec-fs-1)", fontWeight: 700, color: COLORS.ink3,
+                            minWidth: 38, fontVariantNumeric: "tabular-nums",
+                          }}>{sl.start_time}</span>
+                          <span style={{
+                            fontSize: "var(--ec-fs-2)", color: pause ? COLORS.ink3 : COLORS.ink,
+                            fontWeight: pause ? 600 : 700, minWidth: 0,
+                          }}>
+                            {pause ? sl.subject_name : (sl.component_name || sl.subject_name)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div style={{ padding: "10px 14px", borderTop: `1px solid ${COLORS.divider}` }}>
+                    <button
+                      type="button"
+                      className="ec-btn ec-btn--ghost ec-btn--sm"
+                      onClick={() => { setJour(d.n); setVue("jour"); }}
+                      style={{ width: "100%" }}
+                    >
+                      Modifier {d.nom.toLowerCase()}
+                    </button>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
+
+      {vue === "jour" && (<>
       <Card style={{ marginTop: 16, padding: 0, overflow: "hidden" }}>
         {calc.length === 0 && (
           <div style={{ padding: 22, fontSize: "var(--ec-fs-3)", color: COLORS.ink3 }}>
@@ -1228,6 +1433,7 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
           </button>
         </div>
       </div>
+      </>)}
     </div>
   );
 }
