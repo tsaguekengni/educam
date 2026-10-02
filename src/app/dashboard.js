@@ -532,13 +532,19 @@ function renderCursiveText(text) {
  * on ne l'impose pas, on le MONTRE.
  * ══════════════════════════════════════════════════════════════════════════ */
 
-/* Les matières proposées à l'enseignante. L'anglais en est RETIRÉ : il est
- * assuré par un enseignant extérieur (décision de Maxime, 2026-10-01). Ses
- * leçons restent en base pour cet enseignant-là ; elles n'ont simplement rien
- * à faire dans une liste où elle choisit ce QU'ELLE enseigne. Le créneau
- * d'anglais existe toujours dans sa journée, en type « English (enseignant
- * extérieur) » — elle voit quand il tombe, elle ne le remplit pas. */
-const EDT_MATIERES_ENSEIGNANTE = SUBJECTS.filter((s) => s.id !== "english");
+/* Les matières proposées à l'enseignante : TOUTES, anglais compris.
+ *
+ * ⚠️ L'anglais en avait été RETIRÉ le 2026-10-01, et c'était la mauvaise porte.
+ * Corrigé le 2026-10-02 après essai avec l'enseignante : l'anglais figure bien
+ * dans sa journée, elle doit donc pouvoir le poser dans son emploi du temps.
+ * Ce qu'il ne faut pas, c'est que la PLATEFORME prétende fournir la leçon —
+ * et cela se dit ailleurs, au bon endroit : `subject_coverage`, où l'anglais
+ * est passé en `teacher_taught`. L'écran de leçon affiche alors « assuré par
+ * un enseignant extérieur », exactement comme TIC, EPS, arts et les autres.
+ *
+ * ⭐ La règle : « cette matière n'est pas fournie par la plateforme » se dit
+ * UNE fois, dans `subject_coverage`, pas en amputant des listes. */
+const EDT_MATIERES_ENSEIGNANTE = SUBJECTS;
 
 const EDT_DEBUT = "07:30";
 const EDT_FIN = "14:30";
@@ -905,12 +911,27 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
   const changeChamp = (uid, champ, valeur) => modifier((prev) =>
     prev.map((l) => (l.uid === uid ? { ...l, [champ]: valeur } : l)));
 
+  /* ⚠️ LE NOUVEAU CRÉNEAU PREND LA PLUS GRANDE DURÉE QUI TIENT ENCORE.
+     Signalé par Maxime le 2026-10-02, en direct avec l'enseignante : arrivée à
+     13:45 avec 45 minutes devant elle, elle appuyait sur « Ajouter un créneau »
+     et RIEN n'apparaissait. Le bouton était pourtant actif.
+     La cause : la ligne était créée à 60 min par défaut, et la coupe à 14:30
+     (`edtRecalcule`) l'écartait aussitôt — sans erreur, sans message. Le pire
+     des défauts : un bouton qui répond en apparence et ne fait rien.
+     On calcule donc d'abord la place restante, et on y loge la plus grande
+     durée possible (45, 30 ou 15). S'il ne reste pas même 15 minutes, le
+     bouton est désactivé en amont. */
   const ajouter = () => modifier((prev) => {
     const s0 = subjects[0];
+    const dejaPose = edtRecalcule(prev);
+    const finCourante = dejaPose.length ? dejaPose[dejaPose.length - 1].fin : edtMin(EDT_DEBUT);
+    const reste = edtMin(EDT_FIN) - finCourante;
+    const duree = EDT_DUREES.filter((d) => d <= reste).pop();
+    if (!duree) return prev;
     return [...prev, {
       uid: `n-${Date.now()}`, kind: "lecon",
       subject_id: s0.id, component_id: s0.components[0].id,
-      minutes: 60, ancreDebut: null,
+      minutes: duree, ancreDebut: null,
     }];
   });
   const retirer = (uid) => modifier((prev) => prev.filter((l) => l.uid !== uid));
@@ -1161,7 +1182,7 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
             type="button"
             className="ec-btn ec-btn--ghost"
             onClick={ajouter}
-            disabled={resteFinJournee <= 0}
+            disabled={resteFinJournee < EDT_DUREES[0]}
           >
             Ajouter un créneau
           </button>
