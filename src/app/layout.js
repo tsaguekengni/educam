@@ -41,6 +41,12 @@ export default function RootLayout({ children }) {
     <html lang="fr">
       <body>
         <ServiceWorkerRegister />
+        {/* Charge la police cursive (Borel) dès la première visite en ligne,
+            pour que le service worker la garde : sinon une enseignante qui n'a
+            jamais ouvert un Bilan en ligne verrait, hors ligne, la trace dans
+            une police de secours. Invisible, hors du flux, ignoré des lecteurs
+            d'écran. Voir CURSIVE_FONT dans dashboard.js. */}
+        <span aria-hidden="true" style={{ fontFamily: "Borel", position: "absolute", width: 1, height: 1, overflow: "hidden", opacity: 0, pointerEvents: "none" }}>a</span>
         {children}
       </body>
     </html>

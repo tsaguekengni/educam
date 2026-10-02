@@ -444,6 +444,71 @@ function renderRichText(text) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+ * LA TRACE ÉCRITE EN CURSIVE — 2026-10-02
+ *
+ * Demande d'une enseignante, validée par Maxime : ce que les élèves RECOPIENT
+ * (« À recopier dans ton cahier » / « Ce que je retiens ») et le devoir (« Mon
+ * devoir » / « Mon défi ») s'affichent en écriture cursive scolaire, pour que
+ * l'écran soit un vrai modèle d'écriture attachée. Le « Récapitulons » oral et
+ * la ligne d'en-tête (avec son emoji) restent dans la police normale.
+ *
+ * Police : Borel (Rosalie Wagner, ANRT), licence SIL OFL 1.1 — fichier et
+ * licence dans `src/app/fonts/`, déclarée dans `globals.css`. Servie par notre
+ * propre site : la règle « aucune Google Font » est respectée.
+ *
+ * ⚠️ Borel n'a qu'UNE graisse. Le **gras** y devient un faux-gras baveux :
+ * dans la trace, les passages en gras sont donc SOULIGNÉS, comme les titres
+ * dans un cahier — jamais épaissis.
+ *
+ * ⚠️ Certaines anciennes leçons découpent la trace en plusieurs blocs de texte
+ * (l'en-tête seul, puis « Leçon : … », puis « 1. … »). La cursive s'applique
+ * donc À PARTIR du premier bloc d'en-tête et jusqu'à la fin de la section,
+ * pas seulement au bloc qui porte l'en-tête. Voir `bilanCursiveFrom`.
+ * ══════════════════════════════════════════════════════════════════════════ */
+const CURSIVE_FONT = '"Borel", "Segoe Print", "Comic Sans MS", cursive';
+const CURSIVE_HEADING = /(À RECOPIER|CE QUE JE RETIENS|MON DEVOIR|MON DÉFI|COPY IN YOUR NOTEBOOK|WHAT I REMEMBER|MY HOMEWORK|MY CHALLENGE)/;
+
+/* LES PAGES DE CAHIER (images du Bilan) SONT MASQUÉES — 2026-10-02.
+ * Décision de Maxime : le schéma « page de cahier » répétait le texte à
+ * recopier, et les deux versions côte à côte embrouillaient les enfants. On
+ * garde le texte (désormais en cursive). Les images restent en base et sur le
+ * stockage : remettre `false` ici les fait revenir partout, sans rien
+ * re-téléverser. Les schémas de maths et sciences restent visibles dans la
+ * section Contenu de chaque leçon. */
+const HIDE_BILAN_IMAGES = true;
+
+// Index du premier bloc de texte du Bilan qui ouvre la trace ou le devoir
+// (−1 s'il n'y en a pas : aucune cursive dans cette section).
+function bilanCursiveFrom(blocks) {
+  return (blocks || []).findIndex(
+    (b) => b.block_type === "text" && CURSIVE_HEADING.test(String(b.text_content || "").split("\n")[0])
+  );
+}
+
+// Texte d'un bloc de la trace : la ligne d'en-tête (si c'en est une) reste
+// dans la police normale, le reste passe en cursive, le gras devient souligné.
+function renderCursiveText(text) {
+  if (!text) return null;
+  const firstLine = text.split("\n")[0];
+  const hasHeading = CURSIVE_HEADING.test(firstLine);
+  const head = hasHeading ? firstLine : "";
+  const body = hasHeading ? text.slice(firstLine.length) : text;
+  return (
+    <>
+      {head && <span>{renderRichText(head)}</span>}
+      <span style={{ fontFamily: CURSIVE_FONT, fontWeight: 400 }}>
+        {body.split(/(\*\*[^*]+\*\*)/g).map((part, i) => {
+          const m = part.match(/^\*\*([^*]+)\*\*$/);
+          return m
+            ? <span key={i} style={{ textDecoration: "underline", textUnderlineOffset: "0.18em", textDecorationThickness: "0.06em" }}>{m[1]}</span>
+            : part;
+        })}
+      </span>
+    </>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
  * L'ÉDITEUR D'EMPLOI DU TEMPS DE L'ENSEIGNANTE — 2026-10-01
  *
  * Décision de Maxime : l'emploi du temps appartient à l'ENSEIGNANTE. Jusqu'ici
@@ -5805,13 +5870,18 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                           </div>
                         ) : (
                           blocks.map((block, k) => {
+                            const isBilan = section.section_type === "bilan";
+                            if (isBilan && HIDE_BILAN_IMAGES && block.block_type === "image") return null;
                             if (block.block_type === "text") {
+                              // Trace écrite et devoir en cursive (voir CURSIVE_FONT).
+                              const cursiveFrom = isBilan ? bilanCursiveFrom(blocks) : -1;
+                              const isCursive = cursiveFrom !== -1 && k >= cursiveFrom;
                               return (
                                 <div key={k} style={{
-                                  fontSize: 16.5, color: "#22262C", lineHeight: 1.68,
+                                  fontSize: isCursive ? 19 : 16.5, color: "#22262C", lineHeight: isCursive ? 1.8 : 1.68,
                                   whiteSpace: "pre-wrap", maxWidth: "66ch",
                                 }}>
-                                  {renderRichText(block.text_content)}
+                                  {isCursive ? renderCursiveText(block.text_content) : renderRichText(block.text_content)}
                                 </div>
                               );
                             }
@@ -6255,12 +6325,17 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                       </div>
                     ) : (
                       blocks.map((block, k) => {
+                        if (section.section_type === "bilan" && HIDE_BILAN_IMAGES && block.block_type === "image") return null;
                         if (block.block_type === "text") {
                           // The Bilan section is the trace écrite ("à recopier"):
                           // heavier, larger and more open so it survives projector
                           // blur when pupils copy it letter by letter. Inline **bold**
                           // signposts stay at 700 and still stand out over the 600 base.
                           const isCopyText = section.section_type === "bilan";
+                          // Trace écrite et devoir en cursive (voir CURSIVE_FONT) ;
+                          // le « Récapitulons » oral garde la police normale.
+                          const cursiveFrom = isCopyText ? bilanCursiveFrom(blocks) : -1;
+                          const isCursive = cursiveFrom !== -1 && k >= cursiveFrom;
                           return (
                             <div key={k} style={{
                               fontSize: isCopyText ? copyPx : basePx,
@@ -6277,7 +6352,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                               // toute la largeur utile de la projection.
                               maxWidth: "100%"
                             }}>
-                              {renderRichText(block.text_content)}
+                              {isCursive ? renderCursiveText(block.text_content) : renderRichText(block.text_content)}
                             </div>
                           );
                         }

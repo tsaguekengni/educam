@@ -1,5 +1,20 @@
 @import "tailwindcss";
 
+/* ── Écriture cursive de la trace écrite — 2026-10-02 ─────────────────────
+   Borel (Rosalie Wagner, ANRT) : cursive scolaire française à vraies liaisons.
+   Licence SIL Open Font License 1.1 : texte complet dans ./fonts/OFL.txt, à
+   garder à côté du fichier. AUTO-HÉBERGÉE (comme Inter) : aucune requête vers
+   Google Fonts. Utilisée uniquement par la section Bilan (« à recopier » et
+   « mon devoir ») via CURSIVE_FONT dans dashboard.js. Une seule graisse : ne
+   jamais la mettre en gras (dashboard.js souligne à la place). */
+@font-face {
+  font-family: "Borel";
+  src: url("./fonts/Borel-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* ==========================================================================
    EduCam — jetons de design et base
    Direction « VIBRANT », priorité écran d'ordinateur (décision du 2026-08-12).
