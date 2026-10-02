@@ -301,8 +301,15 @@ const PROJ_VIDEO_MAX_W = 1400;
  * plafond borne la taille PAR DÉFAUT ; le zoom est la décision de l'humain
  * qui voit l'écran, et il passe devant.
  * ────────────────────────────────────────────────────────────────────────── */
-const PROJ_ZOOM_MIN = 0.7;
-const PROJ_ZOOM_MAX = 2.0;
+// Bornes revues le 2026-10-01 après essai de Maxime sur une vraie projection :
+// 70 %-200 % devient 50 %-150 %. Le haut descend parce que 200 % n'a jamais
+// servi ; le bas descend parce qu'il veut pouvoir faire tenir plus de leçon à
+// l'écran quand elle est longue. ⭐ Bornes réglées à l'usage, pas au calcul.
+// ⚠️ Une valeur déjà enregistrée hors bornes sur un appareil est ramenée dans
+// la plage au chargement (`clampZoom`) : un poste réglé à 200 % se retrouvera
+// à 150 %, et c'est voulu.
+const PROJ_ZOOM_MIN = 0.5;
+const PROJ_ZOOM_MAX = 1.5;
 const PROJ_ZOOM_STEP = 0.1;
 const PROJ_ZOOM_KEY = "educam_proj_zoom";
 // Arrondi au centième : sans lui, additionner 0,1 en virgule flottante finit
@@ -1236,8 +1243,8 @@ function AdminChat({ moiId, online, pushToast, usurpation }) {
           type="button"
           onClick={() => setOuvert(true)}
           aria-label="Écrire à l'administration"
+          className="ec-adminchat"
           style={{
-            position: "fixed", right: 20, bottom: 20, zIndex: 9000,
             minHeight: 56, minWidth: 56, padding: "0 20px", borderRadius: 28,
             border: `1px solid ${COLORS.g700}`, background: COLORS.g500, color: "#FFFFFF",
             fontFamily: "inherit", fontSize: "var(--ec-fs-3)", fontWeight: 700,
@@ -1249,9 +1256,8 @@ function AdminChat({ moiId, online, pushToast, usurpation }) {
       )}
 
       {ouvert && (
-        <div style={{
-          position: "fixed", right: 20, bottom: 20, zIndex: 9000,
-          width: "min(380px, calc(100vw - 32px))", maxHeight: "min(560px, calc(100vh - 40px))",
+        <div className="ec-adminchat" style={{
+          width: "min(380px, calc(100vw - 32px))",
           display: "flex", flexDirection: "column",
           background: COLORS.card, border: `1px solid ${COLORS.border}`,
           borderRadius: 14, boxShadow: SHADOW.md, overflow: "hidden",
@@ -6133,6 +6139,40 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             boxShadow: "0 4px 20px rgba(0,0,0,0.2)"
           }}>✕ {isPresentWindow ? "Fermer" : "Quitter le projecteur"}</button>
         </div>
+
+        {/* MARQUER ENSEIGNÉE — EN BAS À GAUCHE, ajouté le 2026-10-01.
+            Signalé par Maxime : pendant que la classe recopie la trace écrite,
+            l'enseignante veut marquer la leçon et passer à la saisie des notes.
+            Elle ne le pouvait pas — et le défaut était plus profond qu'un
+            recouvrement : la barre « marquer enseignée » vit dans l'écran de
+            leçon (z-index 40), or la vue projecteur est une surcouche plein
+            écran (z-index 9999) posée par-dessus. L'action n'était pas cachée,
+            elle était ABSENTE. Déplacer des z-index n'y aurait rien changé.
+            Le coin bas-gauche est le seul libre : le haut-droit porte Plein
+            écran et Quitter, le bas-droit porte le zoom. Les trois ne se
+            rencontrent jamais, quelle que soit la largeur. */}
+        {!isParent && (
+          <div style={{
+            position: "fixed", bottom: 20, left: 24, zIndex: 10000,
+            background: "rgba(0,0,0,0.7)", borderRadius: 12, padding: 6,
+            backdropFilter: "blur(8px)", boxShadow: "0 4px 20px rgba(0,0,0,0.2)",
+          }}>
+            <button
+              onClick={toggleTaught}
+              disabled={taughtSaving}
+              title="Marque cette leçon comme enseignée en classe"
+              style={{
+                background: lessonTaught ? COLORS.g500 : "none",
+                border: lessonTaught ? "none" : "1px solid rgba(255,255,255,.45)",
+                color: "#fff", cursor: taughtSaving ? "default" : "pointer",
+                borderRadius: 9, padding: "9px 16px", minHeight: 44,
+                fontFamily: "inherit", fontSize: 15, fontWeight: 700,
+              }}
+            >
+              {taughtSaving ? "Enregistrement…" : lessonTaught ? "✓ Enseignée" : "Marquer enseignée"}
+            </button>
+          </div>
+        )}
 
         {/* Zoom — EN BAS À DROITE, volontairement.
             La barre du haut est déjà soupçonnée de recouvrir la barre

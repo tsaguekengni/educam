@@ -929,3 +929,28 @@ button, [role="button"], .ec-btn, .ec-row, .ec-choice, .ec-bottomnav button, .ec
 .ec-al--warn .ec-al__t { color: var(--ec-warn); }
 .ec-al p { font-size: var(--ec-fs-2); color: var(--ec-ink-2); margin-top: 2px; line-height: 1.45; }
 .ec-al time { display: block; font-size: var(--ec-fs-1); color: var(--ec-ink-3); margin-top: 5px; }
+
+/* ── BOÎTE DE DIALOGUE FLOTTANTE (2026-10-01) ────────────────────────────────
+   Signalé par Maxime depuis un téléphone : le bouton recouvrait la barre de
+   navigation du bas, là où le parent atteint tout le reste.
+
+   ⚠️ LE CALAGE SE FAIT ICI, EN CSS, ET PAS EN JAVASCRIPT. La barre du bas
+   devient un rail latéral à 900 px, tandis que le drapeau `isMobile` du
+   dashboard bascule à 640 px. Un calage piloté par `isMobile` aurait donc
+   laissé le recouvrement intact entre 641 et 899 px — un défaut invisible sur
+   un téléphone comme sur un portable, et bien présent sur une tablette.
+   Même point de bascule que la barre, donc : 900 px.
+
+   Hauteur de la barre : 7 px de marge haute + 52 px de bouton + 11 px de
+   marge basse + la zone sûre de l'appareil. On dégage 78 px pour garder de
+   l'air entre les deux. */
+.ec-adminchat {
+  position: fixed;
+  right: 20px;
+  bottom: calc(78px + var(--ec-safe-b));
+  z-index: 9000;
+}
+@media (min-width: 900px) {
+  /* Au-delà, la navigation est un rail à GAUCHE : le coin bas-droit est libre. */
+  .ec-adminchat { bottom: 20px; }
+}
