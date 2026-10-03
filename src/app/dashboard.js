@@ -1990,6 +1990,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [parentTaughtIds, setParentTaughtIds] = useState(() => new Set());
   const [parentStudent, setParentStudent] = useState(null);   // the linked child
   const [parentResults, setParentResults] = useState([]);      // the child's daily results
+  // Le consentement du parent aux notifications WhatsApp (chantier du
+  // 2026-10-03). `null` = pas encore lu, ou pas de ligne. On ne montre RIEN
+  // tant qu'on ne sait pas : un bandeau qui apparaît puis disparaît ferait
+  // croire à un bug.
+  const [consent, setConsent] = useState(null);
+  const [consentSaving, setConsentSaving] = useState(false);
+  const [consentErr, setConsentErr] = useState("");
   // ---- Unified inbox (parents AND teachers) ----
   const [inbox, setInbox] = useState([]);                      // messages received by the current user
   // Qui a écrit : { [id]: { nom, role } }. Rempli après coup, parce que la
@@ -2074,6 +2081,61 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     })();
     return () => { cancelled = true; };
   }, [isParent, parent?.student_id, parent?.id]);
+
+  // ---- Le consentement de CE parent, pour SON enfant (2026-10-03) ----
+  //
+  // 🔴 Lire `EduCam_Consentement_Parents.md` avant de toucher à ceci. La table
+  // `parent_consents` rend l'opt-in OBLIGATOIRE par sa seule existence : un
+  // élève sans ligne cesse d'être notifié, en silence. Tous les élèves en ont
+  // une, posée avec la table ; cet écran ne fait que la QUALIFIER — passer un
+  // accord « par la convention de l'école » à un accord donné par une personne
+  // identifiée, à une date connue.
+  //
+  // ⚠️ Volontairement SANS cache hors ligne : un consentement est un acte daté.
+  // Rejoué par la file trois jours plus tard, il porterait une date fausse —
+  // la même raison qui interdit de mettre les repères de lecture en file.
+  useEffect(() => {
+    if (!isParent || !parent?.student_id) { setConsent(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await supabase.from("parent_consents")
+          .select("student_id, whatsapp_optin, source, consented_at")
+          .eq("student_id", parent.student_id).maybeSingle();
+        if (!cancelled) setConsent(data || null);
+      } catch (_) { /* hors ligne : on ne montre rien plutôt que de se tromper */ }
+    })();
+    return () => { cancelled = true; };
+  }, [isParent, parent?.student_id]);
+
+  // Enregistrer la réponse du parent. `source` passe à « parent » dans les deux
+  // cas — accepter ET refuser sont l'un comme l'autre une réponse donnée par
+  // une personne identifiée, et c'est cela qu'on veut pouvoir prouver.
+  const repondreConsentement = async (accepte) => {
+    if (!parent?.student_id || consentSaving) return;
+    setConsentSaving(true);
+    setConsentErr("");
+    try {
+      const maintenant = new Date().toISOString();
+      const { error } = await supabase.from("parent_consents").update({
+        whatsapp_optin: accepte,
+        source: "parent",
+        consented_by: parent.id,
+        consented_at: maintenant,
+        updated_at: maintenant,
+      }).eq("student_id", parent.student_id);
+      if (error) throw error;
+      setConsent((p) => ({ ...(p || {}), whatsapp_optin: accepte, source: "parent", consented_at: maintenant }));
+    } catch (e) {
+      // Même distinction qu'ailleurs : un REFUS de la politique ne se répare
+      // pas en réessayant, un incident réseau oui.
+      const refus = e?.code === "42501" || /row-level security|policy/i.test(String(e?.message || ""));
+      setConsentErr(refus
+        ? "Ce compte n'a pas le droit d'enregistrer cette réponse."
+        : "Enregistrement impossible. Vérifiez votre connexion et réessayez.");
+    }
+    setConsentSaving(false);
+  };
 
   // ---- Inbox loader (shared by parents and teachers) ----
   useEffect(() => {
@@ -7383,6 +7445,81 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         </div>
       )}
       <main className="ec-main">
+        {/* ── CONSENTEMENT AUX NOTIFICATIONS (2026-10-03) ──────────────────
+            Posé ici, dans le <main>, et non sur le seul écran d'accueil : la
+            demande doit être visible dès la connexion, quel que soit l'écran
+            sur lequel le parent arrive.
+
+            NON BLOQUANT, volontairement. Maxime avait écarté un « portail de
+            consentement bloquant » le 2026-09-29 ; cette décision tient. Le
+            bandeau reste tant qu'on n'a pas répondu, mais il n'empêche rien :
+            un parent qui vient voir les notes de son enfant ne doit pas se
+            heurter à un mur.
+
+            ⚠️ Il ne s'affiche QUE si `source` vaut encore « protocole_ecole »,
+            c'est-à-dire si personne n'a encore répondu en son nom propre. */}
+        {isParent && consent && consent.source === "protocole_ecole" && (
+          <Card style={{ marginBottom: 16, borderColor: COLORS.g200, background: COLORS.g50 }}>
+            <div style={{ fontSize: FONT.md, fontWeight: 800, color: COLORS.ink }}>
+              Recevoir les nouvelles de votre enfant par WhatsApp
+            </div>
+            <p style={{ fontSize: FONT.sm, color: COLORS.ink2, lineHeight: 1.6, marginTop: 8, maxWidth: "62ch" }}>
+              L'école nous a autorisés à vous prévenir au sujet de votre enfant.
+              Nous préférons vous le demander directement : acceptez-vous de
+              recevoir un message WhatsApp quand une leçon est à revoir, ou
+              quand l'enseignante vous écrit&nbsp;?
+            </p>
+            {impersonating ? (
+              // Un consentement donné par quelqu'un d'autre n'est pas un
+              // consentement. Même raison qu'à la boîte de dialogue : en
+              // usurpation, on peut LIRE, jamais engager la personne.
+              <Callout tone="warn" icon="⚠️" style={{ marginTop: 10 }}>
+                Vous agissez en tant que cette personne : seule elle peut répondre.
+              </Callout>
+            ) : !online ? (
+              <Callout tone="brand" icon="📡" style={{ marginTop: 10 }}>
+                Votre réponse sera enregistrée dès que vous aurez du réseau.
+              </Callout>
+            ) : (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 14 }}>
+                <Button onClick={() => repondreConsentement(true)} disabled={consentSaving}>
+                  {consentSaving ? "Enregistrement…" : "Oui, prévenez-moi"}
+                </Button>
+                <Button variant="ghost" onClick={() => repondreConsentement(false)} disabled={consentSaving}>
+                  Non, merci
+                </Button>
+              </div>
+            )}
+            <p style={{ fontSize: FONT.sm, color: COLORS.ink3, marginTop: 12, maxWidth: "62ch" }}>
+              Vous pourrez changer d'avis à tout moment. Dans tous les cas, les
+              messages restent lisibles ici, dans l'application.
+            </p>
+            {consentErr && (
+              <Callout tone="crit" icon="⚠️" style={{ marginTop: 10 }}>{consentErr}</Callout>
+            )}
+          </Card>
+        )}
+
+        {/* Le chemin du retour. Sans lui, un « Non, merci » serait sans appel —
+            et un consentement qu'on ne peut pas reprendre n'en est pas un. */}
+        {isParent && consent && consent.source === "parent" && consent.whatsapp_optin === false && (
+          <Callout tone="brand" icon="🔕" style={{ marginBottom: 16 }}>
+            Vous ne recevez pas de WhatsApp au sujet de votre enfant. Les
+            messages restent lisibles ici.{" "}
+            {!impersonating && online && (
+              <button
+                type="button"
+                className="ec-link"
+                onClick={() => repondreConsentement(true)}
+                disabled={consentSaving}
+                style={{ background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit" }}
+              >
+                Réactiver les notifications
+              </button>
+            )}
+          </Callout>
+        )}
+
         {screen === "home" && isParent && (
           <div>
             <h1 className="ec-h1">
