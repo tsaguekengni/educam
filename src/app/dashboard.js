@@ -799,9 +799,60 @@ function edtJoursEcoleRestants(aujourdhui) {
  * Pour chaque sous-matière présente dans l'emploi du temps : ce qui reste dû
  * ce mois-ci, combien de fois le créneau reviendra d'ici la fin du mois, et
  * ce qu'il faudrait ajouter. `unite` = le mois en cours, au sens du programme.
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 🔴 L'ANGLE MORT CORRIGÉ — 2026-10-03.
+ *
+ * Maxime, après la première semaine : *« avec sa configuration actuelle,
+ * pourra-t-elle finir le programme du mois et de l'année ? je n'ai pas vu
+ * d'alerte. »* Mesuré : **39 leçons sur 69 par mois, 57 %** — et le voyant
+ * muet.
+ *
+ * La cause est structurelle, pas un réglage. Le calcul BOUCLE SUR L'EMPLOI DU
+ * TEMPS : une sous-matière qui n'y figure pas n'entre jamais dans la boucle,
+ * donc n'est jamais comptée en retard. Quatre sous-matières étaient dans ce
+ * cas (littérature, sciences-vie, sciences-terre, environnement) : 12 leçons
+ * par mois, 84 sur l'année, jamais enseignées et jamais signalées.
+ *
+ * ⭐ UN VOYANT QUI NE REGARDE QUE CE QU'ON LUI A DONNÉ NE PEUT PAS SIGNALER UN
+ * OUBLI. Il mesurait l'exécution d'un plan, jamais la complétude du plan. Son
+ * silence se lisait « tu finiras le programme » alors qu'il ne disait que
+ * « rien ne dérape dans ce que tu as prévu ».
+ *
+ * Deux listes nouvelles, et Maxime a demandé les DEUX ensemble — c'est ce qui
+ * rend l'alerte actionnable plutôt qu'accusatrice (*« cela aidera à identifier
+ * ce qui est à réduire sur la liste »*) :
+ *
+ *   · `jamais`  — la sous-matière a des leçons au programme et AUCUN créneau.
+ *   · `enTrop`  — des créneaux dont on peut se passer, pour deux raisons
+ *                 distinctes : `sans-contenu` (des créneaux, aucune leçon à y
+ *                 servir — SHS aujourd'hui) et `surplus` (plus de créneaux que
+ *                 nécessaire pour tenir le mois).
+ *
+ * La seconde liste est la RÉPONSE à la première : elle dit où est la place.
+ * ══════════════════════════════════════════════════════════════════════════
  */
-function edtCalculeRetard({ lessons, timetable, unite, subjects, aujourdhui }) {
+function edtCalculeRetard({ lessons, timetable, unite, subjects, coverage, aujourdhui }) {
   const joursRestants = edtJoursEcoleRestants(aujourdhui || new Date());
+
+  /* ⚠️ `=== "covered"`, STRICTEMENT — jamais « tout sauf teacher_taught ».
+     `coverage` arrive d'une requête asynchrone : au premier rendu il est vide.
+     Avec un défaut permissif, arts, EPS, TIC, langues et développement
+     personnel — qui ont légitimement des créneaux sans leçon de plateforme —
+     seraient tous annoncés « créneaux sans contenu » le temps du chargement,
+     et pour toujours si la requête échoue. Le défaut sûr est le SILENCE. */
+  const estFournie = (sid) => coverage?.[sid]?.status === "covered";
+  const occJour = (j) => joursRestants.filter((x) => x === j).length;
+  const nomDe = (sid, cid) => {
+    const m = (subjects || []).find((s) => s.id === sid);
+    return {
+      nomMatiere: m?.name || sid,
+      nomComposante: m?.components.find((c) => c.id === cid)?.name || cid,
+    };
+  };
+  const duProgramme = (sid, cid) => (lessons || []).filter((l) =>
+    l.subject_id === sid && l.component_id === cid &&
+    l.unit_number >= EDT_UNITE_DEPART && l.unit_number <= unite);
   const creneaux = (timetable || []).filter(
     (s) => s.subject_id && s.subject_id !== "pause" && s.subject_id !== "etude");
 
@@ -848,12 +899,203 @@ function edtCalculeRetard({ lessons, timetable, unite, subjects, aujourdhui }) {
   });
 
   lignes.sort((a, b) => b.manque - a.manque);
+
+  /* ── 1. CE QUI N'EST JAMAIS PROGRAMMÉ ────────────────────────────────────
+     On part cette fois des LEÇONS, pas de l'emploi du temps — c'est tout le
+     correctif. Une sous-matière du programme qui n'a aucun créneau ne se
+     « rattrape » pas : elle est absente, et aucun calcul d'occurrences ne
+     pouvait le dire puisqu'elle n'entrait jamais dans la boucle. */
+  const programmees = new Set([...parCle.keys()]);
+  const absentes = new Map();
+  (lessons || []).forEach((l) => {
+    if (!l.component_id) return;
+    if (l.unit_number < EDT_UNITE_DEPART || l.unit_number > unite) return;
+    if (!estFournie(l.subject_id)) return;          // assurée par l'enseignante : normal
+    const cle = `${l.subject_id}·${l.component_id}`;
+    if (programmees.has(cle) || absentes.has(cle)) return;
+    absentes.set(cle, { subject_id: l.subject_id, component_id: l.component_id });
+  });
+  const jamais = [...absentes.values()].map((v) => {
+    const duMois = duProgramme(v.subject_id, v.component_id);
+    return {
+      ...v, ...nomDe(v.subject_id, v.component_id),
+      total: duMois.length,
+      du: duMois.filter((l) => !l.taught).length,
+    };
+  })
+    /* ⚠️ `du > 0` — sinon on annonce « Littérature · 0 leçon en attente ».
+       Une sous-matière sans créneau mais dont tout est déjà enseigné n'est pas
+       un trou : il n'y a rien à rattraper. Trouvé par le test sur ses vraies
+       données, en simulant « tout enseigné » — pas à la relecture. */
+    .filter((j) => j.du > 0)
+    .sort((a, b) => b.du - a.du);
+
+  /* ── 2. CE QUI EST PROGRAMMÉ EN TROP ─────────────────────────────────────
+     Demandé par Maxime en même temps que la liste ci-dessus, et c'est ce qui
+     la rend utile : savoir qu'il manque quatre sous-matières ne sert à rien
+     si on ne sait pas où prendre le temps.
+
+     Deux raisons distinctes, à ne pas confondre dans le message :
+       · `sans-contenu` — des créneaux pour une matière qui n'a AUCUNE leçon
+         en base. Du temps de classe qui ne sert rien aujourd'hui. (SHS au
+         2026-10-03 : six créneaux, zéro leçon.) Réversible : le jour où le
+         contenu arrive, ces créneaux redeviennent nécessaires, et le message
+         le dit.
+       · `surplus` — plus de créneaux que ce que le mois demande.
+
+     ⚠️ ON NE PROPOSE JAMAIS DE RETIRER LE DERNIER CRÉNEAU d'une sous-matière
+     qui a du contenu : ce serait transformer un surplus en absence, c'est-à-
+     dire fabriquer précisément le défaut qu'on vient de corriger. */
+  const enTrop = [];
+  parCle.forEach((v) => {
+    if (!estFournie(v.subject_id)) return;
+    const duMois = duProgramme(v.subject_id, v.component_id);
+    const commun = { ...v, ...nomDe(v.subject_id, v.component_id), creneaux: v.jours.length };
+
+    if (duMois.length === 0) {
+      enTrop.push({ ...commun, raison: "sans-contenu", liberables: v.jours.length, du: 0 });
+      return;
+    }
+    const du = duMois.filter((l) => !l.taught).length;
+    if (du === 0) return;                            // tout enseigné : on ne touche à rien
+
+    /* On retire les créneaux un par un, du moins productif au plus productif,
+       tant que ceux qui restent suffisent encore à couvrir le mois. Compté
+       par JOUR réel (un lundi ne vaut pas un mardi quand un lundi est férié),
+       pas en divisant un total. */
+    const occParCreneau = v.jours.map((j) => occJour(j)).sort((a, b) => a - b);
+    let restant = occParCreneau.reduce((n, o) => n + o, 0);
+    let liberables = 0;
+    for (const o of occParCreneau) {
+      if (occParCreneau.length - liberables <= 1) break;   // garder au moins un créneau
+      if (restant - o < du) break;
+      restant -= o; liberables++;
+    }
+    if (liberables > 0) enTrop.push({ ...commun, raison: "surplus", liberables, du });
+  });
+  enTrop.sort((a, b) => b.liberables - a.liberables);
+
   return {
     lignes,
     enRetard: lignes.filter((l) => l.etat === "retard"),
     perdues: lignes.filter((l) => l.etat === "perdu"),
+    jamais,
+    enTrop,
+    // De quoi écrire « x créneaux à replacer pour y sous-matières absentes ».
+    creneauxLiberables: enTrop.reduce((n, e) => n + e.liberables, 0),
     joursRestants: joursRestants.length,
   };
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * LA COUVERTURE DU PROGRAMME — bloc ajouté le 2026-10-03.
+ *
+ * 🔴 DÉLIBÉRÉMENT SÉPARÉ DU VOYANT DE RETARD, et pas de la même couleur.
+ * « Être en retard » et « ne pas avoir prévu » sont deux problèmes différents
+ * et n'appellent pas le même geste : le premier se rattrape avec un vendredi,
+ * le second demande de rouvrir son emploi du temps. Les fondre en un seul
+ * bandeau rouge aurait rendu les deux illisibles.
+ *
+ * Le bloc porte sa propre réponse : à gauche ce qui manque, à droite où
+ * trouver la place. Un avertissement qui ne dit pas quoi faire finit par ne
+ * plus être lu — c'est la règle que suit déjà le voyant de retard.
+ * ══════════════════════════════════════════════════════════════════════════ */
+function CouvertureNotice({ retard, onAjuster }) {
+  if (!retard) return null;
+  const jamais = retard.jamais || [];
+  const enTrop = retard.enTrop || [];
+  if (jamais.length === 0 && enTrop.length === 0) return null;
+
+  const pastille = {
+    display: "inline-block", padding: "2px 8px", borderRadius: 999,
+    fontSize: "var(--ec-fs-1)", fontWeight: 700,
+  };
+
+  return (
+    <div style={{
+      marginTop: 16, padding: "16px 18px", borderRadius: 12,
+      background: COLORS.warnBg, border: `1px solid ${COLORS.border}`,
+      borderLeft: `5px solid ${COLORS.warn}`,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ width: 11, height: 11, borderRadius: "50%", background: COLORS.warn, flexShrink: 0 }} />
+        <div style={{ fontSize: "var(--ec-fs-5)", fontWeight: 800, color: COLORS.warn, letterSpacing: "-.01em" }}>
+          {jamais.length > 0
+            ? (jamais.length === 1
+                ? "1 sous-matière n'est jamais à votre emploi du temps"
+                : `${jamais.length} sous-matières ne sont jamais à votre emploi du temps`)
+            : "Des créneaux pourraient servir ailleurs"}
+        </div>
+      </div>
+
+      {jamais.length > 0 && (
+        <>
+          <div style={{ fontSize: "var(--ec-fs-3)", color: COLORS.ink2, marginTop: 9, lineHeight: 1.55 }}>
+            Elles ont des leçons au programme, mais aucun créneau : elles ne seront
+            {" "}<strong style={{ color: COLORS.ink }}>jamais enseignées</strong>, et le voyant de retard
+            ne peut pas les signaler puisqu'il ne lit que ce qui est déjà programmé.
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 11 }}>
+            {jamais.map((j) => (
+              <span key={`${j.subject_id}·${j.component_id}`} style={{
+                ...pastille, padding: "6px 11px", background: COLORS.card,
+                border: `1px solid ${COLORS.warn}`, color: COLORS.ink,
+                fontSize: "var(--ec-fs-2)",
+              }}>
+                {j.nomComposante}
+                <span style={{ color: COLORS.ink3, fontWeight: 600 }}>
+                  {" · "}{j.nomMatiere} · {j.du} leçon{j.du > 1 ? "s" : ""} en attente
+                </span>
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+
+      {enTrop.length > 0 && (
+        <div style={{
+          marginTop: 13, padding: "12px 14px", background: COLORS.card,
+          border: `1px solid ${COLORS.divider}`, borderRadius: 10,
+        }}>
+          <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 800, color: COLORS.ink }}>
+            {jamais.length > 0 ? "Où trouver la place" : "Créneaux disponibles"}
+            <span style={{ fontWeight: 700, color: COLORS.good }}>
+              {" · "}{retard.creneauxLiberables} créneau{retard.creneauxLiberables > 1 ? "x" : ""} par semaine
+            </span>
+          </div>
+          <div style={{ marginTop: 8, display: "grid", gap: 7 }}>
+            {enTrop.map((e) => (
+              <div key={`${e.subject_id}·${e.component_id}`} style={{
+                display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap",
+                fontSize: "var(--ec-fs-3)", color: COLORS.ink2,
+              }}>
+                <strong style={{ color: COLORS.ink }}>{e.nomComposante}</strong>
+                <span style={{ color: COLORS.ink3 }}>{e.nomMatiere}</span>
+                {e.raison === "sans-contenu" ? (
+                  <span>
+                    — {e.creneaux} créneau{e.creneaux > 1 ? "x" : ""} par semaine,
+                    {" "}<strong style={{ color: COLORS.warn }}>aucune leçon disponible</strong>
+                    {" "}pour l'instant. Réutilisables en attendant que le contenu arrive.
+                  </span>
+                ) : (
+                  <span>
+                    — {e.creneaux} créneaux par semaine pour {e.du} leçon{e.du > 1 ? "s" : ""} ce mois-ci :
+                    {" "}<strong style={{ color: COLORS.ink }}>{e.liberables} suffirait{e.liberables > 1 ? "ent" : ""} de moins</strong>.
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {onAjuster && (
+        <button type="button" className="ec-btn" style={{ marginTop: 14 }} onClick={onAjuster}>
+          Ajuster mon emploi du temps
+        </button>
+      )}
+    </div>
+  );
 }
 
 /** Le voyant lui-même. Deux visages — voir l'en-tête ci-dessus. */
@@ -1257,6 +1499,8 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
       </div>
 
       <RetardNotice retard={retard} mois={moisCourant} vendrediLibre={true} />
+      {/* Dans l'éditeur, pas de bouton « Ajuster » : elle y est déjà. */}
+      <CouvertureNotice retard={retard} />
 
       {/* ══════════════════════════════════════════════════════════════════
         * LE SÉLECTEUR DE SEMAINE — 2026-10-02.
@@ -3689,7 +3933,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const retard = (!isParent && !isAdmin && !isSchoolAdmin && uniteCourante)
     ? edtCalculeRetard({
         lessons: availableLessons, timetable,
-        unite: uniteCourante, subjects: SUBJECTS, aujourdhui: new Date(),
+        unite: uniteCourante, subjects: SUBJECTS,
+        // `coverage` distingue une matière assurée par l'enseignante (créneau
+        // sans leçon, et c'est normal) d'un vrai trou de couverture.
+        coverage,
+        aujourdhui: new Date(),
       })
     : null;
 
@@ -5354,6 +5602,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           vendrediLibre={true}
           onAjuster={() => setScreen("timetable")}
         />
+        <CouvertureNotice retard={retard} onAjuster={() => setScreen("timetable")} />
 
         {/* ══════════════════════════════════════════════════════════════════
           * LA SEMAINE DU CALENDRIER — ajoutée le 2026-10-02 à la CONSULTATION.
