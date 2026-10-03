@@ -90,13 +90,28 @@ const BREAK_TYPES = [
   { subject_id: "pause", component_id: "tic", name: "TIC", comp: "" },
   { subject_id: "pause", component_id: "evaluation", name: "Évaluation", comp: "" },
   { subject_id: "pause", component_id: "revision", name: "Révision", comp: "" },
-  // Ajouté le 2026-10-02 avec le créneau « jour férié » de l'enseignante.
-  // ⚠️ Côté enseignante, le férié prend la journée entière (07:30 → 14:30) et ne
-  // s'enregistre que pour UNE semaine. Ici, cet écran ne connaît pas la notion
-  // de semaine : il n'écrit que le modèle permanent. Poser un férié depuis la
-  // direction fermerait donc ce jour-là TOUTES les semaines de l'année — le
-  // libellé le dit, et c'est la seule protection disponible à cet endroit.
-  { subject_id: "pause", component_id: "ferie", name: "Jour férié (toutes les semaines !)", comp: "" },
+  /* 🔴 LE FÉRIÉ N'EST PLUS PROPOSABLE DEPUIS CET ÉCRAN — `hidden: true`.
+   *
+   * Il y est resté UN JOUR. Ajouté le 2026-10-02 avec, pour seule protection,
+   * un libellé d'avertissement — « Jour férié (toutes les semaines !) ». Le
+   * 2026-10-03 il était posé sur le lundi du modèle permanent : **tous les
+   * lundis de l'année fermés**, et l'exception du vrai 5 octobre effacée au
+   * passage. La journée du lundi affichait alors UN créneau sur douze dans
+   * l'éditeur, parce que les 420 minutes du férié dépassent 14:30 et coupent
+   * la journée là.
+   *
+   * ⭐ LA LEÇON : un avertissement écrit dans un libellé n'est pas un
+   * garde-fou. Si une action ne doit pas être possible, elle ne doit pas être
+   * offerte. Côté enseignante le férié est protégé par du CODE (bouton
+   * désactivé + refus au point d'écriture) ; ici il n'avait qu'un texte, et le
+   * texte a perdu en vingt-quatre heures.
+   *
+   * On garde l'entrée dans la liste pour que `breakType()` sache encore
+   * nommer une ligne existante — sans elle, un enregistrement remettrait son
+   * libellé à null et la journée afficherait un créneau sans nom. Mais elle ne
+   * figure plus dans le menu : le férié se pose depuis l'écran de
+   * l'enseignante, qui est le seul à connaître la notion de semaine. */
+  { subject_id: "pause", component_id: "ferie", name: "Jour férié", comp: "", hidden: true },
   { subject_id: "etude", component_id: "devoirs", name: "Étude surveillée", comp: "Devoirs" },
 ];
 const isBreak = (sid) => sid === "pause" || sid === "etude";
@@ -264,9 +279,21 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
   const openClass = async (t) => {
     setSelected(t); setClassLabel(t.class_label || ""); setMsg(null);
     setNewName(""); setNewEmail(""); setNewPhone(""); setStudents([]);
-    const { data } = await cachedQueryMeta(`schooladmin_slots_${t.id}`, () =>
+    /* 🔴 `week_start is null` — LE MODÈLE PERMANENT UNIQUEMENT (2026-10-03).
+       Sans ce filtre, cet écran chargeait aussi les exceptions d'une semaine
+       (« seulement la semaine du … », les jours fériés) et les affichait
+       mélangées au modèle habituel. L'enregistrement les réécrivait alors
+       SANS `week_start` : une exception d'un jour devenait permanente.
+       C'est exactement ce qui est arrivé le 2026-10-03 — le férié du lundi
+       5 octobre est devenu « tous les lundis de l'année ». Voir le journal du
+       document `EduCam_Emploi_du_temps_Conception.md`.
+       ⚠️ La clé de cache a changé de nom (`_perm_`) : sa FORME a changé, donc
+       une entrée gardée sous l'ancien nom resservirait le mélange. */
+    const { data } = await cachedQueryMeta(`schooladmin_slots_perm_${t.id}`, () =>
       supabase.from("timetable_slots").select("*")
-        .eq("owner_teacher_id", t.id).order("day_of_week").order("slot_order")
+        .eq("owner_teacher_id", t.id)
+        .is("week_start", null)
+        .order("day_of_week").order("slot_order")
     );
     setSlots(mapSlots(data));
     loadStudents(t.id);
@@ -502,7 +529,16 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
         class_label: classLabel.trim() || null,
       }).eq("id", selected.id);
 
-      await supabase.from("timetable_slots").delete().eq("owner_teacher_id", selected.id);
+      /* 🔴 `.is("week_start", null)` — NE TOUCHER QUE LE MODÈLE PERMANENT.
+         Avant, cette suppression emportait TOUTES les lignes de la classe, y
+         compris les exceptions d'une semaine que l'enseignante avait posées
+         depuis son propre écran. Le 2026-10-03, un enregistrement fait d'ici a
+         ainsi effacé le jour férié du 5 octobre — en silence, et sans que cet
+         écran ait jamais affiché cette ligne. La direction ne doit pas pouvoir
+         défaire par inadvertance le travail d'une semaine particulière. */
+      await supabase.from("timetable_slots").delete()
+        .eq("owner_teacher_id", selected.id)
+        .is("week_start", null);
       const byDay = {};
       const rows = slots.map((s) => {
         const order = (byDay[s.day_of_week] = (byDay[s.day_of_week] || 0) + 1);
@@ -1114,7 +1150,10 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
                                 {SUBJECTS.map((su) => <option key={su.id} value={`subj:${su.id}`}>{su.name}</option>)}
                               </optgroup>
                               <optgroup label="Pauses">
-                                {BREAK_TYPES.map((b) => (
+                                {/* `hidden` : type encore reconnu pour nommer
+                                    une ligne existante, mais plus proposable
+                                    ici — voir le commentaire sur le férié. */}
+                                {BREAK_TYPES.filter((b) => !b.hidden).map((b) => (
                                   <option key={`${b.subject_id}:${b.component_id}`} value={`brk:${b.subject_id}:${b.component_id}`}>{b.name}</option>
                                 ))}
                               </optgroup>
