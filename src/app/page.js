@@ -297,24 +297,37 @@ export default function Home() {
       return;
     }
 
-    // Create auth account
-    const { data, error: signUpError } = await supabase.auth.signUp({
-      email,
-      password,
-      options: { data: { display_name: fullName.trim(), full_name: fullName.trim() } },
-    });
-
-    if (signUpError) {
-      setError(signUpError.message === "User already registered"
-        ? "Un compte existe déjà avec cet email"
-        : "Erreur lors de l'inscription: " + signUpError.message);
-      setLoading(false);
-      return;
-    }
-
-    // Profiles mode: resolve the school from the staff join-code (validated if entered).
+    /* ══════════════════════════════════════════════════════════════════════
+     * 🔴 LE CODE ÉCOLE EST OBLIGATOIRE, ET VALIDÉ **AVANT** DE CRÉER LE COMPTE.
+     *
+     * Décision de Maxime, 2026-10-03 : *« je ne veux pas qu'un utilisateur
+     * puisse créer un compte sans avoir un code école ou code parent »*. Le
+     * côté parent l'exigeait déjà ; ce côté-ci ne le faisait pas.
+     *
+     * DEUX DÉFAUTS CORRIGÉS ICI, et ils produisaient tous deux des comptes
+     * fantômes — c'est l'origine des sept comptes orphelins trouvés en base :
+     *
+     *   1. `if (schoolCode.trim())` : champ VIDE = on passait outre, et le
+     *      profil se créait **sans `school_id`**. Un tel compte n'appartient à
+     *      aucune école ; l'application lui sert alors l'emploi du temps
+     *      « partagé du niveau » et plus rien n'a de sens pour lui.
+     *
+     *   2. L'ORDRE. La validation venait APRÈS `auth.signUp()` : un code
+     *      invalide laissait derrière lui un identifiant de connexion sans
+     *      aucun profil. L'adresse était brûlée — impossible de se réinscrire
+     *      (« User already registered »), impossible d'entrer (« Profil
+     *      introuvable »). On valide donc d'abord, on crée ensuite.
+     *
+     * ⭐ Un compte ne doit jamais exister à moitié. Tant que le rattachement
+     * n'est pas acquis, il ne faut rien créer du tout.
+     * ════════════════════════════════════════════════════════════════════ */
     let joinedSchool = null;
-    if (PROFILES_ENABLED && schoolCode.trim()) {
+    if (PROFILES_ENABLED) {
+      if (!schoolCode.trim()) {
+        setError("Entrez le code de votre école. Il vous est remis par la direction.");
+        setLoading(false);
+        return;
+      }
       // Same pattern as the parent passcode: SECURITY DEFINER lookup under RLS,
       // with a fallback to the direct read when RLS isn't enabled yet.
       const rpcS = await supabase.rpc("educam_find_school_by_staff_code", { code: schoolCode.trim() });
@@ -332,12 +345,38 @@ export default function Home() {
       }
     }
 
+    // L'école est acquise : on peut créer le compte de connexion.
+    const { data, error: signUpError } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { display_name: fullName.trim(), full_name: fullName.trim() } },
+    });
+
+    if (signUpError) {
+      setError(signUpError.message === "User already registered"
+        ? "Un compte existe déjà avec cet email"
+        : "Erreur lors de l'inscription: " + signUpError.message);
+      setLoading(false);
+      return;
+    }
+
     // Create teacher profile
     const { error: profileError } = await supabase.from("teachers").insert({
       id: data.user.id,
       full_name: fullName.trim(),
       school_name: schoolName.trim() || null,
       level: level,
+      /* 🔴 LE RÔLE EST POSÉ ICI, EXPLICITEMENT.
+         Sans cette ligne, la valeur par DÉFAUT de la colonne s'appliquait :
+         `reviewer` — un rôle qui n'existe nulle part dans le code, ni
+         enseignant, ni direction, ni parent. Toute inscription normale y
+         atterrissait, et il fallait corriger à la main en base (ce qui a été
+         fait pour Mme BATAM le 2026-09-30). Le défaut de la colonne est
+         changé en `teacher` par migration le même jour, mais on ne s'appuie
+         pas dessus : une valeur qui compte se pose là où on la décide.
+         ⚠️ Un directeur ou un référent se crée en PROMOUVANT ce compte depuis
+         la console Utilisateurs — pas à l'inscription. */
+      role: "teacher",
       // Coordonnées : normalisées à la saisie (voir src/lib/phone.js).
       phone: normalizePhone(phone),
       contact_email: email.trim() || null,
@@ -662,8 +701,14 @@ export default function Home() {
                 {PROFILES_ENABLED && (
                   <Field
                     label="Code école"
+                    /* `required` : le champ porte la même obligation que le
+                       code enfant côté parent. Le refus réel est au moment de
+                       l'envoi — ceci ne fait que l'annoncer avant la saisie,
+                       plutôt que de laisser remplir un formulaire entier pour
+                       le refuser ensuite. */
+                    required
                     placeholder="Code fourni par votre école"
-                    hint="Il relie votre compte à votre établissement et installe votre emploi du temps."
+                    hint="Obligatoire. Il relie votre compte à votre établissement et installe votre emploi du temps."
                     value={schoolCode}
                     onChange={(e) => setSchoolCode(e.target.value)}
                   />
