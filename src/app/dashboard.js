@@ -1003,8 +1003,23 @@ function edtCalculeRetard({ lessons, timetable, unite, subjects, coverage, aujou
 function CouvertureNotice({ retard, onAjuster }) {
   if (!retard) return null;
   const jamais = retard.jamais || [];
-  const enTrop = retard.enTrop || [];
-  if (jamais.length === 0 && enTrop.length === 0) return null;
+  const enTropTout = retard.enTrop || [];
+
+  /* 🔴 PAS DE BLOC SANS MANQUE. Retour de Maxime sur la première version :
+     *« c'est un peu confus, je n'arrive pas à bien comprendre l'information
+     qui est donnée »*. Sa capture montrait vingt et une lignes de créneaux
+     « qui pourraient servir ailleurs » — sans jamais dire à quoi. Une liste de
+     choses à retirer, quand il n'y a rien à ajouter, n'est pas une
+     information : c'est du bruit. Le surplus n'existe que comme RÉPONSE à un
+     manque, et il ne s'affiche qu'avec lui. */
+  if (jamais.length === 0) return null;
+
+  /* On ne propose pas tout ce qui traîne : on propose de quoi combler, et un
+     peu de marge. Une liste exhaustive redevient illisible. */
+  const MAX = Math.max(jamais.length + 1, 4);
+  const enTrop = enTropTout.slice(0, MAX);
+  const autres = enTropTout.length - enTrop.length;
+  const dispo = enTropTout.reduce((n, e) => n + e.liberables, 0);
 
   const pastille = {
     display: "inline-block", padding: "2px 8px", borderRadius: 999,
@@ -1020,37 +1035,36 @@ function CouvertureNotice({ retard, onAjuster }) {
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <span style={{ width: 11, height: 11, borderRadius: "50%", background: COLORS.warn, flexShrink: 0 }} />
         <div style={{ fontSize: "var(--ec-fs-5)", fontWeight: 800, color: COLORS.warn, letterSpacing: "-.01em" }}>
-          {jamais.length > 0
-            ? (jamais.length === 1
-                ? "1 sous-matière n'est jamais à votre emploi du temps"
-                : `${jamais.length} sous-matières ne sont jamais à votre emploi du temps`)
-            : "Des créneaux pourraient servir ailleurs"}
+          {jamais.length === 1
+            ? "1 sous-matière ne sera jamais enseignée"
+            : `${jamais.length} sous-matières ne seront jamais enseignées`}
         </div>
       </div>
 
-      {jamais.length > 0 && (
-        <>
-          <div style={{ fontSize: "var(--ec-fs-3)", color: COLORS.ink2, marginTop: 9, lineHeight: 1.55 }}>
-            Elles ont des leçons au programme, mais aucun créneau : elles ne seront
-            {" "}<strong style={{ color: COLORS.ink }}>jamais enseignées</strong>, et le voyant de retard
-            ne peut pas les signaler puisqu'il ne lit que ce qui est déjà programmé.
-          </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 11 }}>
-            {jamais.map((j) => (
-              <span key={`${j.subject_id}·${j.component_id}`} style={{
-                ...pastille, padding: "6px 11px", background: COLORS.card,
-                border: `1px solid ${COLORS.warn}`, color: COLORS.ink,
-                fontSize: "var(--ec-fs-2)",
-              }}>
-                {j.nomComposante}
-                <span style={{ color: COLORS.ink3, fontWeight: 600 }}>
-                  {" · "}{j.nomMatiere} · {j.du} leçon{j.du > 1 ? "s" : ""} en attente
-                </span>
-              </span>
-            ))}
-          </div>
-        </>
-      )}
+      {/* 🔴 UNE PHRASE, ET ELLE DIT LE GESTE. La première version expliquait le
+          mécanisme du voyant ; ce n'est pas ce qu'on demande à une enseignante
+          devant sa classe. On dit ce qui manque, et combien de place existe. */}
+      <div style={{ fontSize: "var(--ec-fs-3)", color: COLORS.ink2, marginTop: 9, lineHeight: 1.55 }}>
+        Elles sont au programme mais n'ont <strong style={{ color: COLORS.ink }}>aucun créneau</strong> dans
+        votre semaine.{" "}
+        {dispo > 0
+          ? <>Il vous faut <strong style={{ color: COLORS.ink }}>{jamais.length} créneau{jamais.length > 1 ? "x" : ""}</strong> ;
+              {" "}<strong style={{ color: COLORS.good }}>{dispo} sont disponibles</strong> ci-dessous.</>
+          : <>Votre semaine est pleine : il faudra retirer quelque chose pour leur faire une place.</>}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 11 }}>
+        {jamais.map((j) => (
+          <span key={`${j.subject_id}·${j.component_id}`} style={{
+            ...pastille, padding: "6px 11px", background: COLORS.card,
+            border: `1px solid ${COLORS.warn}`, color: COLORS.ink,
+            fontSize: "var(--ec-fs-2)",
+          }}>
+            {j.nomComposante}
+            <span style={{ color: COLORS.ink3, fontWeight: 600 }}>{" · "}{j.nomMatiere}</span>
+          </span>
+        ))}
+      </div>
 
       {enTrop.length > 0 && (
         <div style={{
@@ -1058,33 +1072,30 @@ function CouvertureNotice({ retard, onAjuster }) {
           border: `1px solid ${COLORS.divider}`, borderRadius: 10,
         }}>
           <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 800, color: COLORS.ink }}>
-            {jamais.length > 0 ? "Où trouver la place" : "Créneaux disponibles"}
-            <span style={{ fontWeight: 700, color: COLORS.good }}>
-              {" · "}{retard.creneauxLiberables} créneau{retard.creneauxLiberables > 1 ? "x" : ""} par semaine
-            </span>
+            Où prendre la place
           </div>
-          <div style={{ marginTop: 8, display: "grid", gap: 7 }}>
+          <div style={{ marginTop: 8, display: "grid", gap: 6 }}>
             {enTrop.map((e) => (
               <div key={`${e.subject_id}·${e.component_id}`} style={{
-                display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap",
-                fontSize: "var(--ec-fs-3)", color: COLORS.ink2,
+                fontSize: "var(--ec-fs-3)", color: COLORS.ink2, lineHeight: 1.5,
               }}>
                 <strong style={{ color: COLORS.ink }}>{e.nomComposante}</strong>
-                <span style={{ color: COLORS.ink3 }}>{e.nomMatiere}</span>
-                {e.raison === "sans-contenu" ? (
-                  <span>
-                    — {e.creneaux} créneau{e.creneaux > 1 ? "x" : ""} par semaine,
-                    {" "}<strong style={{ color: COLORS.warn }}>aucune leçon disponible</strong>
-                    {" "}pour l'instant. Réutilisables en attendant que le contenu arrive.
-                  </span>
-                ) : (
-                  <span>
-                    — {e.creneaux} créneaux par semaine pour {e.du} leçon{e.du > 1 ? "s" : ""} ce mois-ci :
-                    {" "}<strong style={{ color: COLORS.ink }}>{e.liberables} suffirait{e.liberables > 1 ? "ent" : ""} de moins</strong>.
-                  </span>
-                )}
+                <span style={{ color: COLORS.ink3 }}>{" "}· {e.nomMatiere} — </span>
+                {/* Deux raisons, deux phrases courtes. L'ancienne version
+                    disait « 10 suffiraient de moins », que personne ne lit du
+                    premier coup. */}
+                {e.raison === "sans-contenu"
+                  ? <>{e.creneaux} créneau{e.creneaux > 1 ? "x" : ""},
+                      {" "}<strong style={{ color: COLORS.warn }}>pas encore de leçon à y mettre</strong></>
+                  : <>{e.creneaux} créneaux pour {e.du} leçon{e.du > 1 ? "s" : ""} ce mois-ci,
+                      {" "}<strong style={{ color: COLORS.ink }}>{e.liberables} de trop</strong></>}
               </div>
             ))}
+            {autres > 0 && (
+              <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3 }}>
+                et {autres} autre{autres > 1 ? "s" : ""}.
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -3930,9 +3941,62 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
      direction ou l'administrateur : c'est son outil de pilotage à elle. */
   const uniteCourante = edtUniteDuMois(new Date());
   const moisCourant = MONTH_UNIT_MAP.find((m) => m.unit === uniteCourante)?.month || "";
-  const retard = (!isParent && !isAdmin && !isSchoolAdmin && uniteCourante)
+  /* 🔴 LE VOYANT N'A DE SENS QUE SUR L'EMPLOI DU TEMPS D'UNE SEULE CLASSE.
+   *
+   * Trouvé le 2026-10-03 sur une capture de Maxime : il annonçait « 117
+   * créneaux par semaine » et « 11 créneaux de Nombres et calculs » pour une
+   * enseignante qui en a UN. La cause n'était pas le calcul — c'était son
+   * entrée. Quand le compte connecté n'a pas d'école (`school_id` à NULL),
+   * `fetchTimetable` retombe sur l'emploi du temps PARTAGÉ DU NIVEAU, qui
+   * additionne toutes les classes CM1 de la plateforme, écoles de
+   * démonstration comprises. Compter un retard là-dessus n'a aucun sens.
+   *
+   * ⚠️ Ce n'est pas un cas théorique : le rôle par défaut en base est
+   * `reviewer`, qui n'est ni administrateur, ni direction, ni parent — donc
+   * le voyant s'affichait pour lui — et ces comptes n'ont pas d'école. Toute
+   * inscription normale tombait dessus.
+   *
+   * ⭐ Un calcul juste sur la mauvaise entrée reste faux, et il est plus
+   * dangereux qu'un calcul absent : il a l'air de fonctionner. */
+  const edtEstSaPropreClasse = PROFILES_ENABLED && !!teacher?.school_id && !!teacher?.id;
+
+  /* ══════════════════════════════════════════════════════════════════════════
+   * 🔴 LE VOYANT RAISONNE SUR LE MODÈLE PERMANENT, JAMAIS SUR LA SEMAINE
+   * AFFICHÉE — corrigé le 2026-10-05, premier jour de production.
+   *
+   * Le bandeau annonçait à Mme BATAM **« 8 sous-matières ne sont jamais à
+   * votre emploi du temps »**. Quatre étaient vraies ; les quatre autres —
+   * Grammaire, Nombres et calculs, Géographie physique, Éducation morale —
+   * ont un créneau, et toutes **le lundi**.
+   *
+   * La cause : `timetable` est la semaine EN COURS, déjà fusionnée. Or
+   * `edtFusionneSemaine` fait qu'une journée portant la moindre exception
+   * **remplace entièrement** la journée permanente — et le lundi 5 octobre
+   * était férié. Le lundi de cette semaine ne contenait donc qu'une ligne :
+   * le férié. Toutes les sous-matières qui ne vivent que le lundi
+   * disparaissaient de l'emploi du temps aux yeux du calcul.
+   *
+   * ⭐ UN JOUR FÉRIÉ EST UNE EXCEPTION D'UNE SEMAINE ; IL NE DIT RIEN DE CE
+   * QUI EST PROGRAMMÉ À L'ANNÉE. Juger la couverture du programme sur une
+   * semaine particulière, c'est confondre « cette semaine-là » et
+   * « d'habitude ». Le reproche qu'on fait ici à l'enseignante porte sur son
+   * emploi du temps HABITUEL : il faut donc le lire, lui.
+   *
+   * ⚠️ Ça n'aurait pas pu être vu avant aujourd'hui : il fallait un jour férié
+   * posé ET la semaine en cours qui le contienne. Mes propres essais du
+   * 2026-10-03 utilisaient le modèle permanent et donnaient 4 — le bon
+   * résultat, pour la mauvaise raison.
+   *
+   * (Le dénominateur, lui, était déjà juste : `edtJoursEcoleRestants` retire
+   * les dates de `EDT_FERIES` du compte des occasions d'enseigner.)
+   *
+   * Sans `calBrut` encore chargé, on n'affiche RIEN plutôt qu'un chiffre faux.
+   * ══════════════════════════════════════════════════════════════════════════ */
+  const edtModelePermanent = (calBrut || []).filter((s) => !s.week_start);
+  const retard = (!isParent && !isAdmin && !isSchoolAdmin && edtEstSaPropreClasse
+                  && edtModelePermanent.length > 0 && uniteCourante)
     ? edtCalculeRetard({
-        lessons: availableLessons, timetable,
+        lessons: availableLessons, timetable: edtModelePermanent,
         unite: uniteCourante, subjects: SUBJECTS,
         // `coverage` distingue une matière assurée par l'enseignante (créneau
         // sans leçon, et c'est normal) d'un vrai trou de couverture.
