@@ -34,6 +34,31 @@ export default function Home() {
   // dans teachers.phone / parents.phone — pas dans auth.users — ce qui permet à
   // la console superadmin de le corriger sans clé de service.
   const [phone, setPhone] = useState("");
+  // Lien du parent avec l'enfant (2026-10-05) : 'pere' | 'mere' | 'autre'.
+  // Dit à l'équipe QUI suit l'enfant, et donc qui contacter.
+  const [relationship, setRelationship] = useState("");
+
+  // ── Lien du QR code imprimé sur le document remis aux familles (2026-10-05) ──
+  // https://educam.academiemansamusa.com/?code=XXXXXXXX ouvre directement le
+  // formulaire « Créer un compte » côté parent, avec le code de l'enfant déjà
+  // rempli. Lu dans un effet (et non à l'état initial) pour ne pas casser le
+  // rendu côté serveur. Le paramètre est ensuite retiré de la barre d'adresse :
+  // le code ne reste pas affiché si le parent fait une capture d'écran.
+  // Sans paramètre, rien ne change.
+  useEffect(() => {
+    if (!PROFILES_ENABLED || typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const code = (params.get("code") || "").trim().toUpperCase().slice(0, 32);
+    if (!code) return;
+    setMode("register");
+    setAccountType("parent");
+    setParentCode(code);
+    try {
+      params.delete("code");
+      const qs = params.toString();
+      window.history.replaceState(null, "", window.location.pathname + (qs ? "?" + qs : "") + window.location.hash);
+    } catch (_) {}
+  }, []);
 
   // ---- Réinitialisation du mot de passe (« mot de passe oublié ») ----
   // Aucune clé de service : resetPasswordForEmail et updateUser agissent sur le
@@ -247,6 +272,19 @@ export default function Home() {
         setLoading(false);
         return;
       }
+      // Vérifié AVANT de créer le compte : un refus après signUp laisserait un
+      // compte d'authentification orphelin, sans profil parent.
+      if (!relationship) {
+        setError("Indiquez si vous êtes le père, la mère ou un autre responsable de l'enfant");
+        setLoading(false);
+        return;
+      }
+      const parentPhone = normalizePhone(phone);
+      if (!parentPhone) {
+        setError("Entrez votre numéro WhatsApp (exemple : 6 90 00 00 00)");
+        setLoading(false);
+        return;
+      }
       // Validate the per-child code. Under RLS a new user can't read `students`
       // directly, so we use a SECURITY DEFINER function; if it isn't there yet
       // (RLS not enabled / earlier phase), fall back to the direct lookup.
@@ -279,13 +317,23 @@ export default function Home() {
         id: pData.user.id, full_name: fullName.trim() || null, student_id: linkedStudentId,
         // Coordonnées : normalisées à la saisie pour qu'un numéro mal tapé ne
         // devienne pas une notification qui n'arrive jamais.
-        phone: normalizePhone(phone), contact_email: email.trim() || null,
+        phone: parentPhone, contact_email: email.trim() || null,
+        relationship,
       });
       if (pErr) {
         setError("Erreur lors de la création du profil");
         setLoading(false);
         return;
       }
+      // Le numéro du parent est comparé EN BASE aux deux numéros saisis par
+      // l'école (le navigateur ne peut pas les lire — verrou des coordonnées du
+      // 2026-09-30). S'il diffère des deux, il devient le troisième numéro de
+      // l'élève (students.parent_phone_3). « Un plus, jamais une dépendance » :
+      // un échec ici ne doit pas empêcher l'inscription — le numéro reste de
+      // toute façon enregistré sur le compte du parent (parents.phone).
+      try {
+        await supabase.rpc("educam_parent_register_contact", { p_phone: parentPhone, p_relationship: relationship });
+      } catch (_) {}
       const { data: loginData } = await supabase.auth.signInWithPassword({ email, password });
       if (loginData?.session) {
         const { data: parentData } = await supabase.from("parents").select("*")
@@ -727,12 +775,26 @@ export default function Home() {
               />
             )}
 
+            {isParentSignup && (
+              <ChoiceGroup
+                label="Votre lien avec l'enfant"
+                value={relationship}
+                onChange={(v) => { setRelationship(v); setError(""); }}
+                options={[
+                  { value: "pere", label: "Père", icon: "👨🏾" },
+                  { value: "mere", label: "Mère", icon: "👩🏾" },
+                  { value: "autre", label: "Autre responsable", description: "Tuteur, tutrice, grand-parent…", icon: "🧑🏾" },
+                ]}
+              />
+            )}
+
             <Field
               label="Adresse email"
               required
               type="email"
               inputMode="email"
-              placeholder="enseignant@ecole.cm"
+              placeholder={isParentSignup ? "votre.nom@gmail.com" : "enseignant@ecole.cm"}
+              hint={isParentSignup ? "Vous vous connecterez avec cette adresse. Notez-la sur le document de votre enfant." : undefined}
               autoComplete="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
@@ -743,11 +805,14 @@ export default function Home() {
                 le canal qui marche vraiment sur le terrain (WhatsApp). */}
             {mode === "register" && (
               <Field
-                label="Téléphone (WhatsApp)"
+                label={isParentSignup ? "Votre numéro WhatsApp" : "Téléphone (WhatsApp)"}
+                required={isParentSignup}
                 type="tel"
                 inputMode="tel"
                 placeholder="+237 6 90 00 00 00"
-                hint="Facultatif. Sert à vous joindre — vous vous connectez toujours avec votre email."
+                hint={isParentSignup
+                  ? "Le numéro sur lequel vous serez prévenu(e). S'il n'est pas déjà connu de l'école, il est ajouté au dossier de votre enfant."
+                  : "Facultatif. Sert à vous joindre — vous vous connectez toujours avec votre email."}
                 autoComplete="tel"
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}

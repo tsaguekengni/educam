@@ -158,11 +158,15 @@ drop policy if exists "wa notif read scoped" on public.whatsapp_notifications;
 -- rester illisibles, et celle des colonnes exclues du contrôle « oubliées ».
 -- Oublier la première laisserait une fuite ; oublier la seconde ferait crier le
 -- contrôle à tort, et un contrôle qui crie pour rien finit par être ignoré.
+-- ⚠️ 2026-10-05 : `parent_phone_3` (numéro donné par le parent à son inscription,
+-- s'il diffère des deux numéros de l'école) et `parent_phone_3_parent` (quel compte
+-- parent l'a donné) rejoignent les DEUX listes. Écrits seulement par
+-- educam_parent_register_contact() ; jamais lisibles depuis un navigateur.
 select
   (select count(*) from information_schema.column_privileges
      where table_schema='public' and table_name='students'
        and grantee in ('authenticated','anon') and privilege_type='SELECT'
-       and column_name in ('parent_phone','parent_phone_2','parent_email')) as numero_encore_lisible,
+       and column_name in ('parent_phone','parent_phone_2','parent_phone_3','parent_phone_3_parent','parent_email')) as numero_encore_lisible,
   (select count(*) from information_schema.columns
      where table_schema='public' and table_name='students'
        and column_name='has_parent_contact')                          as temoin_cree,
@@ -173,7 +177,7 @@ select
      where schemaname='public' and tablename='whatsapp_notifications') as politiques_journal,
   (select coalesce(string_agg(c.column_name, ', '), '') from information_schema.columns c
      where c.table_schema='public' and c.table_name='students'
-       and c.column_name not in ('parent_phone','parent_phone_2','parent_email')
+       and c.column_name not in ('parent_phone','parent_phone_2','parent_phone_3','parent_phone_3_parent','parent_email')
        and not exists (
          select 1 from information_schema.column_privileges p
          where p.table_schema='public' and p.table_name='students'
