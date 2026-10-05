@@ -5766,75 +5766,28 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         <CouvertureNotice retard={retard} onAjuster={() => setScreen("timetable")} />
 
         {/* ══════════════════════════════════════════════════════════════════
-          * LA SEMAINE DU CALENDRIER — ajoutée le 2026-10-02 à la CONSULTATION.
-          * Elle n'existait que dans l'éditeur, donc un parent ne la voyait
-          * jamais et l'enseignante devait entrer en mode modification pour
-          * lire une date. ⚠️ À ne pas confondre avec les onglets
-          * « Semaine 1-2-3-4 » plus bas, qui sont les semaines du PROGRAMME
-          * dans le mois : c'est ce doublon de vocabulaire qui a créé le
-          * malentendu. D'où deux blocs séparés, chacun nommé.
+          * LA BANDE DE CONTEXTE — déplacée ici le 2026-10-05.
+          *
+          * Ces deux cartes occupaient une colonne À GAUCHE des jours, dans une
+          * grille de 12 où elles prenaient 4 et les jours 8. Conséquence
+          * mesurable : les jours n'avaient plus qu'environ 1030 px sur un écran
+          * de 1600, et `auto-fit` y faisait tenir QUATRE colonnes de 200 px —
+          * donc VENDREDI repartait seul à la ligne, sous lundi. Une semaine
+          * cessait de se lire comme une semaine.
+          *
+          * Elles sont donc passées EN BANDE au-dessus, et les jours ont toute
+          * la largeur. ⚠️ Les deux cartes ne sont PAS à parts égales : le
+          * centre d'intérêt porte trois lignes de texte, la carte hors ligne un
+          * bouton. Une demi-largeur chacune étirerait ce bouton sur 700 px.
+          * D'où `flex` avec des bases différentes, qui les laisse prendre la
+          * place qu'elles méritent et se replier l'une sous l'autre quand
+          * l'écran se resserre.
           * ══════════════════════════════════════════════════════════════════ */}
-        {calLundiEff && (
-          <Card style={{
-            marginTop: 14, padding: "10px 12px", display: "flex", alignItems: "center",
-            justifyContent: "space-between", gap: 10, flexWrap: "wrap",
-          }}>
-            <button
-              type="button"
-              className="ec-btn ec-btn--ghost"
-              onClick={() => setCalLundi(edtDecaleSemaine(calLundiEff, -1))}
-              disabled={calLundiEff <= calLundiCourant}
-              aria-label="Semaine précédente"
-              style={{ minWidth: 52 }}
-            >‹</button>
-
-            <div style={{ textAlign: "center", flex: "1 1 180px", minWidth: 0 }}>
-              <div style={{ fontSize: "var(--ec-fs-4)", fontWeight: 800, color: COLORS.ink }}>
-                {edtLibelleSemaine(calLundiEff)}
-              </div>
-              <div style={{
-                fontSize: "var(--ec-fs-2)", fontWeight: calSemaineCourante ? 600 : 700,
-                color: calSemaineCourante ? COLORS.ink3 : COLORS.warn,
-              }}>
-                {edtLibelleEcart(calLundiEff)}
-                {" · du "}{edtLibelleJourCourt(calLundiEff, 1)}
-                {" au "}{edtLibelleJourCourt(calLundiEff, 5)}
-              </div>
-            </div>
-
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {!calSemaineCourante && (
-                <button
-                  type="button"
-                  className="ec-btn ec-btn--ghost ec-btn--sm"
-                  onClick={() => setCalLundi(null)}
-                >
-                  Cette semaine
-                </button>
-              )}
-              <button
-                type="button"
-                className="ec-btn ec-btn--ghost"
-                onClick={() => setCalLundi(edtDecaleSemaine(calLundiEff, 1))}
-                aria-label="Semaine suivante"
-                style={{ minWidth: 52 }}
-              >›</button>
-              <span aria-hidden="true" style={{ width: 1, background: COLORS.border, margin: "2px 2px" }} />
-              <button
-                type="button"
-                className={calVue === "semaine" ? "ec-btn" : "ec-btn ec-btn--ghost"}
-                onClick={() => setCalVue(calVue === "semaine" ? "jour" : "semaine")}
-                aria-pressed={calVue === "semaine"}
-              >
-                {calVue === "semaine" ? "Voir un jour" : "Voir ma semaine"}
-              </button>
-            </div>
-          </Card>
-        )}
-
-        <div className="ec-grid" style={{ marginTop: 18 }}>
-          <div className="ec-c4">
-
+        <div style={{
+          display: "flex", flexWrap: "wrap", gap: 12,
+          alignItems: "stretch", marginTop: 18,
+        }}>
+          <div style={{ flex: "1 1 300px", minWidth: 0, display: "flex", flexDirection: "column" }}>
         {/* ---- Centre d'intérêt : DÉDUIT de la semaine affichée, plus choisi ----
             Les onglets « Période » (mois) et « Semaine 1-2-3-4 » qui se
             trouvaient ici ont été RETIRÉS le 2026-10-05 : c'étaient la seconde
@@ -5855,9 +5808,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           </div>
         </Card>
 
+          </div>
+          <div style={{ flex: "1 1 400px", minWidth: 0, display: "flex", flexDirection: "column" }}>
         {/* ---- Téléchargement hors ligne ---- */}
         {OFFLINE_ENABLED && !isParent && (
-          <Card style={{ marginTop: 16 }}>
+          <Card style={{ marginTop: 0 }}>
             <CardLabel>Hors ligne</CardLabel>
             {weekIds.length === 0 ? (
               <p style={{ fontSize: FONT.sm, color: COLORS.ink3, lineHeight: 1.5 }}>
@@ -5927,7 +5882,73 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           </Card>
         )}
           </div>
-          <div className="ec-c8">
+        </div>
+        {/* ══════════════════════════════════════════════════════════════════
+          * LA SEMAINE DU CALENDRIER — ajoutée le 2026-10-02 à la CONSULTATION.
+          * Elle n'existait que dans l'éditeur, donc un parent ne la voyait
+          * jamais et l'enseignante devait entrer en mode modification pour
+          * lire une date. ⚠️ À ne pas confondre avec les onglets
+          * « Semaine 1-2-3-4 » plus bas, qui sont les semaines du PROGRAMME
+          * dans le mois : c'est ce doublon de vocabulaire qui a créé le
+          * malentendu. D'où deux blocs séparés, chacun nommé.
+          * ══════════════════════════════════════════════════════════════════ */}
+        {calLundiEff && (
+          <Card style={{
+            marginTop: 14, padding: "10px 12px", display: "flex", alignItems: "center",
+            justifyContent: "space-between", gap: 10, flexWrap: "wrap",
+          }}>
+            <button
+              type="button"
+              className="ec-btn ec-btn--ghost"
+              onClick={() => setCalLundi(edtDecaleSemaine(calLundiEff, -1))}
+              disabled={calLundiEff <= calLundiCourant}
+              aria-label="Semaine précédente"
+              style={{ minWidth: 52 }}
+            >‹</button>
+
+            <div style={{ textAlign: "center", flex: "1 1 180px", minWidth: 0 }}>
+              <div style={{ fontSize: "var(--ec-fs-4)", fontWeight: 800, color: COLORS.ink }}>
+                {edtLibelleSemaine(calLundiEff)}
+              </div>
+              <div style={{
+                fontSize: "var(--ec-fs-2)", fontWeight: calSemaineCourante ? 600 : 700,
+                color: calSemaineCourante ? COLORS.ink3 : COLORS.warn,
+              }}>
+                {edtLibelleEcart(calLundiEff)}
+                {" · du "}{edtLibelleJourCourt(calLundiEff, 1)}
+                {" au "}{edtLibelleJourCourt(calLundiEff, 5)}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {!calSemaineCourante && (
+                <button
+                  type="button"
+                  className="ec-btn ec-btn--ghost ec-btn--sm"
+                  onClick={() => setCalLundi(null)}
+                >
+                  Cette semaine
+                </button>
+              )}
+              <button
+                type="button"
+                className="ec-btn ec-btn--ghost"
+                onClick={() => setCalLundi(edtDecaleSemaine(calLundiEff, 1))}
+                aria-label="Semaine suivante"
+                style={{ minWidth: 52 }}
+              >›</button>
+              <span aria-hidden="true" style={{ width: 1, background: COLORS.border, margin: "2px 2px" }} />
+              <button
+                type="button"
+                className={calVue === "semaine" ? "ec-btn" : "ec-btn ec-btn--ghost"}
+                onClick={() => setCalVue(calVue === "semaine" ? "jour" : "semaine")}
+                aria-pressed={calVue === "semaine"}
+              >
+                {calVue === "semaine" ? "Voir un jour" : "Voir ma semaine"}
+              </button>
+            </div>
+          </Card>
+        )}
 
         {/* ⚠️ LE PAVÉ « Semaine d'intégration et d'évaluation » A ÉTÉ RETIRÉ
             le 2026-10-05. Il remplaçait TOUT cet écran dès que la semaine 4
@@ -5947,10 +5968,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               * montre que ce qui se passe, heure par heure.
               * ══════════════════════════════════════════════════════════════ */}
             {calVue === "semaine" && (
-              <div style={{
-                display: "grid", gap: 12, marginTop: 18,
-                gridTemplateColumns: "repeat(auto-fit, minmax(min(200px, 100%), 1fr))",
-              }}>
+              /* ⚠️ `auto-fit` CALCULAIT le nombre de colonnes depuis la place
+                 disponible. Il en trouvait quatre, et vendredi repartait seul à
+                 la ligne : il manquait une vingtaine de pixels. Une semaine a
+                 CINQ jours — on l'écrit, au lieu de laisser une arithmétique le
+                 deviner. Le repli se fait en CSS (`.ec-edt-jours`), avec les
+                 points de bascule du projet, et surtout pas sur `isMobile` :
+                 ce drapeau bascule à 640 px, ce qui avait déjà coûté un défaut
+                 sur la boîte de dialogue. */
+              <div className="ec-edt-jours">
                 {[1, 2, 3, 4, 5].map((d) => {
                   const sl = getDaySlots(d, calSlots).slice().sort(trier);
                   const ferie = sl.some((s) => s.component_id === "ferie");
@@ -6233,8 +6259,6 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             </>)}{/* fin de la vue « un jour » */}
           </>
         )}
-          </div>
-        </div>
       </div>
     );
   };

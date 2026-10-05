@@ -366,6 +366,19 @@ button, [role="button"], .ec-btn, .ec-row, .ec-choice, .ec-bottomnav button, .ec
   .ec-c12, .ec-c8, .ec-c7, .ec-c6, .ec-c5, .ec-c4, .ec-c3 { grid-column: auto }
 }
 
+/* --- Les cinq jours de l'emploi du temps --- */
+/* Un nombre de colonnes DÉCIDÉ, pas déduit. La grille des jours utilisait
+   `auto-fit`, qui calcule combien de colonnes tiennent dans la place
+   disponible : il en trouvait quatre, et VENDREDI repartait seul à la ligne
+   sous lundi — il manquait une vingtaine de pixels. Une semaine a cinq jours,
+   alors on l'écrit. (2026-10-05)
+   ⚠️ Le repli est ici, en CSS, et surtout pas sur le drapeau `isMobile` du
+   JavaScript : il bascule à 640 px, ce qui avait déjà coûté un défaut sur la
+   boîte de dialogue. */
+.ec-edt-jours { display: grid; gap: 12px; margin-top: 18px; grid-template-columns: 1fr; }
+@media (min-width: 700px)  { .ec-edt-jours { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 1100px) { .ec-edt-jours { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+
 /* --- Squelette de chargement --- */
 .ec-skeleton {
   background: linear-gradient(90deg, var(--ec-track) 25%, #D6DDE4 37%, var(--ec-track) 63%);
