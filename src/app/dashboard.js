@@ -3650,8 +3650,38 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
    * L'ordre est celui du programme : unité, puis semaine, puis `id` pour que
    * deux leçons de même rang sortent toujours dans le même ordre.
    * ────────────────────────────────────────────────────────────────────────── */
+  /* 🔴 LE PLAFOND — ajouté le 2026-10-05, et il manquait depuis le début.
+   *
+   * La file n'avait qu'un PLANCHER (`EDT_UNITE_DEPART`). Quand les trois
+   * leçons du mois étaient enseignées, elle ne s'arrêtait pas : elle servait
+   * sagement la leçon suivante, c'est-à-dire CELLE DU MOIS PROCHAIN. Une
+   * classe d'octobre recevait du novembre, et rien ne le signalait.
+   *
+   * ⚠️ Ce n'est pas un détail de comptage : les mois sont des CENTRES
+   * D'INTÉRÊT (octobre = « le village, la ville », novembre = « l'école »).
+   * Servir novembre en octobre casse le thème du mois, et l'évaluation de la
+   * semaine 4 porte sur des leçons que la classe n'a pas vues.
+   *
+   * 📏 Reproduit avant correction, sur ses vraies données : les trois leçons
+   * d'octobre marquées enseignées, la file rendait « unité 3, semaine 1 ».
+   *
+   * ⭐ Un filtre à borne unique est un demi-filtre. Quand on écrit un
+   * plancher, se demander tout de suite ce qui arrive en haut.
+   * ────────────────────────────────────────────────────────────────────────── */
+  const edtUnitePlafond = () => {
+    const u = edtUniteDuMois(new Date());
+    // Mois hors calendrier scolaire (juillet, août) : AUCUN plafond. Un
+    // plafond nul viderait la file partout et l'écran annoncerait « contenu à
+    // ajouter » sur toute la semaine — un mensonge pire que le défaut.
+    if (!u) return Infinity;
+    // Le plafond ne descend JAMAIS sous le plancher : en septembre (unité 1)
+    // un plafond de 1 serait inférieur au plancher de 2 et viderait tout.
+    return Math.max(u, EDT_UNITE_DEPART);
+  };
+
   const getQueuedLesson = (subjectId, componentId) => {
     if (!subjectId || !componentId) return undefined;
+    const plafond = edtUnitePlafond();
     let next;
     for (const l of availableLessons) {
       if (l.subject_id !== subjectId || l.component_id !== componentId) continue;
@@ -3661,6 +3691,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       // jamais abordées sur la plateforme. Sans cette ligne, la rentrée
       // s'ouvrirait sur une leçon de septembre.
       if ((l.unit_number || 0) < EDT_UNITE_DEPART) continue;
+      // Plafond : on ne sert jamais le mois prochain. Voir le bloc ci-dessus.
+      if ((l.unit_number || 0) > plafond) continue;
       if (!next) { next = l; continue; }
       const du = (l.unit_number || 0) - (next.unit_number || 0);
       if (du < 0) { next = l; continue; }
@@ -3673,12 +3705,40 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     return next;
   };
 
-  // Combien de leçons restent dues dans cette sous-matière, toutes unités
-  // confondues. Sert au voyant de retard et à l'écran de validation.
-  const queueDepth = (subjectId, componentId) =>
-    availableLessons.filter((l) =>
+  // Combien de leçons restent dues dans cette sous-matière, du démarrage du
+  // pilote au mois en cours. ⚠️ Bornée EN HAUT comme la file : sans ça, les
+  // deux ne compteraient pas la même chose et l'écart serait invisible.
+  // (Fonction actuellement sans appelant ; bornée pour que le prochain qui
+  // s'en serve n'hérite pas du défaut corrigé au-dessus.)
+  const queueDepth = (subjectId, componentId) => {
+    const plafond = edtUnitePlafond();
+    return availableLessons.filter((l) =>
       l.subject_id === subjectId && l.component_id === componentId
-      && !l.taught && (l.unit_number || 0) >= EDT_UNITE_DEPART).length;
+      && !l.taught && (l.unit_number || 0) >= EDT_UNITE_DEPART
+      && (l.unit_number || 0) <= plafond).length;
+  };
+
+  /* Pourquoi la file est vide — et c'est DEUX choses, pas une.
+   *
+   * 🔴 Sans cette distinction, le plafond ci-dessus aurait remplacé un défaut
+   * par un autre : le créneau affichait « Contenu à ajouter », c'est-à-dire
+   * « la plateforme n'a rien pour vous », alors que la vérité est « vous avez
+   * fini le programme du mois ». ⭐ Troisième fois dans ce projet qu'un
+   * message d'erreur envoie l'utilisatrice dans le mur — corriger un calcul
+   * sans corriger ce qu'il fait DIRE à l'écran, c'est corriger à moitié.
+   */
+  const edtMoisTermine = (subjectId, componentId) => {
+    const plafond = edtUnitePlafond();
+    let auProgramme = 0, restantes = 0;
+    for (const l of availableLessons) {
+      if (l.subject_id !== subjectId || l.component_id !== componentId) continue;
+      const u = l.unit_number || 0;
+      if (u < EDT_UNITE_DEPART || u > plafond) continue;
+      auProgramme += 1;
+      if (!l.taught) restantes += 1;
+    }
+    return auProgramme > 0 && restantes === 0;
+  };
 
   // Un créneau, une carte. La base a laissé passer des lignes en double —
   // quatre chemins d'écriture différents alimentent `timetable_slots` et aucun
@@ -6111,6 +6171,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                                       <Badge tone="brand">✓ hors ligne</Badge>
                                     )}
                                   </>
+                                ) : edtMoisTermine(slot.subject_id, slot.component_id) ? (
+                                  /* La file est vide parce que le mois est FINI, pas parce
+                                     qu'il manque du contenu. Dire « contenu à ajouter » ici
+                                     serait accuser la plateforme d'un trou qui n'existe pas. */
+                                  <Badge tone="brand">✓ Programme du mois terminé</Badge>
                                 ) : (
                                   <Badge tone="neutral">Contenu à ajouter</Badge>
                                 )}
