@@ -3497,8 +3497,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   };
 
   const fetchAllLessons = async () => {
-    const data = await cachedQuery("lessons_" + selectedLevel.id, () =>
-      supabase.from("lessons").select("id, subject_id, component_id, level, unit_number, week_number, title")
+    /* 🪤 CLÉ RENOMMÉE EN v2 LE 2026-10-05, et c'est obligatoire : `objective`
+       vient d'être ajouté au select. Sans renommer, une entrée mise en cache
+       avant aurait été resservie SANS ce champ, et la carte du créneau aurait
+       affiché un titre sans sa description — sans lever la moindre erreur.
+       Règle du projet : une entrée de cache change de NOM quand sa FORME change. */
+    const data = await cachedQuery("lessons_v2_" + selectedLevel.id, () =>
+      supabase.from("lessons").select("id, subject_id, component_id, level, unit_number, week_number, title, objective")
         .eq("level", selectedLevel.id));
     // Enrich each lesson with its "taught" state, keyed on the TEACHER OF RECORD
     // for the class being viewed — the exact same owner the timetable itself is
@@ -5667,7 +5672,39 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
 
   // ============ CALENDAR VIEW ============
   const CalendarView = () => {
-    const isIntegrationWeek = selectedWeek === 4;
+    /* ══════════════════════════════════════════════════════════════════════
+     * 🔴 UNE SEULE COMMANDE DE TEMPS SUR CET ÉCRAN — 2026-10-05.
+     *
+     * Retour de Mme Batam, par Maxime : *« la barre "semaine du" commence sur
+     * la semaine du 05 octobre et elle évolue bien avec les jours, mais quand
+     * tu cliques sur mois et semaine 1, 2, 3, ça te donne une autre
+     * information, qui est erronée. »*
+     *
+     * Il y avait DEUX commandes de temps côte à côte, et elles ne parlaient
+     * pas de la même chose : le bandeau « semaine du … » suit le CALENDRIER,
+     * les onglets « mois » et « semaine 1-2-3-4 » adressaient le PROGRAMME.
+     * Elles pouvaient se contredire — et se contredisaient dès qu'une matière
+     * était en avance ou en retard, ce qui est le cas NORMAL.
+     *
+     * ⭐ Deux commandes qui répondent à la même question (« quand ? ») et qui
+     * peuvent se contredire : il faut en SUPPRIMER une, pas les expliquer.
+     * Les nommer chacune avait déjà été tenté le 2026-10-02 et n'a rien réglé.
+     *
+     * Donc le mois et la semaine ne sont plus CHOISIS ici, ils sont DÉDUITS de
+     * la semaine affichée. Le bandeau « semaine du … » est la seule commande.
+     *
+     * ⚠️ L'écran PROGRAMME garde son sélecteur : y parcourir le curriculum par
+     * adresse est précisément son but. `selectedUnit` et `selectedWeek`
+     * restent donc intacts — simplement plus lus ICI.
+     * ══════════════════════════════════════════════════════════════════════ */
+    const calUnite = (calLundiEff ? edtUniteDuMois(edtDateIso(calLundiEff)) : null) || selectedUnit;
+    /* La semaine du mois = le rang du lundi affiché dans son mois. Le 5 octobre
+       tombe donc en « semaine 1 », ce que dit la répartition officielle et ce
+       que l'enseignante attend de sa première semaine. ⚠️ Plafonné à 4 : un
+       mois peut porter cinq lundis quand le programme n'a que quatre semaines. */
+    const calSemaine = calLundiEff
+      ? Math.min(4, Math.floor((edtDateIso(calLundiEff).getDate() - 1) / 7) + 1)
+      : selectedWeek;
     const trier = (a, b) => (a.slot_order || 0) - (b.slot_order || 0)
       || (toMinutes(a.start_time) || 0) - (toMinutes(b.start_time) || 0);
     const daySlots = getDaySlots(selectedDay, calSlots).slice().sort(trier);
@@ -5795,51 +5832,31 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           </Card>
         )}
 
-        {/* ---- Période (unité / mois) ---- */}
         <div className="ec-grid" style={{ marginTop: 18 }}>
           <div className="ec-c4">
-        <div>
-          <CardLabel>Période</CardLabel>
-          <Tabs
-            ariaLabel="Choisir le mois"
-            value={selectedUnit}
-            onChange={(u) => { setSelectedUnit(u); setSelectedWeek(1); }}
-            items={MONTH_UNIT_MAP.map((m) => ({ key: m.unit, label: m.month }))}
-          />
-        </div>
 
-        {/* ---- Centre d'intérêt ---- */}
-        <Card style={{ marginTop: 14, background: COLORS.g50, borderColor: COLORS.g200 }}>
+        {/* ---- Centre d'intérêt : DÉDUIT de la semaine affichée, plus choisi ----
+            Les onglets « Période » (mois) et « Semaine 1-2-3-4 » qui se
+            trouvaient ici ont été RETIRÉS le 2026-10-05 : c'étaient la seconde
+            commande de temps, celle qui contredisait le bandeau. Voir le bloc
+            en tête de `CalendarView`. */}
+        <Card style={{ marginTop: 0, background: COLORS.g50, borderColor: COLORS.g200 }}>
           <div style={{
             fontSize: FONT.xs, color: COLORS.g700, fontWeight: 700,
             textTransform: "uppercase", letterSpacing: ".08em",
           }}>
-            Centre d'intérêt {selectedUnit}
+            Centre d'intérêt {calUnite}
           </div>
           <div style={{ fontSize: "var(--ec-fs-5)", fontWeight: 800, color: COLORS.ink, marginTop: 5, letterSpacing: "-.02em" }}>
-            {THEMES[selectedUnit - 1]}
+            {THEMES[calUnite - 1]}
           </div>
           <div style={{ fontSize: FONT.sm, color: COLORS.g800, opacity: .8, marginTop: 3 }}>
-            {MONTH_UNIT_MAP[selectedUnit - 1]?.month} · {selectedLevel.name}
+            {MONTH_UNIT_MAP[calUnite - 1]?.month} · semaine {calSemaine} · {selectedLevel.name}
           </div>
         </Card>
 
-        {/* ---- Semaine ---- */}
-        <div style={{ marginTop: 16 }}>
-          <CardLabel>Semaine</CardLabel>
-          <Tabs
-            ariaLabel="Choisir la semaine"
-            value={selectedWeek}
-            onChange={setSelectedWeek}
-            items={[1, 2, 3, 4].map((w) => ({
-              key: w,
-              label: w === 4 ? "Sem. 4 — Évaluation" : `Semaine ${w}`,
-            }))}
-          />
-        </div>
-
         {/* ---- Téléchargement hors ligne ---- */}
-        {OFFLINE_ENABLED && !isParent && !isIntegrationWeek && (
+        {OFFLINE_ENABLED && !isParent && (
           <Card style={{ marginTop: 16 }}>
             <CardLabel>Hors ligne</CardLabel>
             {weekIds.length === 0 ? (
@@ -5912,21 +5929,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           </div>
           <div className="ec-c8">
 
-        {isIntegrationWeek ? (
-          <Card style={{ marginTop: 18, background: COLORS.warnBg, borderColor: "#F5D9A8" }}>
-            <div style={{ textAlign: "center", padding: "12px 4px" }}>
-              <div aria-hidden="true" style={{ fontSize: "var(--ec-fs-7)", marginBottom: 10 }}>📝</div>
-              <h2 style={{ fontSize: "var(--ec-fs-4)", fontWeight: 800, color: COLORS.warn, marginBottom: 8 }}>
-                Semaine d'intégration et d'évaluation
-              </h2>
-              <p style={{ fontSize: FONT.md, color: COLORS.warn, lineHeight: 1.6, maxWidth: "52ch", margin: "0 auto" }}>
-                Cette semaine est consacrée à la mobilisation des ressources, aux activités
-                d'évaluation des compétences et aux remédiations pour le centre d'intérêt :
-                {" "}{THEMES[selectedUnit - 1]}.
-              </p>
-            </div>
-          </Card>
-        ) : (
+        {/* ⚠️ LE PAVÉ « Semaine d'intégration et d'évaluation » A ÉTÉ RETIRÉ
+            le 2026-10-05. Il remplaçait TOUT cet écran dès que la semaine 4
+            était sélectionnée : l'emploi du temps DISPARAISSAIT une semaine sur
+            quatre. Or il y a classe cette semaine-là comme les autres, et
+            l'enseignante a ses propres créneaux d'évaluation (tout son vendredi,
+            plus trois créneaux en semaine). L'information « la semaine 4 est
+            consacrée à l'évaluation » appartient à l'écran Programme, pas à
+            l'emploi du temps. ⭐ Un écran qui se vide n'informe pas : il inquiète. */}
+        {(
           <>
             {/* ══════════════════════════════════════════════════════════════
               * VUE DE LA SEMAINE, EN LECTURE SEULE — 2026-10-02.
@@ -6069,7 +6080,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                 return ` ${d.getDate()} ${EDT_MOIS[d.getMonth()]}`;
               })()}
               <span style={{ fontWeight: 600, color: COLORS.ink3 }}>
-                {" "}· semaine {selectedWeek} du programme
+                {" "}· semaine {calSemaine} du programme
               </span>
             </h2>
 
@@ -6086,10 +6097,23 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                  repère temporel, la ligne verticale relie la journée. */
               <div style={{ display: "grid", gridTemplateColumns: "52px 1fr" }}>
                 {daySlots.map((slot, i) => {
-                  const topic = getTopic(selectedUnit, selectedWeek, slot.subject_id, slot.component_id);
+                  /* 🔴 LA LEÇON SERVIE EST LA SOURCE DE VÉRITÉ — 2026-10-05.
+                     Avant, la carte affichait un SUJET pris par adresse
+                     (unité + semaine) à côté d'une LEÇON prise dans la file
+                     (par état). Les deux pouvaient se contredire, et se
+                     contredisaient dès qu'une matière était en avance ou en
+                     retard — le cas de Mme Batam sur deux sous-matières dès le
+                     premier jour. Le titre vient donc maintenant de la leçon
+                     réellement servie ; le sujet du curriculum ne sert plus que
+                     de repli quand aucune leçon n'existe.
+                     ⚠️ Et `lesson` n'est PLUS conditionné à l'existence d'un
+                     sujet à cette adresse : un créneau peut avoir une leçon en
+                     file sans que le curriculum porte une ligne à cette
+                     semaine-là. L'ancien `topic &&` masquait ces leçons. */
+                  const topic = getTopic(calUnite, calSemaine, slot.subject_id, slot.component_id);
                   const color = getSubjectColor(slot.subject_id);
                   const tt = isTeacherTaught(slot.subject_id);
-                  const lesson = (topic && !tt) ? getQueuedLesson(slot.subject_id, slot.component_id) : null;
+                  const lesson = tt ? null : getQueuedLesson(slot.subject_id, slot.component_id);
                   const st = toMinutes(slot.start_time), en = toMinutes(slot.end_time);
                   const isNow = showingToday && st != null && en != null && minutesNow >= st && minutesNow < en;
                   const isPast = showingToday && en != null && minutesNow >= en;
@@ -6151,15 +6175,28 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                                 Cette matière n'est pas couverte par la plateforme ; elle est enseignée directement par l'enseignant(e).
                               </div>
                             </div>
-                          ) : topic ? (
+                          /* 📏 `edtMoisTermine` est DANS la condition d'entrée, et il
+                             le faut : mesuré en base le 2026-10-05, **le curriculum ne
+                             porte aucun sujet en semaine 4** pour aucune sous-matière —
+                             c'est la semaine d'évaluation. Tant que le pavé
+                             « semaine d'intégration » masquait l'écran, ça ne se voyait
+                             pas ; il est retiré, donc dès le lundi 26 octobre `topic`
+                             sera nul partout. Sans ce troisième terme, une sous-matière
+                             TERMINÉE afficherait « Sujet à définir pour cette semaine » —
+                             un mensonge de plus, et au pire moment. */
+                          ) : (lesson || topic || edtMoisTermine(slot.subject_id, slot.component_id)) ? (
                             <>
-                              <div style={{ fontSize: "var(--ec-fs-4)", fontWeight: 600, color: COLORS.ink, marginTop: 8 }}>
-                                {topic.topic_title}
-                              </div>
-                              {topic.topic_description && (
-                                <div style={{ fontSize: FONT.sm, color: COLORS.ink2, marginTop: 3, lineHeight: 1.5 }}>
-                                  {topic.topic_description}
-                                </div>
+                              {(lesson || topic) && (
+                                <>
+                                  <div style={{ fontSize: "var(--ec-fs-4)", fontWeight: 600, color: COLORS.ink, marginTop: 8 }}>
+                                    {lesson ? lesson.title : topic.topic_title}
+                                  </div>
+                                  {(lesson ? lesson.objective : topic.topic_description) && (
+                                    <div style={{ fontSize: FONT.sm, color: COLORS.ink2, marginTop: 3, lineHeight: 1.5 }}>
+                                      {lesson ? lesson.objective : topic.topic_description}
+                                    </div>
+                                  )}
+                                </>
                               )}
                               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 9 }}>
                                 {lesson ? (
