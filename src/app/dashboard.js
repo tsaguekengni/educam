@@ -485,10 +485,69 @@ function bilanCursiveFrom(blocks) {
   );
 }
 
+/* L'EN-TÊTE DE LA LEÇON DANS LA TRACE — 2026-10-06
+ * Demande d'une enseignante, validée par Maxime : les élèves gardent leur
+ * cahier comme référence, la ligne « Leçon : Gérer l'eau au village » ne dit
+ * pas de quelle matière il s'agit. Elle devient, à l'affichage :
+ *     « Sciences : Développement durable : Gérer l'eau au village »
+ * c'est-à-dire  matière : sous-discipline : titre.
+ *
+ * Fait À L'AFFICHAGE, pas dans les données : les ~190 leçons gardent leur ligne
+ * « **Leçon : … ** » (ou « **Lesson: … ** » en anglais) en base et dans les
+ * fichiers SQL. Un ré-upload ne casse donc rien, et changer un libellé ici le
+ * change dans toutes les leçons d'un coup. Le titre lui-même vient du texte
+ * de la trace (il garde son « — application » / « — consolidation »).
+ *
+ * Libellés COURTS, à recopier à chaque leçon : la colonne « sous-discipline »
+ * de la répartition officielle, raccourcie quand elle est trop longue pour un
+ * cahier (« Environnement et Éducation au Développement Durable » →
+ * « Développement durable », le mot de l'enseignante). Une sous-discipline
+ * absente de la table prend le nom de SUBJECTS. */
+const NOTEBOOK_SUBJECT = {
+  francais: "Français", maths: "Mathématiques", sciences: "Sciences",
+  english: "English", shs: "Sciences humaines", tic: "TIC",
+  langues: "Langues nationales", arts: "Éducation artistique",
+  eps: "EPS", devperso: "Développement personnel",
+};
+const NOTEBOOK_COMPONENT = {
+  "geometrie": "Géométrie",
+  "sciences-physiques": "Sciences physiques",
+  "sciences-terre": "Sciences de la Terre",
+  "agropastoral": "Sciences agropastorales",
+  "environnement": "Développement durable",
+  "citoyennete": "Citoyenneté",
+  "paix": "Paix et sécurité",
+  "droits": "Droits de l'enfant",
+};
+const LESSON_LINE = /^\*\*(Leçon|Lesson)\s*:\s*([^*\n]+?)\s*\*\*[ \t]*$/gm;
+
+// « Sciences : Développement durable : Gérer l'eau au village »
+// (« English: Grammar and Vocabulary: Plurals » en anglais, sans espace).
+function notebookLessonLine(lesson, title, word) {
+  const subject = SUBJECTS.find((s) => s.id === lesson?.subject_id);
+  if (!subject) return null;
+  const subjectLabel = NOTEBOOK_SUBJECT[subject.id] || subject.name;
+  const component = subject.components.find((c) => c.id === lesson.component_id);
+  const componentLabel = NOTEBOOK_COMPONENT[lesson.component_id] || component?.name;
+  const sep = word === "Lesson" ? ": " : " : ";
+  return [subjectLabel, componentLabel, title].filter(Boolean).join(sep);
+}
+
+function withNotebookLessonLine(text, lesson) {
+  if (!lesson || !text) return text;
+  return text.replace(LESSON_LINE, (line, word, title) => {
+    const label = notebookLessonLine(lesson, title, word);
+    return label ? `**${label}**` : line;
+  });
+}
+
 // Texte d'un bloc de la trace : la ligne d'en-tête (si c'en est une) reste
 // dans la police normale, le reste passe en cursive, le gras devient souligné.
-function renderCursiveText(text) {
-  if (!text) return null;
+// `lesson` (facultatif) sert à écrire l'en-tête « matière : sous-discipline :
+// titre » à la place de « Leçon : titre » (voir NOTEBOOK_SUBJECT).
+function renderCursiveText(rawText, lesson) {
+  if (!rawText) return null;
+  const text = withNotebookLessonLine(rawText, lesson);
   const firstLine = text.split("\n")[0];
   const hasHeading = CURSIVE_HEADING.test(firstLine);
   const head = hasHeading ? firstLine : "";
@@ -7415,7 +7474,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                                   fontSize: isCursive ? 19 : 16.5, color: "#22262C", lineHeight: isCursive ? 1.8 : 1.68,
                                   whiteSpace: "pre-wrap", maxWidth: "66ch",
                                 }}>
-                                  {isCursive ? renderCursiveText(block.text_content) : renderRichText(block.text_content)}
+                                  {isCursive ? renderCursiveText(block.text_content, currentLesson) : renderRichText(block.text_content)}
                                 </div>
                               );
                             }
@@ -7927,7 +7986,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                               // toute la largeur utile de la projection.
                               maxWidth: "100%"
                             }}>
-                              {isCursive ? renderCursiveText(block.text_content) : renderRichText(block.text_content)}
+                              {isCursive ? renderCursiveText(block.text_content, currentLesson) : renderRichText(block.text_content)}
                             </div>
                           );
                         }
