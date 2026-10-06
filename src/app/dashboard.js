@@ -2963,6 +2963,10 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [fbRating, setFbRating] = useState(0);
   const [fbComment, setFbComment] = useState("");
   const [fbSaving, setFbSaving] = useState(false);
+  // Ce qu'on affiche sous le bouton : un échec, ou « parti dans la file ».
+  // Il n'existait rien — c'est pour ça qu'un enregistrement raté ne disait rien.
+  const [fbErr, setFbErr] = useState("");
+  const [fbFile, setFbFile] = useState(false);
 
   // Calendar state
   const [selectedUnit, setSelectedUnit] = useState(1);
@@ -3048,6 +3052,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // control side; `isPresentWindow` = this IS the projector window (opened with
   // ?present=<lessonId>).
   const [presenting, setPresenting] = useState(false);
+  // 🔴 QUELLE leçon est au tableau. Sans ça, la barre de l'enseignante agirait
+  // sur `currentLesson` — c'est-à-dire sur ce qu'elle regarde SUR SON PORTABLE,
+  // qui peut avoir changé depuis. Elle aurait marqué « enseignée » une leçon
+  // qu'elle venait d'ouvrir pour la préparer, pas celle que la classe voit. Et
+  // ce drapeau nourrit la file d'attente : une leçon marquée à tort disparaît
+  // de ce qui reste à enseigner, en silence.
+  const [presented, setPresented] = useState(null);   // { id, title }
   const presenterWinRef = useRef(null);
   const projectorChanRef = useRef(null); // BroadcastChannel to the projector window
   const [isPresentWindow] = useState(() => {
@@ -4682,12 +4693,49 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     );
     setFbRating(existing?.rating || 0);
     setFbComment(existing?.comment || "");
+    setFbErr("");
+    setFbFile(false);
     setFeedbackOpenFor(target);
   };
 
+  /* 🔴 CETTE FONCTION PERDAIT LE COMMENTAIRE EN SILENCE — réparée le 2026-10-06.
+   *
+   * Signalé par Mme Batam : elle a écrit un retour sur une leçon, il n'est
+   * jamais arrivé. Vérifié en base : `lesson_feedback` était VIDE — zéro ligne
+   * depuis la création de la table. Et le journal d'activité ne portait aucun
+   * événement « feedback », alors que la fonction en écrivait un à la fin :
+   * preuve qu'elle n'allait jamais jusqu'au bout.
+   *
+   * Trois défauts qui se renforçaient :
+   *   1. AUCUN try/catch. Une coupure réseau fait REJETER l'appel ; la fonction
+   *      mourait en plein vol. `setFbSaving(false)` ne s'exécutait donc jamais
+   *      et le bouton restait bloqué sur « Envoi… », désactivé, pour toujours.
+   *      (Les journaux montrent trois connexions en vingt-quatre minutes et la
+   *      même leçon rouverte trois fois : elle a rechargé, puis réessayé.)
+   *   2. LE RÉSULTAT N'ÉTAIT PAS LU. `supabase…insert(row)` ne lève pas sur un
+   *      refus de politique : il renvoie `{ error }`. On jetait cet objet.
+   *   3. AUCUNE FILE HORS LIGNE, alors que tout le reste de l'écran en a une.
+   *      Dans une école à réseau faible, c'est le cas NORMAL, pas le cas rare.
+   *
+   * ⭐ Le modèle correct était à quatre-vingts lignes au-dessus, dans
+   * `toggleTaught` : try/catch, `if (error) throw error`, et `enqueue` quand on
+   * est hors ligne. Il n'avait simplement jamais été appliqué ici.
+   *
+   * 🔴 RÈGLE : en cas d'échec, on NE FERME PAS le volet et on N'EFFACE PAS le
+   * texte. Le pire de l'ancienne version n'était pas de perdre l'écriture :
+   * c'était de la perdre en ayant l'air d'avoir réussi.
+   *
+   * ⚠️ Reste connu : il n'y a pas d'index unique sur
+   * (teacher_id, lesson_id, section_id). Un commentaire écrit hors ligne, puis
+   * réécrit avant que la file ne parte, peut donc créer deux lignes. C'est
+   * salissant, jamais destructeur — et la table étant vide, l'index se pose
+   * sans risque le jour où on le voudra. */
   const submitFeedback = async (sectionId, sectionTitle) => {
     if (!fbComment.trim() && !fbRating) { setFeedbackOpenFor(null); return; }
+    const horsLigne = typeof navigator !== "undefined" && !navigator.onLine;
     setFbSaving(true);
+    setFbErr("");
+    setFbFile(false);
     const row = {
       teacher_id: teacher?.id,
       lesson_id: currentLesson.id,
@@ -4700,23 +4748,49 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const existing = (lessonFeedback || []).find(f =>
       sectionId == null ? f.section_id == null : f.section_id === sectionId
     );
-    if (existing) {
-      await supabase.from("lesson_feedback").update(row).eq("id", existing.id);
-    } else {
-      await supabase.from("lesson_feedback").insert(row);
+    try {
+      if (horsLigne) {
+        await enqueue(existing
+          ? { kind: "feedback", table: "lesson_feedback", op: "update", payload: row, match: { id: existing.id } }
+          : { kind: "feedback", table: "lesson_feedback", op: "insert", payload: row });
+        await refreshPending();
+        // On garde le volet ouvert avec le texte : elle voit que c'est parti
+        // dans la file, et elle n'a rien à retaper.
+        setFbFile(true);
+        return;
+      }
+      if (existing) {
+        const { error } = await supabase.from("lesson_feedback").update(row).eq("id", existing.id);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from("lesson_feedback").insert(row);
+        if (error) throw error;
+      }
+      // Refresh this teacher's feedback for the lesson
+      const { data: fb } = await supabase
+        .from("lesson_feedback")
+        .select("*")
+        .eq("teacher_id", teacher?.id)
+        .eq("lesson_id", currentLesson.id);
+      setLessonFeedback(fb || []);
+      // ⚠️ APRÈS l'écriture, jamais avant : le journal d'activité ne doit pas
+      // affirmer qu'un retour a été donné quand rien n'a été écrit.
+      logActivity({ actorId: teacher?.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "feedback", lessonId: currentLesson.id, detail: currentLesson.title });
+      setFeedbackOpenFor(null);
+      setFbRating(0);
+      setFbComment("");
+    } catch (e) {
+      // Un refus de politique ne se répare pas en réessayant ; une panne
+      // réseau, si. Même distinction que dans la boîte de dialogue.
+      const refus = e?.code === "42501" || /row-level security|policy/i.test(String(e?.message || ""));
+      setFbErr(refus
+        ? "Ce compte n'a pas le droit d'enregistrer un retour sur cette leçon."
+        : "Enregistrement impossible pour le moment. Votre texte est conservé ci-dessus — réessayez dans un instant.");
+    } finally {
+      // Dans un `finally` : c'est ce qui manquait pour que le bouton ne reste
+      // pas bloqué sur « Envoi… » après une coupure.
+      setFbSaving(false);
     }
-    // Refresh this teacher's feedback for the lesson
-    const { data: fb } = await supabase
-      .from("lesson_feedback")
-      .select("*")
-      .eq("teacher_id", teacher?.id)
-      .eq("lesson_id", currentLesson.id);
-    setLessonFeedback(fb || []);
-    logActivity({ actorId: teacher?.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "feedback", lessonId: currentLesson.id, detail: currentLesson.title });
-    setFbSaving(false);
-    setFeedbackOpenFor(null);
-    setFbRating(0);
-    setFbComment("");
   };
 
   const feedbackFor = (sectionId) =>
@@ -4759,6 +4833,27 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               {fbSaving ? "Envoi…" : "Enregistrer"}
             </button>
           </div>
+          {/* 🔴 CE BLOC N'EXISTAIT PAS, et c'est tout le défaut : un
+              enregistrement raté se terminait exactement comme un réussi —
+              volet fermé, texte effacé, aucun mot. Il faut que l'écran dise
+              laquelle des trois choses s'est produite. */}
+          {fbErr && (
+            <div role="alert" style={{
+              marginTop: 10, padding: "9px 11px", borderRadius: 8,
+              background: "#FEF2F2", border: "1px solid #FECACA",
+              color: "#991B1B", fontSize: "var(--ec-fs-2)", lineHeight: 1.5,
+            }}>{fbErr}</div>
+          )}
+          {fbFile && (
+            <div style={{
+              marginTop: 10, padding: "9px 11px", borderRadius: 8,
+              background: "#EFF6FF", border: "1px solid #BFDBFE",
+              color: "#1E40AF", fontSize: "var(--ec-fs-2)", lineHeight: 1.5,
+            }}>
+              Vous êtes hors ligne : votre retour est gardé et partira dès le
+              retour du réseau. Rien à retaper.
+            </div>
+          )}
         </div>
       );
     }
@@ -7418,6 +7513,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     try { presenterWinRef.current?.close(); } catch (_) {}
     presenterWinRef.current = null;
     setPresenting(false);
+    setPresented(null);
   };
   // Launch the lesson onto the projector. If the laptop has a SECOND screen
   // (projector via HDMI in "extend" mode), the lesson opens as its own window on
@@ -7446,6 +7542,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     if (!win) { enterProjector(); return; } // popup blocked → same-screen fallback
     presenterWinRef.current = win;
     setPresenting(true);
+    setPresented({ id: lessonId, title: currentLesson?.title || "" });
     logActivity({ actorId: teacher?.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "projector", lessonId, detail: currentLesson?.title });
   };
 
@@ -7645,7 +7742,14 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             Le coin bas-gauche est le seul libre : le haut-droit porte Plein
             écran et Quitter, le bas-droit porte le zoom. Les trois ne se
             rencontrent jamais, quelle que soit la largeur. */}
-        {!isParent && (
+        {/* ⚠️ `!isPresentWindow` ET PAS `!presenting` — déplacement du
+            2026-10-06. Cette surcouche s'affiche dans la FENÊTRE DU PROJECTEUR,
+            qui est une AUTRE instance de l'application : `presenting` y vaut
+            faux, et tester ce drapeau n'aurait rien masqué. Quand la leçon part
+            sur un second écran, les commandes vivent dans la barre verte du
+            portable ; rien ne doit flotter devant la classe. En projection sur
+            le MÊME écran, il n'y a pas de barre — on les garde ici. */}
+        {!isParent && !isPresentWindow && (
           <div style={{
             position: "fixed", bottom: 20, left: 24, zIndex: 10000,
             background: "rgba(0,0,0,0.7)", borderRadius: 12, padding: 6,
@@ -7668,11 +7772,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           </div>
         )}
 
-        {/* Zoom — EN BAS À DROITE, volontairement.
-            La barre du haut est déjà soupçonnée de recouvrir la barre
-            « marquer la leçon enseignée » (chantier 2) : y ajouter trois
-            boutons aggraverait un défaut connu. En bas à droite, c'est aussi
-            là où l'on cherche un zoom par habitude. */}
+        {/* Zoom — EN BAS À DROITE, et seulement quand la leçon est projetée
+            sur le MÊME écran. Sur un second écran, le zoom est dans la barre
+            verte du portable (même raison que ci-dessus : `isPresentWindow`,
+            pas `presenting`). */}
+        {!isPresentWindow && (
         <div style={{
           position: "fixed", bottom: 20, right: 24, zIndex: 10000,
           display: "flex", alignItems: "center", gap: 6,
@@ -7689,6 +7793,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           <button onClick={() => bumpZoom(1)} disabled={projZoom >= PROJ_ZOOM_MAX}
             title="Agrandir le texte (touche +)" style={projZoomBtn(projZoom >= PROJ_ZOOM_MAX)}>+</button>
         </div>
+        )}
 
         {/* Content */}
         <div style={{ maxWidth: PROJ_MAX_W, margin: "0 auto", padding: isMobile ? "72px 16px 60px" : "48px 40px 72px" }}>
@@ -7873,7 +7978,35 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       {presenting && (
         <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 10000, background: COLORS.g700, color: "#fff", display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", flexWrap: "wrap", boxShadow: "0 -2px 14px rgba(0,0,0,.25)" }}>
           <span style={{ fontSize: FONT.sm, fontWeight: 800 }}>📽 Leçon projetée</span>
-          <span style={{ fontSize: 12, opacity: .85, flex: 1, minWidth: 140 }}>Vous pouvez continuer sur la plateforme ; la classe voit la leçon au tableau.</span>
+          {/* 🔴 LE GARDE-FOU DU 2026-10-06. « Marquer enseignée » n'apparaît ici
+              que si le portable est encore SUR la leçon projetée. Elle peut très
+              bien en ouvrir une autre pour préparer la suite pendant que la
+              classe recopie : le bouton agirait alors sur la mauvaise leçon, et
+              une leçon marquée à tort sort de la file de ce qui reste à
+              enseigner — sans un mot. Quand les deux divergent, on NOMME la
+              leçon au tableau au lieu d'offrir un bouton qui mentirait. */}
+          {presented && currentLesson?.id === presented.id ? (
+            <>
+              <span style={{ fontSize: 12, opacity: .85, flex: 1, minWidth: 110 }}>Vous pouvez continuer sur la plateforme ; la classe voit la leçon au tableau.</span>
+              <button
+                onClick={toggleTaught}
+                disabled={taughtSaving}
+                title="Marque cette leçon comme enseignée en classe"
+                style={{
+                  ...presentBtn,
+                  background: lessonTaught ? "rgba(255,255,255,.92)" : "rgba(255,255,255,.15)",
+                  color: lessonTaught ? COLORS.g800 : "#fff",
+                }}
+              >
+                {taughtSaving ? "…" : lessonTaught ? "✓ Enseignée" : "Marquer enseignée"}
+              </button>
+            </>
+          ) : (
+            <span style={{ fontSize: 12, opacity: .85, flex: 1, minWidth: 140 }}>
+              Au tableau : <b>{presented?.title || "la leçon"}</b> — vous regardez autre chose,
+              « marquer enseignée » reste sur son écran.
+            </span>
+          )}
           <button onClick={() => projectorPost({ cmd: "top" })} style={presentBtn} title="Haut de la leçon">⤒</button>
           <button onClick={() => projectorPost({ cmd: "scroll", factor: -1 })} style={presentBtn} title="Monter">↑</button>
           <button onClick={() => projectorPost({ cmd: "scroll", factor: 1 })} style={presentBtn} title="Descendre">↓</button>
