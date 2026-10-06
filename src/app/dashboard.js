@@ -837,6 +837,28 @@ const EDT_DEBUT_ANNEE = new Date(2026, 9, 5);
 const edtIsoJour = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
+/* Lire un horodatage de PostgreSQL en Date, sans supposer sa graphie exacte.
+ *
+ * 🔴 `new Date(chaîne)` N'ACCEPTE PAS tous les horodatages selon le moteur, et
+ * les deux pièges sont réels ici :
+ *   · **une espace au lieu d'un `T`** (« 2026-10-06 11:02:15+00 ») est refusée
+ *     par Safari — donc sur l'iPhone ou l'iPad d'un parent ;
+ *   · **un décalage sans minutes** (« +00 » au lieu de « +00:00 ») est refusé
+ *     par TOUS les moteurs, Chrome compris.
+ *
+ * ⭐ Et la panne serait MUETTE : une date illisible ne lève pas d'erreur, elle
+ * rend juste `Invalid Date`, et le relevé de la journée serait vide sans que
+ * personne sache pourquoi. Mesuré avant d'écrire ce correctif, pas supposé.
+ */
+function edtDateHorodatage(v) {
+  if (!v) return null;
+  if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v;
+  let s = String(v).trim().replace(" ", "T");
+  s = s.replace(/([+-]\d{2})$/, "$1:00");   // « +00 » → « +00:00 »
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 // Les jours d'école qui restent dans le mois en cours, aujourd'hui compris.
 function edtJoursEcoleRestants(aujourdhui) {
   const out = [];
@@ -3592,15 +3614,24 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const ownerTeacherId = isParent
       ? (parentStudent?.teacher_id || null)
       : (teacher?.id || null);
-    let taughtSet = new Set();
+    /* 🔴 `taught_at` EST CHARGÉ DEPUIS LE 2026-10-06, et pas seulement le
+       drapeau : sans la DATE, un créneau ne peut pas savoir si c'est LUI qui a
+       servi cette leçon, ni quel jour. C'est la pièce qui manquait pour donner
+       une mémoire à l'emploi du temps (voir `edtLeconEnseigneeCeJour`).
+       ⚠️ Cette requête-ci n'est PAS en cache (seule la liste des leçons l'est,
+       sous `lessons_v2_`) : ajouter une colonne ici ne demande donc aucun
+       renommage de clé. */
+    let taughtMap = new Map();
     if (ownerTeacherId) {
       try {
         const { data: tg } = await supabase.from("lessons_taught")
-          .select("lesson_id").eq("teacher_id", ownerTeacherId);
-        taughtSet = new Set((tg || []).map((r) => r.lesson_id));
+          .select("lesson_id, taught_at").eq("teacher_id", ownerTeacherId);
+        taughtMap = new Map((tg || []).map((r) => [r.lesson_id, r.taught_at]));
       } catch (_) {}
     }
-    setAvailableLessons((data || []).map((l) => ({ ...l, taught: taughtSet.has(l.id) })));
+    setAvailableLessons((data || []).map((l) => ({
+      ...l, taught: taughtMap.has(l.id), taught_at: taughtMap.get(l.id) || null,
+    })));
   };
 
   // Download every lesson scheduled this week (current unit + week), images
@@ -3816,6 +3847,65 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       if (!l.taught) restantes += 1;
     }
     return auProgramme > 0 && restantes === 0;
+  };
+
+  /* ══════════════════════════════════════════════════════════════════════════
+   * 🔴 LA MÉMOIRE DU CRÉNEAU — 2026-10-06, défaut n°15, et c'est un défaut de
+   * CONCEPTION, pas un réglage.
+   *
+   * Signalé par Maxime le premier jour de production, sur ses vraies données :
+   * *« quand elle clique sur "leçon enseignée", la leçon disparaît de l'emploi
+   * du temps et c'est la leçon suivante qui est sur ce créneau. Elle ne peut
+   * pas voir son emploi du temps de la journée à mesure qu'elle a progressé, et
+   * les parents non plus ne verront pas ce qui a été enseigné aujourd'hui. »*
+   *
+   * La cause est la file d'attente elle-même : `getQueuedLesson` rend la
+   * prochaine leçon NON enseignée. Elle ne sait donc répondre qu'à « que
+   * reste-t-il à faire ? », jamais à « qu'est-ce qui a eu lieu ? ».
+   * **Un créneau n'avait aucune mémoire.** Marquer une leçon enseignée
+   * effaçait la trace de la séance au lieu de la fixer.
+   *
+   * ⭐ LA LEÇON : une vue tournée vers l'avenir ne peut pas servir de relevé.
+   * La file répond juste à sa question ; c'est l'écran qui posait la mauvaise.
+   *
+   * Ce que fait cette fonction : retrouver la leçon RÉELLEMENT enseignée dans
+   * ce créneau, en s'appuyant sur `lessons_taught.taught_at`. Aucun changement
+   * de schéma : la donnée était déjà là, elle n'était pas lue.
+   *
+   * ⚠️ `lessons_taught` ne dit PAS dans quel créneau une leçon a été servie —
+   * seulement (enseignant, leçon, date). L'attribution se fait donc par
+   * sous-matière et par RANG : si une sous-matière a deux créneaux le même jour,
+   * le 1ᵉʳ créneau prend la 1ʳᵉ leçon marquée, le 2ᵉ la 2ᵉ. C'est exact dans
+   * tous les cas où elle marque dans l'ordre, et c'est le cas normal.
+   *
+   * ⚠️ Le jour est celui de l'HORODATAGE DE LA MARQUE, pas celui de la séance.
+   * Si elle marque à minuit passé la leçon de la veille, elle apparaîtra au
+   * lendemain. Assumé : rien en base ne permet de faire mieux aujourd'hui.
+   * ══════════════════════════════════════════════════════════════════════════ */
+  const edtLeconEnseigneeCeJour = (subjectId, componentId, jourIso, rang) => {
+    if (!subjectId || !componentId || !jourIso) return null;
+    const faites = [];
+    for (const l of availableLessons) {
+      if (l.subject_id !== subjectId || l.component_id !== componentId) continue;
+      if (!l.taught || !l.taught_at) continue;
+      const d = edtDateHorodatage(l.taught_at);       // graphie normalisée : voir la fonction
+      if (!d) continue;
+      if (edtIsoJour(d) !== jourIso) continue;        // date LOCALE, comme partout ailleurs
+      faites.push(l);
+    }
+    /* 🔴 TRI PAR ORDRE DU PROGRAMME, PAS PAR HEURE DE MARQUAGE — et c'est un
+       test qui a tranché. Trier sur `taught_at` paraissait naturel ; joué sur
+       le cas « elle marque les deux leçons dans le désordre », il mettait
+       l'application au premier créneau et la notion au second. Or en classe
+       elle enseigne dans l'ordre du programme : c'est le MARQUAGE qui a été
+       désordonné, pas la séance. L'ordre du programme retombe donc juste dans
+       ce cas, et donne le même résultat que `taught_at` dans le cas normal.
+       ⭐ Quand deux tris se valent dans le cas courant, c'est le cas tordu qui
+       choisit. */
+    faites.sort((a, b) => (a.unit_number || 0) - (b.unit_number || 0)
+      || (a.week_number || 1) - (b.week_number || 1)
+      || (a.id || 0) - (b.id || 0));
+    return faites[Math.max(1, rang || 1) - 1] || null;
   };
 
   // Un créneau, une carte. La base a laissé passer des lignes en double —
@@ -5905,6 +5995,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const calSemaine = calLundiEff
       ? Math.min(4, Math.floor((edtDateIso(calLundiEff).getDate() - 1) / 7) + 1)
       : selectedWeek;
+    /* La DATE réelle du jour affiché, en AAAA-MM-JJ local. C'est elle qui
+       permet à un créneau de retrouver la leçon enseignée ce jour-là plutôt que
+       la prochaine en file (2026-10-06). ⚠️ Sans `calLundiEff` — ce qui
+       n'arrive qu'avant le premier rendu — on reste sur la file seule. */
+    const calJourIso = calLundiEff
+      ? edtIsoJour(edtDateDuJour(calLundiEff, selectedDay)) : null;
+    const calAujourdhuiIso = now ? edtIsoJour(now) : null;
     const trier = (a, b) => (a.slot_order || 0) - (b.slot_order || 0)
       || (toMinutes(a.start_time) || 0) - (toMinutes(b.start_time) || 0);
     const daySlots = getDaySlots(selectedDay, calSlots).slice().sort(trier);
@@ -6217,8 +6314,20 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                           <div style={{ padding: "10px 13px", fontSize: "var(--ec-fs-2)", color: COLORS.ink3 }}>
                             Aucun créneau.
                           </div>
-                        ) : sl.map((s) => {
+                        ) : sl.map((s, k) => {
                           const pause = s.subject_id === "pause" || s.subject_id === "etude";
+                          /* ✓ SUR LA SEMAINE — 2026-10-06. C'est la moitié
+                             « parents » de la demande : d'un coup d'œil, voir ce
+                             qui a RÉELLEMENT été enseigné dans la semaine, et pas
+                             seulement ce qui est prévu. Même attribution par rang
+                             que la vue du jour. */
+                          const jIso = calLundiEff
+                            ? edtIsoJour(edtDateDuJour(calLundiEff, d)) : null;
+                          const rangS = sl.filter((s2, j) => j <= k
+                            && s2.subject_id === s.subject_id
+                            && s2.component_id === s.component_id).length;
+                          const faiteS = pause || isTeacherTaught(s.subject_id) ? null
+                            : edtLeconEnseigneeCeJour(s.subject_id, s.component_id, jIso, rangS);
                           return (
                             <div key={s.id} style={{
                               display: "flex", gap: 8, alignItems: "baseline", padding: "5px 13px",
@@ -6234,6 +6343,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                                 fontWeight: pause ? 600 : 700,
                               }}>
                                 {pause ? s.subject_name : (s.component_name || s.subject_name)}
+                                {faiteS && (
+                                  <span style={{ color: COLORS.g600, fontWeight: 800 }} title={faiteS.title}>
+                                    {" ✓"}
+                                  </span>
+                                )}
                               </span>
                             </div>
                           );
@@ -6339,7 +6453,19 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                   const topic = getTopic(calUnite, calSemaine, slot.subject_id, slot.component_id);
                   const color = getSubjectColor(slot.subject_id);
                   const tt = isTeacherTaught(slot.subject_id);
-                  const lesson = tt ? null : getQueuedLesson(slot.subject_id, slot.component_id);
+                  /* 🔴 LE RELEVÉ D'ABORD, LA FILE ENSUITE — 2026-10-06.
+                     Le rang du créneau parmi ceux de la MÊME sous-matière ce
+                     jour-là : il permet d'attribuer la 1ʳᵉ leçon marquée au
+                     1ᵉʳ créneau et la 2ᵉ au 2ᵉ, quand une sous-matière en a
+                     deux le même jour (voir `edtLeconEnseigneeCeJour`). */
+                  const rang = daySlots.filter((s2, j) => j <= i
+                    && s2.subject_id === slot.subject_id
+                    && s2.component_id === slot.component_id).length;
+                  const faite = tt ? null
+                    : edtLeconEnseigneeCeJour(slot.subject_id, slot.component_id, calJourIso, rang);
+                  /* Une leçon enseignée ce jour-là RESTE sur son créneau. Ce
+                     n'est qu'à défaut qu'on demande à la file ce qui vient. */
+                  const lesson = faite || (tt ? null : getQueuedLesson(slot.subject_id, slot.component_id));
                   const st = toMinutes(slot.start_time), en = toMinutes(slot.end_time);
                   const isNow = showingToday && st != null && en != null && minutesNow >= st && minutesNow < en;
                   const isPast = showingToday && en != null && minutesNow >= en;
@@ -6427,9 +6553,17 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 9 }}>
                                 {lesson ? (
                                   <>
-                                    {lesson.taught
-                                      ? <Badge tone="brand">✓ Déjà enseignée</Badge>
-                                      : <Badge tone="neutral">Leçon disponible</Badge>}
+                                    {/* `faite` = enseignée CE JOUR-LÀ, dans CE créneau : c'est
+                                        le relevé de la séance, et il se dit autrement que
+                                        « déjà enseignée » (qui peut remonter à des semaines). */}
+                                    {faite
+                                      ? <Badge tone="brand">
+                                          {calJourIso && calJourIso === calAujourdhuiIso
+                                            ? "✓ Enseignée aujourd'hui" : "✓ Enseignée ce jour-là"}
+                                        </Badge>
+                                      : lesson.taught
+                                        ? <Badge tone="brand">✓ Déjà enseignée</Badge>
+                                        : <Badge tone="neutral">Leçon disponible</Badge>}
                                     {OFFLINE_ENABLED && cachedIds.includes(lesson.id) && (
                                       <Badge tone="brand">✓ hors ligne</Badge>
                                     )}
