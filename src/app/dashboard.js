@@ -7472,6 +7472,37 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     };
     const doExit = () => { relaying ? stopPresenter() : exitProjector(); };
     const onKey = (e) => {
+      /* 🔴 LA GARDE DE SAISIE — ajoutée le 2026-10-06, signalée par Mme Batam.
+       *
+       * Elle commentait une leçon pendant qu'elle projetait. Chaque ESPACE tapé
+       * dans la zone de commentaire faisait DÉFILER la leçon au tableau au lieu
+       * de s'écrire. Ce gestionnaire est posé sur `window` : il voit toutes les
+       * touches du document, où que soit le curseur — et son `preventDefault()`
+       * les empêche d'atteindre le champ.
+       *
+       * ⚠️ L'espace n'était que le plus visible. Étaient aussi avalés : les
+       * FLÈCHES (déplacer le curseur dans son texte), Début et Fin, et — depuis
+       * que j'ai ajouté le zoom au clavier le 2026-10-01 — les touches « + »,
+       * « - », « = », « _ » et « 0 ». Soit un chiffre et deux signes de
+       * ponctuation impossibles à écrire dans un commentaire.
+       *
+       * ⭐ LE REMÈDE EXISTAIT DÉJÀ DANS LE PROJET : `results.js` (l. ~687) porte
+       * exactement cette garde sur son propre raccourci clavier. Elle n'avait
+       * simplement jamais été reportée ici. Avant d'écrire un gestionnaire au
+       * niveau `window`, regarder comment les autres s'en protègent.
+       *
+       * Le test des modificateurs vaut la peine aussi : sans lui, Ctrl+0
+       * déclenchait le zoom de la leçon ET empêchait le navigateur de remettre
+       * son propre zoom à 100 %.
+       *
+       * Échappe aussi à la règle : Échap, volontairement. Dans un champ de
+       * texte, Échap appartient au champ ; on ne quitte pas la projection parce
+       * qu'on annule une saisie. Le bouton ✕ reste là pour sortir. */
+      const t = e.target;
+      const tag = t && t.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (t && t.isContentEditable)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+
       switch (e.key) {
         case "Escape": doExit(); break;
         case "PageDown": case "ArrowDown": case "ArrowRight": e.preventDefault(); doScroll(1); break;
