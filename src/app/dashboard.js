@@ -2966,7 +2966,10 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // Ce qu'on affiche sous le bouton : un échec, ou « parti dans la file ».
   // Il n'existait rien — c'est pour ça qu'un enregistrement raté ne disait rien.
   const [fbErr, setFbErr] = useState("");
-  const [fbFile, setFbFile] = useState(false);
+  // Le texte du bandeau « c'est gardé, ça partira tout seul ». Une chaîne et
+  // non un booléen : la raison change (hors ligne / connexion tombée / session
+  // expirée) et l'enseignante doit lire laquelle, pas un message passe-partout.
+  const [fbFile, setFbFile] = useState("");
 
   // Calendar state
   const [selectedUnit, setSelectedUnit] = useState(1);
@@ -4694,7 +4697,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     setFbRating(existing?.rating || 0);
     setFbComment(existing?.comment || "");
     setFbErr("");
-    setFbFile(false);
+    setFbFile("");
     setFeedbackOpenFor(target);
   };
 
@@ -4735,7 +4738,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const horsLigne = typeof navigator !== "undefined" && !navigator.onLine;
     setFbSaving(true);
     setFbErr("");
-    setFbFile(false);
+    setFbFile("");
     const row = {
       teacher_id: teacher?.id,
       lesson_id: currentLesson.id,
@@ -4753,10 +4756,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         await enqueue(existing
           ? { kind: "feedback", table: "lesson_feedback", op: "update", payload: row, match: { id: existing.id } }
           : { kind: "feedback", table: "lesson_feedback", op: "insert", payload: row });
-        await refreshPending();
+        // ⚠️ DANS SON PROPRE try. Une fois la mise en file FAITE, plus rien ne
+        // doit pouvoir rebasculer dans le `catch` plus bas : ce catch remet en
+        // file, et on écrirait deux fois le même retour.
+        try { await refreshPending(); } catch (_) {}
         // On garde le volet ouvert avec le texte : elle voit que c'est parti
         // dans la file, et elle n'a rien à retaper.
-        setFbFile(true);
+        setFbFile("Vous êtes hors ligne : votre retour est gardé et partira dès le retour du réseau. Rien à retaper.");
         return;
       }
       if (existing) {
@@ -4780,12 +4786,55 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       setFbRating(0);
       setFbComment("");
     } catch (e) {
-      // Un refus de politique ne se répare pas en réessayant ; une panne
-      // réseau, si. Même distinction que dans la boîte de dialogue.
-      const refus = e?.code === "42501" || /row-level security|policy/i.test(String(e?.message || ""));
-      setFbErr(refus
-        ? "Ce compte n'a pas le droit d'enregistrer un retour sur cette leçon."
-        : "Enregistrement impossible pour le moment. Votre texte est conservé ci-dessus — réessayez dans un instant.");
+      /* 🔴 CE RATTRAPAGE VIENT DES JOURNAUX, PAS D'UNE SUPPOSITION.
+       *
+       * Les journaux de la passerelle, les 5 et 6 octobre : AUCUN POST sur
+       * `lesson_feedback` depuis Douala. Pas un refusé — aucun. La requête de
+       * Mme Batam n'est jamais partie de sa machine. Un message « réessayez
+       * dans un instant » n'aurait donc rien sauvé : elle est devant sa classe,
+       * elle ne réessaiera pas.
+       *
+       * ⚠️ `navigator.onLine` ne suffit pas et c'est le piège : il dit
+       * seulement que la carte réseau est branchée. Au Wi-Fi de l'école il vaut
+       * VRAI alors qu'aucun paquet ne sort. Le test en haut de la fonction
+       * laisse donc passer le cas le plus fréquent de l'école — et c'est ici
+       * qu'on le récupère.
+       *
+       * ⚠️ On lit la session AVANT de conclure à un refus de droits. Vu en
+       * production le 2026-10-06 : un POST parti avec le rôle « anon » (la clé
+       * publique au lieu du jeton de la personne) — PostgREST répond 42501,
+       * qui ressemble à un refus de politique alors que c'est une session
+       * perdue. Accuser le compte serait faux, et enverrait chercher un
+       * problème de droits qui n'existe pas.
+       *
+       * Un vrai refus de politique est le SEUL cas qu'on ne met pas en file :
+       * le rejouer échouerait à l'identique, indéfiniment. */
+      const msg = String(e?.message || "");
+      let session = null;
+      try {
+        const { data } = await supabase.auth.getSession();
+        session = data?.session || null;
+      } catch (_) { /* on ne saura pas : on traitera ça comme un incident */ }
+      const refus = !!session && (e?.code === "42501" || /row-level security|policy/i.test(msg));
+      if (refus) {
+        setFbErr("Ce compte n'a pas le droit d'enregistrer un retour sur cette leçon.");
+      } else {
+        try {
+          await enqueue(existing
+            ? { kind: "feedback", table: "lesson_feedback", op: "update", payload: row, match: { id: existing.id } }
+            : { kind: "feedback", table: "lesson_feedback", op: "insert", payload: row });
+          // Même raison qu'au-dessus : la file est déjà servie, un incident
+          // d'affichage ne doit pas faire croire à un échec d'enregistrement.
+          try { await refreshPending(); } catch (_) {}
+          setFbFile(session
+            ? "La connexion a lâché en route : votre retour est gardé et partira tout seul dès que la plateforme sera joignable. Rien à retaper."
+            : "Votre session a expiré : votre retour est gardé. Reconnectez-vous et il partira tout seul. Rien à retaper.");
+        } catch (_) {
+          // La file elle-même a refusé (navigateur sans stockage, mode privé).
+          // Dernier recours : on garde le texte à l'écran et on le dit.
+          setFbErr("Enregistrement impossible pour le moment. Votre texte est conservé ci-dessus — ne fermez pas cette fenêtre et réessayez dans un instant.");
+        }
+      }
     } finally {
       // Dans un `finally` : c'est ce qui manquait pour que le bouton ne reste
       // pas bloqué sur « Envoi… » après une coupure.
@@ -4849,10 +4898,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               marginTop: 10, padding: "9px 11px", borderRadius: 8,
               background: "#EFF6FF", border: "1px solid #BFDBFE",
               color: "#1E40AF", fontSize: "var(--ec-fs-2)", lineHeight: 1.5,
-            }}>
-              Vous êtes hors ligne : votre retour est gardé et partira dès le
-              retour du réseau. Rien à retaper.
-            </div>
+            }}>{fbFile}</div>
           )}
         </div>
       );
