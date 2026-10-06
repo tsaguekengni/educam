@@ -154,6 +154,25 @@ const SECTION_TYPES = [
   { id: "bilan", name: "Bilan — À recopier", icon: "📋" },
 ];
 
+/* RETOURS DE MME BATAM — 2026-10-06 (journée de classe du 2026-10-06)
+ * 1) Les exercices ne se font PAS en classe (ils ne passent pas au
+ *    projecteur) : la section s'appelle désormais, à l'écran, « Exercices à
+ *    faire à la maison » — pour l'élève et le parent qui révisent. Fait à
+ *    l'AFFICHAGE : les leçons gardent le titre « Exercices » en base et dans
+ *    les SQL (un ré-upload ne le ramène donc pas). L'éditeur montre toujours
+ *    le vrai titre.
+ * 2) Le quiz de préparation n'est pas utilisé par l'enseignante : il est
+ *    SUSPENDU (carte masquée, plus produit dans les nouvelles leçons). Les
+ *    questions restent en base ; remettre `true` fait revenir la carte. */
+const EXERCISE_SECTION_LABEL = "Exercices à faire à la maison";
+const SHOW_READINESS_QUIZ = false;
+
+// Titre d'une section tel qu'on l'affiche (lecteur, projecteur, plan).
+function sectionDisplayTitle(sec) {
+  if (sec?.section_type === "exercise") return EXERCISE_SECTION_LABEL;
+  return sec?.title;
+}
+
 const BLOCK_TYPES = [
   { id: "text", name: "Texte", icon: "📝" },
   { id: "image", name: "Image", icon: "🖼️" },
@@ -7475,7 +7494,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                     padding: "8px 13px", borderRadius: 999, minHeight: 40, whiteSpace: "nowrap",
                   }}
                 >
-                  {sec.title}
+                  {sectionDisplayTitle(sec)}
                 </button>
               ))}
             </div>
@@ -7530,7 +7549,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                   <span style={{ fontSize: "var(--ec-fs-5)", opacity: 0.7 }}>🔒</span>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: "var(--ec-fs-4)", fontWeight: 700, color: "#6B7280" }}>
-                      {section.icon} {section.title}
+                      {section.icon} {sectionDisplayTitle(section)}
                     </div>
                     <div style={{ fontSize: "var(--ec-fs-2)", color: "#9CA3AF", marginTop: 2, lineHeight: 1.5 }}>
                       Disponible une fois la leçon vue en classe.
@@ -7562,7 +7581,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                       background: accent + "1A", color: accent,
                       display: "grid", placeItems: "center", fontSize: "var(--ec-fs-4)",
                     }}>{section.icon}</span>
-                    <span style={{ fontSize: "var(--ec-fs-4)", fontWeight: 700, color: COLORS.ink }}>{section.title}</span>
+                    <span style={{ fontSize: "var(--ec-fs-4)", fontWeight: 700, color: COLORS.ink }}>{sectionDisplayTitle(section)}</span>
                   </span>
                   <span aria-hidden="true" style={{
                     transform: isOpen ? "rotate(180deg)" : "none",
@@ -7669,8 +7688,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           </div>
         )}
 
-        {/* Readiness status + quiz */}
-        {!isParent && (
+        {/* Readiness status + quiz — suspendu (SHOW_READINESS_QUIZ) */}
+        {SHOW_READINESS_QUIZ && !isParent && (
         <div style={{
           marginTop: 28, padding: "20px", borderRadius: 12,
           background: lessonPassed ? "#F0FDF4" : "#F5F3FF",
@@ -8078,7 +8097,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                     <span style={{ fontSize: `max(28px, ${baseFontVw * 1.3}vw)` }}>{section.icon}</span>
                     <span style={{
                       fontSize: `max(22px, ${baseFontVw * 1.2}vw)`, fontWeight: 800, color: "#111827"
-                    }}>{section.title}</span>
+                    }}>{sectionDisplayTitle(section)}</span>
                   </div>
 
                   {/* Blocks */}
@@ -8852,7 +8871,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                           {heroPlan.sections.map((sec, i) => (
                             <li key={i} style={{ display: "flex", gap: 9 }}>
                               <b style={{ color: COLORS.g600, flex: "none" }}>{i + 1}.</b>
-                              <span>{sec.title || "Section sans titre"}</span>
+                              <span>{sectionDisplayTitle(sec) || "Section sans titre"}</span>
                             </li>
                           ))}
                         </ol>
