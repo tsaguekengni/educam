@@ -118,6 +118,30 @@ const isBreak = (sid) => sid === "pause" || sid === "etude";
 const breakType = (sid, cid) => BREAK_TYPES.find((b) => b.subject_id === sid && b.component_id === cid);
 const slotTypeValue = (s) => (isBreak(s.subject_id) ? `brk:${s.subject_id}:${s.component_id}` : `subj:${s.subject_id}`);
 
+/* ── La LECTURE d'un emploi du temps, pour le référent et le directeur ──────
+ * Ajouté le 2026-10-07. `mapSlots` ne garde pas `subject_name` ni
+ * `component_name` : les libellés se rebâtissent donc depuis `SUBJECTS` et
+ * `BREAK_TYPES`, les mêmes tables que l'éditeur. Deux sources de libellés
+ * auraient divergé au premier renommage.
+ */
+const slotMinutes = (hhmm) => {
+  const [h, m] = String(hhmm || "").split(":").map(Number);
+  return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null;
+};
+const slotDuree = (s) => {
+  const a = slotMinutes(s.start_time), b = slotMinutes(s.end_time);
+  return a != null && b != null && b > a ? b - a : 0;
+};
+const slotLibelle = (s) => {
+  if (isBreak(s.subject_id)) return breakType(s.subject_id, s.component_id)?.name || "Pause";
+  return componentName(s.subject_id, s.component_id) || subjectById(s.subject_id)?.name || s.subject_id;
+};
+const slotMatiere = (s) => (isBreak(s.subject_id) ? "" : (subjectById(s.subject_id)?.name || ""));
+const dureeTexte = (min) => {
+  const h = Math.floor(min / 60), m = min % 60;
+  return h && m ? `${h} h ${String(m).padStart(2, "0")}` : h ? `${h} h` : `${m} min`;
+};
+
 // ⚠️ LE « CODE PARENTS » DE CLASSE A ÉTÉ RETIRÉ (2026-09-29, décision de Maxime).
 //
 // Il restait de la conception d'origine, où un seul code servait toute une
@@ -1099,14 +1123,128 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
               )}
             </Card>
 
-            {/* Emploi du temps */}
+            {/* ══════════════════════════════════════════════════════════════
+              * EMPLOI DU TEMPS — EN LECTURE pour la direction, MODIFIABLE pour
+              * Maxime seulement. 2026-10-07.
+              *
+              * Signalé par Maxime après que Serge (référent) lui a montré son
+              * écran : *« il entre dans gérer l'école, il choisit la classe, il
+              * ne voit que la liste des élèves et la MODIFICATION de l'emploi du
+              * temps — une fonction qu'il ne devrait pas avoir. Il doit pouvoir
+              * entrer dans une classe et avoir une VUE de son emploi du temps. »*
+              *
+              * 🔴 Deux défauts d'un coup, et le second était un vrai droit en
+              * trop : cette section n'était PAS protégée par `asAdmin` alors que
+              * tout le reste de l'écran l'est (réglages de classe, ajout d'élève,
+              * coordonnées). La décision du projet est écrite depuis le
+              * 2026-10-01 — *« qui édite : l'enseignante, et elle seule ; les
+              * autres sont lecteurs ; Maxime garde un droit de secours »* — et
+              * cet écran la contredisait en silence.
+              *
+              * ⚠️ Et c'est précisément CET éditeur qui a produit le pire défaut
+              * du chantier : le 2026-10-03, un férié posé d'ici a fermé TOUS les
+              * lundis de l'année. Le fermer à la direction, c'est aussi retirer
+              * la main qui a glissé.
+              *
+              * ⭐ Un écran qui n'offre que d'ÉCRIRE là où l'on venait LIRE force
+              * l'utilisateur à entrer en modification pour se renseigner — c'est
+              * la même erreur que celle corrigée le 2026-10-02 côté enseignante,
+              * dans l'autre sens.
+              * ══════════════════════════════════════════════════════════════ */}
             <Card className="ec-c12">
               <div className="ec-cardhd">
                 <h2 className="ec-cardtitle">Emploi du temps</h2>
-                <button className="ec-more ec-link" style={{ textDecoration: "none" }} onClick={adoptStandard}>
-                  Charger l'emploi du temps standard
-                </button>
+                {asAdmin ? (
+                  <button className="ec-more ec-link" style={{ textDecoration: "none" }} onClick={adoptStandard}>
+                    Charger l'emploi du temps standard
+                  </button>
+                ) : (
+                  <span style={{ fontSize: FONT.sm, color: COLORS.ink3, fontWeight: 600 }}>
+                    Lecture seule — seul(e) l'enseignant(e) modifie son emploi du temps
+                  </span>
+                )}
               </div>
+
+              {!asAdmin ? (
+                /* ── LA VUE DE LECTURE ─────────────────────────────────────
+                   Les cinq jours côte à côte, triés par heure. `ec-edt-jours`
+                   est la grille de l'écran enseignante : 1 colonne, puis 2 à
+                   700 px, puis **5 explicitement** à 1100 px.
+                   ⚠️ Volontairement PAS un `auto-fit` : c'est lui qui, le
+                   2026-10-05, faisait repartir le vendredi seul à la ligne
+                   faute d'une vingtaine de pixels. **Une semaine a cinq jours :
+                   c'est un fait à écrire, pas une largeur à déduire.** */
+                <div className="ec-edt-jours" style={{ marginTop: 4 }}>
+                  {[1, 2, 3, 4, 5].map((day) => {
+                    const daySlots = slots
+                      .filter((s) => s.day_of_week === day)
+                      .slice()
+                      .sort((a, b) => (slotMinutes(a.start_time) || 0) - (slotMinutes(b.start_time) || 0));
+                    const totalLecons = daySlots.filter((s) => !isBreak(s.subject_id)).length;
+                    const totalMin = daySlots.reduce((n, s) => n + slotDuree(s), 0);
+                    return (
+                      <div key={day} style={{
+                        border: `1px solid ${COLORS.border}`, borderRadius: 10,
+                        overflow: "hidden", background: COLORS.card,
+                      }}>
+                        <div style={{
+                          padding: "9px 12px", background: COLORS.panel,
+                          borderBottom: `1px solid ${COLORS.divider}`,
+                          fontSize: "var(--ec-fs-2)", fontWeight: 800, color: COLORS.ink,
+                        }}>
+                          {DAY_NAMES[day]}
+                        </div>
+                        <div style={{ padding: "6px 0" }}>
+                          {daySlots.length === 0 ? (
+                            <div style={{ padding: "10px 12px", fontSize: FONT.sm, color: COLORS.ink3 }}>
+                              Aucun créneau.
+                            </div>
+                          ) : daySlots.map((s, k) => {
+                            const pause = isBreak(s.subject_id);
+                            return (
+                              <div key={`${day}-${k}`} style={{
+                                display: "flex", gap: 8, alignItems: "baseline",
+                                padding: "5px 12px", background: pause ? COLORS.panel : undefined,
+                              }}>
+                                <span style={{
+                                  fontSize: "var(--ec-fs-1)", fontWeight: 700, color: COLORS.ink3,
+                                  minWidth: 38, fontVariantNumeric: "tabular-nums",
+                                }}>
+                                  {String(s.start_time || "").slice(0, 5)}
+                                </span>
+                                <span style={{ minWidth: 0 }}>
+                                  <span style={{
+                                    display: "block", fontSize: "var(--ec-fs-2)",
+                                    fontWeight: pause ? 600 : 700,
+                                    color: pause ? COLORS.ink3 : COLORS.ink,
+                                  }}>
+                                    {slotLibelle(s)}
+                                  </span>
+                                  {/* La matière n'est rappelée que si elle ajoute
+                                      quelque chose au libellé de la sous-matière. */}
+                                  {slotMatiere(s) && slotMatiere(s) !== slotLibelle(s) && (
+                                    <span style={{ display: "block", fontSize: FONT.xs, color: COLORS.ink3 }}>
+                                      {slotMatiere(s)}
+                                    </span>
+                                  )}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        {daySlots.length > 0 && (
+                          <div style={{
+                            padding: "7px 12px", borderTop: `1px solid ${COLORS.divider}`,
+                            fontSize: FONT.xs, color: COLORS.ink3, fontWeight: 600,
+                          }}>
+                            {totalLecons} leçon{totalLecons > 1 ? "s" : ""} · {dureeTexte(totalMin)}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
               <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(min(320px, 100%), 1fr))" }}>
                 {[1, 2, 3, 4, 5].map((day) => {
                   const daySlots = slots.map((s, i) => ({ ...s, __i: i })).filter((s) => s.day_of_week === day);
@@ -1181,6 +1319,7 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
                   );
                 })}
               </div>
+              )}
             </Card>
 
             {/* Barre d'enregistrement */}
@@ -1197,9 +1336,17 @@ export default function SchoolAdmin({ school, onBack, asAdmin = false }) {
                 </div>
               )}
               <div style={{ display: "flex", gap: 10 }}>
-                <Button onClick={save} disabled={saving || !online}>
-                  {saving ? "Enregistrement…" : !online ? "Enregistrer — hors connexion" : "Enregistrer"}
-                </Button>
+                {/* 🔴 « Enregistrer » n'existe que pour Maxime. Le laisser à la
+                    direction, c'est lui laisser réécrire l'emploi du temps d'une
+                    enseignante — et c'est par ce bouton que, le 2026-10-03, tous
+                    les lundis de l'année se sont retrouvés fériés.
+                    ⚠️ Le bouton de RETOUR, lui, reste pour tout le monde : sans
+                    lui, la direction serait enfermée dans la fiche de classe. */}
+                {asAdmin && (
+                  <Button onClick={save} disabled={saving || !online}>
+                    {saving ? "Enregistrement…" : !online ? "Enregistrer — hors connexion" : "Enregistrer"}
+                  </Button>
+                )}
                 <Button variant="ghost" onClick={() => setSelected(null)}>Retour aux classes</Button>
               </div>
             </div>
