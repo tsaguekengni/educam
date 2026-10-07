@@ -3101,6 +3101,28 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [calVue, setCalVue] = useState("jour");     // "jour" | "semaine"
   const [calBrut, setCalBrut] = useState([]);       // lignes NON fusionnées, toutes semaines à venir
 
+  /* ══════════════════════════════════════════════════════════════════════════
+   * LA CLASSE CONSULTÉE — direction et référent, 2026-10-07.
+   *
+   * 🔴 Demande de Maxime, après Serge (référent) : *« il doit voir les
+   * classes, et quand il choisit la classe, il voit l'emploi du temps de
+   * celle-ci. Pareillement que l'enseignante. Mais en read only. »*
+   *
+   * Pourquoi il le fallait, mesuré : la direction et le référent n'ont pas de
+   * classe. `fetchTimetable` n'avait donc pour eux ni la branche parent ni la
+   * branche « ma classe » — il TOMBAIT sur le repli par NIVEAU, qui additionne
+   * les créneaux de TOUTES les classes du niveau sans filtre de propriétaire.
+   * C'est exactement l'écran à « 117 créneaux par semaine » du 3 octobre.
+   * Et Serge, lui, portait 55 créneaux à son propre nom (copie du modèle de
+   * niveau) : il voyait donc « son » emploi du temps, jamais celui d'une classe.
+   *
+   * ⚠️ `null` = aucune classe choisie → on montre la LISTE DES CLASSES, et
+   * `fetchTimetable` ne charge RIEN. Un repli par niveau ici serait un chiffre
+   * faux présenté comme un emploi du temps.
+   * ══════════════════════════════════════════════════════════════════════════ */
+  const [edtClasses, setEdtClasses] = useState(null);     // null = pas encore lu
+  const [edtClasseVue, setEdtClasseVue] = useState(null); // la classe consultée
+
   // Programme state
   const [selectedSubject, setSelectedSubject] = useState(null);
   const [selectedComponent, setSelectedComponent] = useState(null);
@@ -3472,13 +3494,37 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     return () => { cancelled = true; };
   }, [teacher?.id, isParent, isAdmin]);
 
+  /* ---- Les classes de l'école, pour la direction et le référent ------------
+     Même règle qu'en « Gérer l'école » : une classe est un ENSEIGNANT. Les
+     comptes administration / direction / référent sont du personnel, pas une
+     classe — les laisser dans la liste proposerait de consulter l'emploi du
+     temps de Serge lui-même, qui est précisément le défaut qu'on corrige. */
+  useEffect(() => {
+    if (!PROFILES_ENABLED || !isSchoolAdmin || !teacher?.school_id) {
+      setEdtClasses(null); return;
+    }
+    let cancelled = false;
+    (async () => {
+      const data = await cachedQuery("edt_classes_" + teacher.school_id, () =>
+        supabase.from("teachers").select("id, full_name, level, class_label, role")
+          .eq("school_id", teacher.school_id).order("full_name"));
+      if (cancelled) return;
+      setEdtClasses((data || []).filter((t) =>
+        t.role !== "admin" && t.role !== "school_admin" && t.role !== "referent"));
+    })();
+    return () => { cancelled = true; };
+  }, [isSchoolAdmin, teacher?.school_id]);
+
   useEffect(() => {
     let cancelled = false;
     setLoadingData(true);
     Promise.all([fetchTimetable(), fetchTimetableBrut(), fetchTopics(), fetchAllLessons(), fetchCoverage()])
       .finally(() => { if (!cancelled) setLoadingData(false); });
     return () => { cancelled = true; };
-  }, [selectedLevel, parentStudent?.teacher_id]);
+    /* ⚠️ `edtClasseVue?.id` EST une dépendance : sans elle, la direction
+       choisissait une classe et l'écran gardait les créneaux de la
+       précédente — ou restait vide. */
+  }, [selectedLevel, parentStudent?.teacher_id, edtClasseVue?.id]);
 
   useEffect(() => {
     if (!OFFLINE_ENABLED || typeof navigator === "undefined") return;
@@ -3524,26 +3570,47 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       window.removeEventListener("offline", off);
       window.removeEventListener("educam:queued", refreshPending);
     };
-  }, [selectedLevel]);
+    // `edtClasseVue?.id` : sinon le retour du réseau rechargeait la classe
+    // consultée AU MOMENT DE L'ABONNEMENT, pas celle affichée.
+  }, [selectedLevel, edtClasseVue?.id]);
+
+  /* ─── DE QUI EST L'EMPLOI DU TEMPS AFFICHÉ ? ───────────────────────────────
+     Une seule réponse, lue par les DEUX chargements (fusionné et brut) et par
+     l'écran. Les deux la calculaient séparément auparavant, et c'est ainsi
+     qu'elles ont divergé.
+
+       · parent     → la classe de son enfant ;
+       · direction / référent → la CLASSE CHOISIE, et rien tant qu'aucune ne
+         l'est (voir `edtClasseVue`) ;
+       · enseignante → sa propre classe ;
+       · hors mode profils → `null`, c'est-à-dire l'emploi du temps de niveau.
+
+     ⚠️ Pas une `const` dérivée mais une FONCTION : `CalendarView` est appelé,
+     pas monté, et ces chargements sont appelés depuis des effets. Une fonction
+     lit l'état au moment de l'appel, sans ajouter de hook. */
+  const edtOwnerAffiche = () => {
+    if (isParent) return parentStudent?.teacher_id || null;
+    if (isSchoolAdmin) return edtClasseVue?.id || null;
+    return (PROFILES_ENABLED && teacher?.school_id && teacher?.id) ? teacher.id : null;
+  };
 
   const fetchTimetable = async () => {
     // Profiles mode: a teacher reads their OWN class timetable; a parent reads
     // their CHILD's class timetable; otherwise the shared level timetable.
-    const parentTeacherId = isParent ? parentStudent?.teacher_id : null;
-    const usePerClass = PROFILES_ENABLED && teacher?.school_id && teacher?.id;
+    const ownerId = edtOwnerAffiche();
     let key, run;
-    if (parentTeacherId) {
-      key = "timetable_owner_" + parentTeacherId + "_" + edtLundiIso(new Date());
+    if (ownerId) {
+      key = "timetable_owner_" + ownerId + "_" + edtLundiIso(new Date());
       run = () => supabase.from("timetable_slots").select("*")
-        .eq("owner_teacher_id", parentTeacherId)
+        .eq("owner_teacher_id", ownerId)
         .or(`week_start.is.null,week_start.eq.${edtLundiIso(new Date())}`)
         .order("day_of_week").order("slot_order");
-    } else if (usePerClass) {
-      key = "timetable_owner_" + teacher.id + "_" + edtLundiIso(new Date());
-      run = () => supabase.from("timetable_slots").select("*")
-        .eq("owner_teacher_id", teacher.id)
-        .or(`week_start.is.null,week_start.eq.${edtLundiIso(new Date())}`)
-        .order("day_of_week").order("slot_order");
+    } else if (isSchoolAdmin) {
+      /* 🔴 AUCUNE CLASSE CHOISIE : ON NE CHARGE RIEN. Le repli par niveau
+         qui se trouvait ici additionnait les créneaux de toutes les classes
+         du niveau — l'écran à « 117 créneaux » du 3 octobre. Un chiffre faux
+         présenté comme un emploi du temps est pire qu'un écran vide. */
+      setTimetable([]); return;
     } else {
       key = "timetable_" + selectedLevel.id;
       run = () => supabase.from("timetable_slots").select("*")
@@ -3575,9 +3642,9 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
      Le filtre borne aussi la taille : les exceptions passées sont mortes et
      n'ont aucune raison de voyager. */
   const fetchTimetableBrut = async () => {
-    const parentTeacherId = isParent ? parentStudent?.teacher_id : null;
-    const ownerId = parentTeacherId || ((PROFILES_ENABLED && teacher?.school_id && teacher?.id) ? teacher.id : null);
+    const ownerId = edtOwnerAffiche();
     const lundi = edtLundiIso(new Date());
+    if (!ownerId && isSchoolAdmin) { setCalBrut([]); return; } // cf. `fetchTimetable`
     if (!ownerId) {
       // Emploi du temps partagé par niveau : il ne porte aucune exception de
       // semaine, donc le brut et le fusionné sont la même chose.
@@ -4786,6 +4853,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // taught on Monday and synced on Thursday would be recorded as Thursday.
   const toggleTaught = async () => {
     if (!teacher?.id || !currentLesson) return;
+    /* 🔴 LECTURE SEULE POUR LA DIRECTION, LE RÉFÉRENT ET L'ADMINISTRATION —
+       2026-10-07. Le bouton leur est masqué (trois endroits : barre d'actions,
+       surcouche de projection, barre « leçon projetée »), mais le verrou est
+       ICI : la file hors ligne rejoue des écritures, et un bouton caché n'est
+       pas une règle. Marquer « enseignée » depuis un compte de direction
+       écrivait dans `lessons_taught` SOUS SON PROPRE identifiant — donc ni
+       dans le relevé de la classe consultée, ni visible pour ses parents.
+       Un bouton qui n'enregistre pas ce qu'il annonce est un mensonge. */
+    if (isSchoolAdmin || isAdmin) return;
     const offlineNow = typeof navigator !== "undefined" && !navigator.onLine;
     setTaughtSaving(true);
     try {
@@ -5982,6 +6058,62 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // ============ CALENDAR VIEW ============
   const CalendarView = () => {
     /* ══════════════════════════════════════════════════════════════════════
+     * DIRECTION ET RÉFÉRENT : D'ABORD LA CLASSE — 2026-10-07.
+     *
+     * Ils n'ont pas de classe à eux. Tant qu'aucune n'est choisie, cet écran
+     * est la LISTE DES CLASSES ; une fois l'une choisie, c'est exactement
+     * l'écran de l'enseignante, en lecture seule (aucun bouton de
+     * modification — voir plus bas, et `SchoolAdmin` pour la même règle en
+     * « Gérer l'école »).
+     *
+     * ⚠️ Retour possible à la liste à tout moment : sans ce chemin, Serge
+     * entrait dans une classe et n'avait plus que le menu pour en sortir.
+     * ⚠️ Aucun hook ici : ce composant est APPELÉ, pas monté. Le retour
+     * anticipé est donc sans danger — il n'y a pas d'ordre de hooks à tenir.
+     * ══════════════════════════════════════════════════════════════════════ */
+    if (isSchoolAdmin && !edtClasseVue) {
+      return (
+        <div>
+          <h1 className="ec-h1">Emploi du temps</h1>
+          <p className="ec-sub">
+            Choisissez une classe pour consulter son emploi du temps — en lecture seule.
+          </p>
+          {edtClasses === null ? (
+            <div style={{ marginTop: 18 }}><SkeletonRows rows={4} /></div>
+          ) : edtClasses.length === 0 ? (
+            <Card style={{ marginTop: 18 }}>
+              <EmptyState icon="▤" title="Aucune classe dans cette école">
+                Une classe apparaît ici dès qu'un enseignant est rattaché à l'école.
+              </EmptyState>
+            </Card>
+          ) : (
+            <div style={{ display: "grid", gap: 8, marginTop: 18 }}>
+              {edtClasses.map((c) => {
+                const niv = LEVELS.find((l) => l.id === c.level);
+                return (
+                  <ListRow
+                    key={c.id}
+                    icon="▤"
+                    title={c.class_label || niv?.name || "Classe"}
+                    meta={[niv?.name, c.full_name].filter(Boolean).join(" · ")}
+                    onClick={() => {
+                      /* La semaine consultée repart sur la semaine en cours :
+                         garder le lundi de la classe précédente ferait lire
+                         une autre classe à une autre date. */
+                      setCalLundi(null);
+                      if (niv) setSelectedLevel(niv);
+                      setEdtClasseVue(c);
+                    }}
+                  />
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ══════════════════════════════════════════════════════════════════════
      * 🔴 UNE SEULE COMMANDE DE TEMPS SUR CET ÉCRAN — 2026-10-05.
      *
      * Retour de Mme Batam, par Maxime : *« la barre "semaine du" commence sur
@@ -6046,9 +6178,24 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             <p className="ec-sub">
               {isParent
                 ? `${selectedLevel.name}${parentStudent?.full_name ? " · " + parentStudent.full_name : ""} — les leçons à venir restent verrouillées`
-                : `${selectedLevel.name} — ${selectedLevel.full}`}
+                : isSchoolAdmin
+                  /* On NOMME la classe consultée et on NOMME la lecture seule.
+                     Sans le nom, la direction ne sait pas de quelle classe est
+                     l'écran qu'elle regarde ; sans « lecture seule », elle
+                     cherche un bouton de modification qui n'existe pas. */
+                  ? `${edtClasseVue?.class_label || selectedLevel.name}${edtClasseVue?.full_name ? " · " + edtClasseVue.full_name : ""} — lecture seule`
+                  : `${selectedLevel.name} — ${selectedLevel.full}`}
             </p>
           </div>
+          {isSchoolAdmin && (
+            <button
+              type="button"
+              className="ec-btn ec-btn--ghost"
+              onClick={() => { setEdtClasseVue(null); setCalLundi(null); }}
+            >
+              Changer de classe
+            </button>
+          )}
           {!isParent && !isAdmin && !isSchoolAdmin && (
             <button
               type="button"
@@ -6057,7 +6204,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             >
               Modifier mon emploi du temps
             </button>
-          )}          {!isParent && (
+          )}          {/* ⚠️ PAS de sélecteur de niveau pour la direction : le niveau est
+              celui de la CLASSE consultée. Deux commandes — la classe et le
+              niveau — pouvaient se contredire, et un niveau choisi à la main
+              aurait affiché le programme d'un autre niveau sur les créneaux de
+              cette classe. Même leçon que les onglets « mois / semaine »
+              retirés le 5 octobre. */}
+          {!isParent && !isSchoolAdmin && (
             <div>
               <label htmlFor="ec-cal-level" className="ec-sr">Niveau</label>
               <select
@@ -6127,7 +6280,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           </div>
           <div style={{ flex: "1 1 400px", minWidth: 0, display: "flex", flexDirection: "column" }}>
         {/* ---- Téléchargement hors ligne ---- */}
-        {OFFLINE_ENABLED && !isParent && (
+        {/* ⚠️ `!isSchoolAdmin` : « Télécharger les leçons de la semaine » met en
+            cache les leçons POUR SOI, hors ligne. La direction qui consulte la
+            classe d'autrui n'a rien à télécharger — et ce bouton lui aurait
+            promis une préparation de cours qui n'est pas la sienne. */}
+        {OFFLINE_ENABLED && !isParent && !isSchoolAdmin && (
           <Card style={{ marginTop: 0 }}>
             <CardLabel>Hors ligne</CardLabel>
             {weekIds.length === 0 ? (
@@ -7509,7 +7666,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           display: "flex", gap: 8, justifyContent: "center",
         }}>
           <div style={{ display: "flex", gap: 8, width: "100%", maxWidth: 620 }}>
-            {!isParent && (
+            {/* `!isSchoolAdmin && !isAdmin` : cf. le verrou dans `toggleTaught`. */}
+            {!isParent && !isSchoolAdmin && !isAdmin && (
               <Button
                 onClick={toggleTaught}
                 disabled={taughtSaving}
@@ -8007,7 +8165,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             sur un second écran, les commandes vivent dans la barre verte du
             portable ; rien ne doit flotter devant la classe. En projection sur
             le MÊME écran, il n'y a pas de barre — on les garde ici. */}
-        {!isParent && !isPresentWindow && (
+        {!isParent && !isSchoolAdmin && !isAdmin && !isPresentWindow && (
           <div style={{
             position: "fixed", bottom: 20, left: 24, zIndex: 10000,
             background: "rgba(0,0,0,0.7)", borderRadius: 12, padding: 6,
@@ -8246,6 +8404,10 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           {presented && currentLesson?.id === presented.id ? (
             <>
               <span style={{ fontSize: 12, opacity: .85, flex: 1, minWidth: 110 }}>Vous pouvez continuer sur la plateforme ; la classe voit la leçon au tableau.</span>
+              {/* Le bouton seul disparaît pour la direction, le référent et
+                  l'administration — pas la phrase ci-dessus, qui reste vraie
+                  pour eux. Cf. le verrou dans `toggleTaught`. */}
+              {!isSchoolAdmin && !isAdmin && (
               <button
                 onClick={toggleTaught}
                 disabled={taughtSaving}
@@ -8258,6 +8420,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               >
                 {taughtSaving ? "…" : lessonTaught ? "✓ Enseignée" : "Marquer enseignée"}
               </button>
+              )}
             </>
           ) : (
             <span style={{ fontSize: 12, opacity: .85, flex: 1, minWidth: 140 }}>
