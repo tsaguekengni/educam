@@ -3122,6 +3122,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
    * ══════════════════════════════════════════════════════════════════════════ */
   const [edtClasses, setEdtClasses] = useState(null);     // null = pas encore lu
   const [edtClasseVue, setEdtClasseVue] = useState(null); // la classe consultée
+  /* 🔴 ET POUR L'ADMINISTRATION, UNE MARCHE DE PLUS — 2026-10-07.
+     Demande de Maxime : *« j'aimerais que moi aussi ma fenêtre emploi du temps
+     soit comme pour les directeurs et référents, mais là je sélectionne
+     l'école, la classe, et je vois l'emploi du temps de la maîtresse. »*
+     Le technicien n'a pas d'école : son chemin est donc ÉCOLE → CLASSE →
+     emploi du temps. Même défaut corrigé que pour le référent — sans école
+     choisie, sa fenêtre tombait aussi sur le repli par NIVEAU. */
+  const [edtEcoles, setEdtEcoles] = useState(null);       // administration : les écoles
+  const [edtEcoleVue, setEdtEcoleVue] = useState(null);   // administration : l'école choisie
 
   // Programme state
   const [selectedSubject, setSelectedSubject] = useState(null);
@@ -3500,20 +3509,40 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
      classe — les laisser dans la liste proposerait de consulter l'emploi du
      temps de Serge lui-même, qui est précisément le défaut qu'on corrige. */
   useEffect(() => {
-    if (!PROFILES_ENABLED || !isSchoolAdmin || !teacher?.school_id) {
-      setEdtClasses(null); return;
-    }
+    /* L'école dont on liste les classes : la sienne pour la direction et le
+       référent, CELLE QU'IL A CHOISIE pour le technicien. */
+    const ecoleId = isAdmin ? (edtEcoleVue?.id || null)
+      : isSchoolAdmin ? (teacher?.school_id || null) : null;
+    if (!PROFILES_ENABLED || !ecoleId) { setEdtClasses(null); return; }
     let cancelled = false;
     (async () => {
-      const data = await cachedQuery("edt_classes_" + teacher.school_id, () =>
+      const data = await cachedQuery("edt_classes_" + ecoleId, () =>
         supabase.from("teachers").select("id, full_name, level, class_label, role")
-          .eq("school_id", teacher.school_id).order("full_name"));
+          .eq("school_id", ecoleId).order("full_name"));
       if (cancelled) return;
       setEdtClasses((data || []).filter((t) =>
         t.role !== "admin" && t.role !== "school_admin" && t.role !== "referent"));
     })();
     return () => { cancelled = true; };
-  }, [isSchoolAdmin, teacher?.school_id]);
+  }, [isAdmin, isSchoolAdmin, teacher?.school_id, edtEcoleVue?.id]);
+
+  /* ---- Les écoles, pour le technicien seul -------------------------------
+     ⚠️ Une requête à part, et NON la liste de la console « Écoles »
+     (`loadAdminSchools`) : celle-là ne se charge qu'au clic sur son écran, ne
+     passe pas par le cache, et ne porte ni `level` ni `class_label`. S'y
+     appuyer rendrait cette fenêtre vide tant qu'il n'est pas passé par
+     l'autre écran — une dépendance invisible entre deux écrans. */
+  useEffect(() => {
+    if (!PROFILES_ENABLED || !isAdmin) { setEdtEcoles(null); return; }
+    let cancelled = false;
+    (async () => {
+      const data = await cachedQuery("edt_ecoles", () =>
+        supabase.from("schools").select("id, name, region").order("name"));
+      if (cancelled) return;
+      setEdtEcoles(data || []);
+    })();
+    return () => { cancelled = true; };
+  }, [isAdmin]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3590,9 +3619,14 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
      lit l'état au moment de l'appel, sans ajouter de hook. */
   const edtOwnerAffiche = () => {
     if (isParent) return parentStudent?.teacher_id || null;
-    if (isSchoolAdmin) return edtClasseVue?.id || null;
+    if (isSchoolAdmin || (PROFILES_ENABLED && isAdmin)) return edtClasseVue?.id || null;
     return (PROFILES_ENABLED && teacher?.school_id && teacher?.id) ? teacher.id : null;
   };
+  /* Qui passe par le chemin « choisir une classe, puis lire » : la direction,
+     le référent et le technicien. Une seule expression, lue par les deux
+     chargements ET par l'écran — c'est de les avoir séparées que venait le
+     défaut n°16. */
+  const edtChoisitUneClasse = isSchoolAdmin || (PROFILES_ENABLED && isAdmin);
 
   const fetchTimetable = async () => {
     // Profiles mode: a teacher reads their OWN class timetable; a parent reads
@@ -3605,7 +3639,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         .eq("owner_teacher_id", ownerId)
         .or(`week_start.is.null,week_start.eq.${edtLundiIso(new Date())}`)
         .order("day_of_week").order("slot_order");
-    } else if (isSchoolAdmin) {
+    } else if (edtChoisitUneClasse) {
       /* 🔴 AUCUNE CLASSE CHOISIE : ON NE CHARGE RIEN. Le repli par niveau
          qui se trouvait ici additionnait les créneaux de toutes les classes
          du niveau — l'écran à « 117 créneaux » du 3 octobre. Un chiffre faux
@@ -3644,7 +3678,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const fetchTimetableBrut = async () => {
     const ownerId = edtOwnerAffiche();
     const lundi = edtLundiIso(new Date());
-    if (!ownerId && isSchoolAdmin) { setCalBrut([]); return; } // cf. `fetchTimetable`
+    if (!ownerId && edtChoisitUneClasse) { setCalBrut([]); return; } // cf. `fetchTimetable`
     if (!ownerId) {
       // Emploi du temps partagé par niveau : il ne porte aucune exception de
       // semaine, donc le brut et le fusionné sont la même chose.
@@ -3686,20 +3720,30 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const data = await cachedQuery("lessons_v2_" + selectedLevel.id, () =>
       supabase.from("lessons").select("id, subject_id, component_id, level, unit_number, week_number, title, objective")
         .eq("level", selectedLevel.id));
-    // Enrich each lesson with its "taught" state, keyed on the TEACHER OF RECORD
-    // for the class being viewed — the exact same owner the timetable itself is
-    // keyed on above (parent → their child's class teacher; everyone else → the
-    // teacher whose class this is: yourself if you're the teacher, or the teacher
-    // a school-admin / superadmin entered via "act as"). Keying on the owner (not
-    // the whole school, and not the viewer's own id) means a school with two
-    // classes of the same level shows each class's own taught progress — no
-    // merge — because each class has a different owner_teacher_id. RLS still
-    // scopes the read: a teacher may read own marks, a parent their child's
-    // teacher's, an admin anyone's. Live query; offline it fails soft and
-    // everything reads as not taught, which is acceptable.
-    const ownerTeacherId = isParent
-      ? (parentStudent?.teacher_id || null)
-      : (teacher?.id || null);
+    /* 🔴 LE PROPRIÉTAIRE VIENT DE `edtOwnerAffiche()` DEPUIS LE 2026-10-07 —
+       c'était la DEUXIÈME moitié du défaut n°16, et elle n'avait pas été vue.
+       Ce calcul était `isParent ? la classe de l'enfant : teacher?.id`, et le
+       commentaire d'alors affirmait que pour la direction c'était « l'enseignant
+       dans la peau duquel elle est entrée » — vrai tant que le SEUL chemin
+       pour voir une autre classe était « Agir en tant que », qui remplace
+       `teacher`. Depuis que la direction et le technicien consultent une classe
+       EN LEUR PROPRE NOM, ce calcul rendait LEUR identifiant, qui ne porte
+       aucune ligne dans `lessons_taught`.
+       📏 Conséquence, pas une hypothèse : aucun ✓ nulle part, et surtout la
+       file d'attente — qui saute ce qui est `taught` — aurait servi la
+       PREMIÈRE leçon du mois sur chaque créneau. Un écran complet,
+       vraisemblable, et entièrement faux : exactement ce qu'on ne veut pas
+       montrer à la direction.
+       ⭐ Même leçon qu'au §6d : « de QUI est cette donnée ? » se répond UNE
+       fois. Le repli sur `teacher?.id` ne sert plus qu'au mode hors profils,
+       où `edtOwnerAffiche()` rend `null` par conception.
+       Garder à l'esprit : la clé est le PROPRIÉTAIRE de la classe, jamais
+       l'école — deux classes du même niveau ont deux propriétaires, donc deux
+       avancements distincts. La RLS borne la lecture (un enseignant ses
+       marques, un parent celles de l'enseignant de son enfant, un
+       administrateur toutes). Requête vive : hors ligne elle échoue en
+       douceur et tout se lit « non enseigné », ce qui est acceptable. */
+    const ownerTeacherId = edtOwnerAffiche() || (teacher?.id || null);
     /* 🔴 `taught_at` EST CHARGÉ DEPUIS LE 2026-10-06, et pas seulement le
        drapeau : sans la DATE, un créneau ne peut pas savoir si c'est LUI qui a
        servi cette leçon, ni quel jour. C'est la pièce qui manquait pour donner
@@ -6071,12 +6115,63 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
      * ⚠️ Aucun hook ici : ce composant est APPELÉ, pas monté. Le retour
      * anticipé est donc sans danger — il n'y a pas d'ordre de hooks à tenir.
      * ══════════════════════════════════════════════════════════════════════ */
-    if (isSchoolAdmin && !edtClasseVue) {
+    /* ÉTAPE 0, TECHNICIEN SEUL : l'école. Il n'en a pas, donc son chemin
+       compte une marche de plus que celui de la direction. */
+    if (PROFILES_ENABLED && isAdmin && !edtEcoleVue) {
       return (
         <div>
           <h1 className="ec-h1">Emploi du temps</h1>
           <p className="ec-sub">
-            Choisissez une classe pour consulter son emploi du temps — en lecture seule.
+            Choisissez une école, puis une classe — la consultation est en lecture seule.
+          </p>
+          {edtEcoles === null ? (
+            <div style={{ marginTop: 18 }}><SkeletonRows rows={4} /></div>
+          ) : edtEcoles.length === 0 ? (
+            <Card style={{ marginTop: 18 }}>
+              <EmptyState icon="⌗" title="Aucune école">
+                Les écoles se créent depuis la console « Écoles ».
+              </EmptyState>
+            </Card>
+          ) : (
+            <div style={{ display: "grid", gap: 8, marginTop: 18 }}>
+              {edtEcoles.map((e) => (
+                <ListRow
+                  key={e.id}
+                  icon="⌗"
+                  title={e.name || "École"}
+                  meta={e.region || ""}
+                  onClick={() => {
+                    /* On repart de zéro sur la classe ET sur la semaine :
+                       garder la classe d'une autre école afficherait son
+                       emploi du temps sous le nom de la nouvelle. */
+                    setEdtClasseVue(null);
+                    setCalLundi(null);
+                    setEdtEcoleVue(e);
+                  }}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    if (edtChoisitUneClasse && !edtClasseVue) {
+      return (
+        <div>
+          {/* Le technicien peut remonter à la liste des écoles ; la direction
+              n'en a qu'une, donc pas de fil d'Ariane pour elle. */}
+          {PROFILES_ENABLED && isAdmin && edtEcoleVue && (
+            <Breadcrumb items={[
+              { label: "Écoles", onClick: () => { setEdtEcoleVue(null); setEdtClasseVue(null); } },
+              { label: edtEcoleVue.name || "École" },
+            ]} />
+          )}
+          <h1 className="ec-h1">Emploi du temps</h1>
+          <p className="ec-sub">
+            {PROFILES_ENABLED && isAdmin && edtEcoleVue
+              ? `${edtEcoleVue.name} — choisissez une classe pour consulter son emploi du temps, en lecture seule.`
+              : "Choisissez une classe pour consulter son emploi du temps — en lecture seule."}
           </p>
           {edtClasses === null ? (
             <div style={{ marginTop: 18 }}><SkeletonRows rows={4} /></div>
@@ -6172,22 +6267,37 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
 
     return (
       <div>
+        {/* Le fil d'Ariane du technicien : deux marches derrière lui, donc deux
+            chemins de retour. La direction n'a qu'une école — rien à afficher. */}
+        {PROFILES_ENABLED && isAdmin && edtEcoleVue && (
+          <Breadcrumb items={[
+            { label: "Écoles", onClick: () => { setEdtEcoleVue(null); setEdtClasseVue(null); setCalLundi(null); } },
+            { label: edtEcoleVue.name || "École", onClick: () => { setEdtClasseVue(null); setCalLundi(null); } },
+            { label: edtClasseVue?.class_label || edtClasseVue?.full_name || "Classe" },
+          ]} />
+        )}
         <div style={{ display: "flex", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 200 }}>
             <h1 className="ec-h1">Emploi du temps</h1>
             <p className="ec-sub">
               {isParent
                 ? `${selectedLevel.name}${parentStudent?.full_name ? " · " + parentStudent.full_name : ""} — les leçons à venir restent verrouillées`
-                : isSchoolAdmin
+                : edtChoisitUneClasse
                   /* On NOMME la classe consultée et on NOMME la lecture seule.
                      Sans le nom, la direction ne sait pas de quelle classe est
                      l'écran qu'elle regarde ; sans « lecture seule », elle
-                     cherche un bouton de modification qui n'existe pas. */
-                  ? `${edtClasseVue?.class_label || selectedLevel.name}${edtClasseVue?.full_name ? " · " + edtClasseVue.full_name : ""} — lecture seule`
+                     cherche un bouton de modification qui n'existe pas.
+                     ⚠️ Pour le technicien, l'ÉCOLE en plus : deux écoles
+                     peuvent avoir une « CM1-A ». */
+                  ? [
+                      PROFILES_ENABLED && isAdmin ? edtEcoleVue?.name : null,
+                      edtClasseVue?.class_label || selectedLevel.name,
+                      edtClasseVue?.full_name,
+                    ].filter(Boolean).join(" · ") + " — lecture seule"
                   : `${selectedLevel.name} — ${selectedLevel.full}`}
             </p>
           </div>
-          {isSchoolAdmin && (
+          {edtChoisitUneClasse && (
             <button
               type="button"
               className="ec-btn ec-btn--ghost"
@@ -6210,7 +6320,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               aurait affiché le programme d'un autre niveau sur les créneaux de
               cette classe. Même leçon que les onglets « mois / semaine »
               retirés le 5 octobre. */}
-          {!isParent && !isSchoolAdmin && (
+          {!isParent && !edtChoisitUneClasse && (
             <div>
               <label htmlFor="ec-cal-level" className="ec-sr">Niveau</label>
               <select
@@ -6284,7 +6394,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             cache les leçons POUR SOI, hors ligne. La direction qui consulte la
             classe d'autrui n'a rien à télécharger — et ce bouton lui aurait
             promis une préparation de cours qui n'est pas la sienne. */}
-        {OFFLINE_ENABLED && !isParent && !isSchoolAdmin && (
+        {OFFLINE_ENABLED && !isParent && !edtChoisitUneClasse && (
           <Card style={{ marginTop: 0 }}>
             <CardLabel>Hors ligne</CardLabel>
             {weekIds.length === 0 ? (
