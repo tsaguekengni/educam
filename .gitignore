@@ -81,3 +81,24 @@ Capture d*.png
 # filet de sécurité. ~25 Mo d'images — à garder jusqu'à validation à l'écran,
 # à ne JAMAIS committer (dépôt PUBLIC).
 /media-backup/
+
+# ── Fichiers de travail de la CLI Supabase ──────────────────────────────────
+# Neuf fichiers y étaient VERSIONNÉS, dont `cli-latest`, qui change à chaque
+# fois que la CLI vérifie s'il existe une nouvelle version. Résultat : un
+# fichier modifié en permanence dans `git status`.
+#
+# Ce n'est pas qu'esthétique. La règle du projet est de LIRE TOUT `git status`
+# avant de dicter un `git add`, précisément parce qu'un commit partiel a déjà
+# cassé un build. Du bruit permanent dans cette sortie, c'est une ligne qu'on
+# apprend à ignorer — et un jour on ignorera la bonne.
+#
+# ✅ Vérifié le 2026-10-01, aucun secret là-dedans : `pooler-url` ne porte
+# qu'un nom d'hôte et un nom d'utilisateur (aucun mot de passe), `project-ref`
+# et `linked-project.json` que l'identifiant du projet, déjà public dans la
+# configuration du navigateur. Le dépôt étant PUBLIC, la question méritait
+# d'être posée.
+#
+# ⚠️ Ignorer ne suffit PAS pour un fichier déjà suivi : il a fallu aussi
+# `git rm -r --cached supabase/.temp`. Les fichiers restent sur le disque et la
+# CLI continue de les écrire — ils cessent simplement d'être versionnés.
+supabase/.temp/
