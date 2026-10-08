@@ -149,6 +149,7 @@ const SECTION_TYPES = [
   { id: "intro", name: "Introduction", icon: "💡" },
   { id: "content", name: "Contenu de la leçon", icon: "📖" },
   { id: "video", name: "Vidéo", icon: "🎬" },
+  { id: "practice", name: "Exercices en classe", icon: "🧠" },
   { id: "activity", name: "Activité pratique", icon: "🧪" },
   { id: "exercise", name: "Exercices", icon: "✏️" },
   { id: "bilan", name: "Bilan — À recopier", icon: "📋" },
@@ -171,6 +172,28 @@ const SHOW_READINESS_QUIZ = false;
 function sectionDisplayTitle(sec) {
   if (sec?.section_type === "exercise") return EXERCISE_SECTION_LABEL;
   return sec?.title;
+}
+
+/* EXERCICES EN CLASSE — demande de Maxime, 2026-10-08.
+ * Les exercices « à la maison » (table `exercises`) ne passent pas au
+ * projecteur : on avait l'impression que les leçons n'avaient pas
+ * d'exercices. Nouvelle section `practice`, PROJETÉE, placée entre le cours
+ * et l'activité pratique, un exercice par notion, SANS les réponses à
+ * l'écran.
+ * - L'ordre d'affichage est fixé ici (SECTION_RANK) et non par
+ *   `section_order` : les SQL des leçons, rejoués, remettent l'activité en 3 ;
+ *   on ne veut pas qu'un ré-upload fasse passer les exercices après
+ *   l'activité.
+ * - Le corrigé est un bloc texte qui commence par « 🔑 » : jamais projeté,
+ *   jamais montré aux parents ; l'enseignant·e le déplie dans le lecteur. */
+const SECTION_RANK = { intro: 1, content: 2, video: 3, practice: 4, activity: 5, exercise: 6, bilan: 7 };
+function sortSections(list) {
+  return [...(list || [])].sort((a, b) =>
+    ((SECTION_RANK[a.section_type] ?? 50) - (SECTION_RANK[b.section_type] ?? 50)) ||
+    ((a.section_order ?? 0) - (b.section_order ?? 0)));
+}
+function isAnswerKeyBlock(b) {
+  return b?.block_type === "text" && /^\s*🔑/.test(String(b.text_content || ""));
 }
 
 const BLOCK_TYPES = [
@@ -2606,20 +2629,84 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   }, [inbox]);
 
   // Open a message in the reading pane, marking it read on first open.
-  const openMessage = (m) => {
+  /* 🔴 OUVRIR UN MESSAGE NE LE MARQUAIT PAS LU — réparé le 2026-10-08.
+   *
+   * Signalé par Maxime : « quand j'ouvre un message, ça reste comme non lu. »
+   * Le repère partait bien à l'écran, et revenait « non lu » au rechargement.
+   *
+   * LA CAUSE EST UNE LIGNE QUI AVAIT L'AIR DE MARCHER :
+   *
+   *     supabase.from("messages").update({ read_at: now }).eq("id", m.id);
+   *
+   * 🪤 **Un constructeur de requête supabase-js est PARESSEUX.** Il ne part
+   * qu'au moment où quelque chose l'attend : la requête réseau est déclenchée
+   * par `then()`. Sans `await`, sans `.then()`, cet appel ne construit qu'un
+   * objet — et **aucune requête ne quitte le navigateur.** Ce n'est donc pas un
+   * envoi qui échoue : c'est un envoi qui n'a jamais lieu.
+   *
+   * ⭐ Vérifié dans les journaux de la passerelle avant de corriger : le
+   * 2026-10-08, sur `/rest/v1/messages`, **22 `GET`, 2 `POST`, et ZÉRO `PATCH`**
+   * — alors que Maxime avait ouvert ses messages. La même méthode que pour les
+   * retours de leçon perdus : regarder si le serveur a été APPELÉ, pas ce qu'il
+   * a répondu.
+   *
+   * ⚠️ `setInbox` masquait le défaut : l'écran passait en « lu » sur l'instant,
+   * donc le geste avait l'air d'avoir marché. Il ne redevenait faux qu'au
+   * rechargement suivant — c'est-à-dire bien plus tard, quand plus personne ne
+   * fait le lien.
+   *
+   * 🔎 Cherché partout ailleurs : c'était **le seul** appel supabase laissé
+   * ainsi en l'air dans tout `src/`. Tous les autres sont soit attendus, soit
+   * rendus dans un `Promise.all`.
+   *
+   * ⚠️ `bestEffort: true` sur l'entrée de file. `drainQueue` s'arrête sur un
+   * échec pour réessayer plus tard, ce qui est juste pour une note ou un
+   * message — mais un repère de lecture ne doit JAMAIS retenir la file derrière
+   * lui. Et il peut légitimement être refusé : un parent qui lit un message
+   * adressé à l'AUTRE parent de l'enfant le voit (la boîte lit par
+   * `student_id`) mais n'a pas le droit de l'écrire (la politique exige
+   * `recipient_id = auth.uid()`). Sans ce drapeau, ce refus bloquerait ses
+   * vraies écritures.
+   *
+   * ⚠️ `read_at` porte l'heure de la LECTURE, pas celle de la synchronisation.
+   * C'est pour ça que la mise en file est permise ici, alors qu'elle est
+   * interdite pour `exchange_marks` : là-bas le repère serait rejoué avec une
+   * date fausse. */
+  const openMessage = async (m) => {
     setOpenMsg(m);
-    if (m && !m.read_at) {
-      const now = new Date().toISOString();
-      // Offline this used to fail silently, so the message looked read on this
-      // machine and stayed unread everywhere else — and the director's
-      // "parents à relancer" list would keep flagging a parent who had read it.
-      if (typeof navigator !== "undefined" && !navigator.onLine) {
-        enqueue({ kind: "read", table: "messages", op: "update",
-                  payload: { read_at: now }, match: { id: m.id } }).then(refreshPending).catch(() => {});
-      } else {
-        supabase.from("messages").update({ read_at: now }).eq("id", m.id);
-      }
-      setInbox((prev) => prev.map((x) => (x.id === m.id ? { ...x, read_at: now } : x)));
+    if (!m || m.read_at) return;
+    const now = new Date().toISOString();
+    const horsLigne = typeof navigator !== "undefined" && !navigator.onLine;
+
+    // L'écran dit « lu » tout de suite : c'est ce que le geste veut dire.
+    setInbox((prev) => prev.map((x) => (x.id === m.id ? { ...x, read_at: now } : x)));
+
+    const mettreEnFile = async () => {
+      try {
+        await enqueue({
+          kind: "read", table: "messages", op: "update",
+          payload: { read_at: now }, match: { id: m.id },
+          bestEffort: true,
+        });
+        await refreshPending();
+        return true;
+      } catch (_) { return false; }
+    };
+
+    if (horsLigne) { await mettreEnFile(); return; }
+
+    try {
+      const { error } = await supabase.from("messages").update({ read_at: now }).eq("id", m.id);
+      if (error) throw error;
+    } catch (_) {
+      // `navigator.onLine` peut valoir « oui » alors que rien ne sort (piège
+      // du 2026-10-06). On rattrape donc par la file, exactement comme pour
+      // les retours de leçon.
+      const garde = await mettreEnFile();
+      // Et si même la file refuse, on REMET « non lu » : un écran qui affiche
+      // « lu » pour un repère que personne n'a enregistré est le défaut qu'on
+      // vient de corriger, à l'envers.
+      if (!garde) setInbox((prev) => prev.map((x) => (x.id === m.id ? { ...x, read_at: null } : x)));
     }
   };
   const unreadCount = inbox.filter((m) => !m.read_at).length;
@@ -2729,23 +2816,59 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
    *    réponse de Maxime, elle, en porte une, et deux notifications pour un
    *    seul échange apprennent surtout à les ignorer.
    */
-  const transfererAEnseignante = async (m) => {
+  /* 🔴 « ENVOI… » RESTAIT FIGÉ — réparé le 2026-10-08, et c'était MON défaut,
+   * posé le matin même.
+   *
+   * Signalé par Maxime : « quand je voulais faire le transfert, c'est resté
+   * figé sur Envoi. » Les journaux de la passerelle : la résolution de
+   * l'enseignante partait bien (`parents`, puis `students`, puis `teachers`),
+   * mais **aucun POST** ne suivait. Le bouton se bloquait AVANT d'écrire.
+   *
+   * LA CAUSE : `senderLabel` et `fmtDate` sont déclarés **à l'intérieur de
+   * `MessagesInbox`** (vers la ligne 5680), pas au niveau du composant. Cette
+   * fonction-ci vit au niveau du composant. La première ligne après
+   * `setTransfertEnvoi(true)` levait donc un `ReferenceError`, la fonction
+   * mourait en plein vol, et `setTransfertEnvoi(false)` n'était jamais
+   * atteint : bouton désactivé sur « Envoi… », pour toujours, sans un mot.
+   *
+   * ⚠️ POURQUOI MES CONTRÔLES NE L'ONT PAS VU. `esbuild` valide la SYNTAXE,
+   * pas la résolution des identifiants : un nom hors de portée se compile sans
+   * broncher et n'échoue qu'à l'exécution. Et mon contrôle de portée comparait
+   * le DIFFÉRENTIEL — les lignes ajoutées — sans vérifier que chaque nom
+   * employé existait à cet endroit du fichier.
+   * ⭐ **RÈGLE : un contrôle de portée doit aussi vérifier que tout
+   * identifiant qu'une nouvelle fonction emploie est bien visible d'où elle est
+   * déclarée.** Pour un fichier de 560 Ko où des aides sont déclarées dans des
+   * vues, ce n'est pas une précaution d'école.
+   *
+   * ⭐ ET C'EST LA MÊME FORME D'ÉCHEC QUE LE DÉFAUT RÉPARÉ LUNDI dans
+   * `submitFeedback` : une exception levée AVANT ou HORS du `try` laisse le
+   * bouton bloqué sur « Envoi… ». J'avais écrit la leçon et je l'ai repayée
+   * trois jours plus tard. D'où les deux corrections ci-dessous, et non une :
+   *
+   *   1. le libellé de l'expéditeur est désormais PASSÉ EN ARGUMENT par la vue,
+   *      qui seule a `senderLabel` sous la main ; la date se calcule sur place ;
+   *   2. 🔴 **tout est sous `try` / `finally`.** Quoi qu'il arrive, le bouton se
+   *      débloque. C'est cela, et non le point 1, qui empêche un défaut de ce
+   *      genre de redevenir un écran gelé. */
+  const transfererAEnseignante = async (m, libelleExpediteur) => {
     if (!m || !transfertCible || transfertCible === "aucune" || transfertEnvoi) return;
     if (!online) { pushToast("Pas de réseau. Réessayez une fois connecté.", "error"); return; }
     setTransfertEnvoi(true);
     setTransfertErr("");
     setTransfertAvisRate(false);
-    const qui = senderLabel(m);
-    const quand = fmtDate(m.created_at);
-    const note = transfertNote.trim();
-    const entete = `Message reçu de ${qui}${transfertCible.enfant ? `, parent de ${transfertCible.enfant},` : ""}`
-      + ` le ${quand}. Transmis par l'équipe EduCam.`;
-    const corps = `${entete}\n\n« ${m.body} »${note ? `\n\n— ${note}` : ""}`;
     // 🔴 Le drapeau existe pour ne pas MENTIR en cas d'échec partiel : si le
     // transfert est passé et que l'avis au parent échoue, dire « rien n'a été
     // envoyé » enverrait Maxime transférer une seconde fois.
     let transmis = false;
     try {
+      // Ces cinq lignes étaient AU-DESSUS du `try`. C'est tout le défaut.
+      const qui = libelleExpediteur || "un parent";
+      const quand = (m.created_at || "").slice(0, 10);
+      const note = transfertNote.trim();
+      const entete = `Message reçu de ${qui}${transfertCible.enfant ? `, parent de ${transfertCible.enfant},` : ""}`
+        + ` le ${quand}. Transmis par l'équipe EduCam.`;
+      const corps = `${entete}\n\n« ${m.body} »${note ? `\n\n— ${note}` : ""}`;
       const { data, error } = await supabase.from("messages").insert({
         sender_id: teacher.id,
         recipient_id: transfertCible.id,
@@ -2784,8 +2907,12 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       setTransfertErr(transmis
         ? "Le message est bien parti chez l'enseignante. Ne transférez pas une seconde fois."
         : "Transfert impossible pour le moment. Rien n'a été envoyé — votre texte est conservé, réessayez.");
+    } finally {
+      // 🔴 DANS UN `finally`. Posée après le `catch`, cette ligne n'était pas
+      // atteinte quand l'exception venait d'AVANT le `try` — et le bouton
+      // restait gelé. Le même oubli, au même endroit, que dans `submitFeedback`.
+      setTransfertEnvoi(false);
     }
-    setTransfertEnvoi(false);
   };
 
   // ---- LOT D : charger les échanges enseignant → parent de l'école ----------
@@ -5029,7 +5156,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     }
 
     setCurrentLesson(bundle.lesson);
-    setLessonSections(bundle.sections || []);
+    setLessonSections(sortSections(bundle.sections));
     setSectionBlocks(bundle.blocksBySection || {});
     setLessonExercises(bundle.exercises || []);
     setCollapsedSections({}); // enter a lesson with every section expanded
@@ -5789,7 +5916,10 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                   <Button variant="ghost" onClick={() => setTransfertOuvert(false)} disabled={transfertEnvoi}>
                     Annuler
                   </Button>
-                  <Button onClick={() => transfererAEnseignante(m)} disabled={transfertEnvoi}>
+                  {/* ⚠️ `senderLabel` est déclaré DANS cette vue : il n'existe
+                      pas là où `transfererAEnseignante` est écrite. On le lui
+                      passe donc d'ici, au lieu de l'y appeler. */}
+                  <Button onClick={() => transfererAEnseignante(m, senderLabel(m))} disabled={transfertEnvoi}>
                     {transfertEnvoi ? "Envoi…" : `Transmettre à ${transfertCible.nom}`}
                   </Button>
                 </div>
@@ -7879,7 +8009,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     // locked. Everything else (intro, content, video, activity) stays visible so
     // the parent can read ahead. Taught lessons are fully unlocked.
     const parentLocked = isParent && currentLesson && !parentTaughtIds.has(currentLesson.id);
-    const isLockedSection = (type) => parentLocked && (type === "exercise" || type === "bilan");
+    const isLockedSection = (type) => parentLocked && (type === "exercise" || type === "practice" || type === "bilan");
     const { prev: prevLesson, next: nextLesson } = getAdjacentLessons();
     const navBtnStyle = (active, align) => ({
       flex: 1, minWidth: 0, display: "flex", flexDirection: "column",
@@ -8035,7 +8165,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           {lessonSections.map((section, i) => {
             const isOpen = !collapsedSections[i];
             const secAnchorId = `ec-sec-${i}`;
-            const accentColors = { intro: "#3B82F6", content: "#0F4C35", video: "#EF4444", activity: "#8B5CF6", exercise: "#F59E0B", bilan: "#D97706" };
+            const accentColors = { intro: "#3B82F6", content: "#0F4C35", video: "#EF4444", practice: "#0E7490", activity: "#8B5CF6", exercise: "#F59E0B", bilan: "#D97706" };
             const accent = accentColors[section.section_type] || "#6B7280";
             const blocks = sectionBlocks[section.id] || [];
 
@@ -8118,6 +8248,18 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                           blocks.map((block, k) => {
                             const isBilan = section.section_type === "bilan";
                             if (isBilan && HIDE_BILAN_IMAGES && block.block_type === "image") return null;
+                            if (isAnswerKeyBlock(block)) {
+                              // Corrigé des exercices en classe : enseignant·e seulement, replié.
+                              if (isParent) return null;
+                              return (
+                                <details key={k} style={{ background: "#ECFEFF", border: "1px solid #A5F3FC", borderRadius: 10, padding: "10px 14px", maxWidth: "66ch" }}>
+                                  <summary style={{ cursor: "pointer", fontWeight: 700, color: "#0E7490", fontSize: 15 }}>🔑 Voir le corrigé (n'apparaît pas au projecteur)</summary>
+                                  <div style={{ marginTop: 10, fontSize: 16, color: "#22262C", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+                                    {renderRichText(String(block.text_content || "").replace(/^\s*🔑\s*/, ""))}
+                                  </div>
+                                </details>
+                              );
+                            }
                             if (block.block_type === "text") {
                               // Trace écrite et devoir en cursive (voir CURSIVE_FONT).
                               const cursiveFrom = isBilan ? bilanCursiveFrom(blocks) : -1;
@@ -8434,7 +8576,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
 
     // Auto-scale: measure total text and pick font size
     const allText = lessonSections.flatMap(s =>
-      (sectionBlocks[s.id] || []).filter(b => b.block_type === "text").map(b => b.text_content || "")
+      (sectionBlocks[s.id] || []).filter(b => b.block_type === "text" && !isAnswerKeyBlock(b)).map(b => b.text_content || "")
     ).join("");
     const len = allText.length;
     // Échelle automatique : plus la leçon est longue, plus les lettres sont
@@ -8581,8 +8723,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           {/* All sections — expanded, no collapse */}
           <div style={{ display: "flex", flexDirection: "column", gap: 40 }}>
             {lessonSections.filter(s => s.section_type !== "exercise")
-              .filter(s => !(projectorLocked && s.section_type === "bilan")).map((section, i) => {
-              const accentColors = { intro: "#3B82F6", content: "#0F4C35", video: "#EF4444", activity: "#8B5CF6", bilan: "#D97706" };
+              .filter(s => !(projectorLocked && (s.section_type === "bilan" || s.section_type === "practice"))).map((section, i) => {
+              const accentColors = { intro: "#3B82F6", content: "#0F4C35", video: "#EF4444", practice: "#0E7490", activity: "#8B5CF6", bilan: "#D97706" };
               const accent = accentColors[section.section_type] || "#6B7280";
               const blocks = sectionBlocks[section.id] || [];
 
@@ -8613,6 +8755,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                     ) : (
                       blocks.map((block, k) => {
                         if (section.section_type === "bilan" && HIDE_BILAN_IMAGES && block.block_type === "image") return null;
+                        if (isAnswerKeyBlock(block)) return null; // corrigé : jamais au projecteur
                         if (block.block_type === "text") {
                           // The Bilan section is the trace écrite ("à recopier"):
                           // heavier, larger and more open so it survives projector
