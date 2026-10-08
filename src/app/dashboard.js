@@ -2364,6 +2364,32 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [adminSending, setAdminSending] = useState(false);
   const [openMsg, setOpenMsg] = useState(null);                // the message opened in the reading pane
 
+  // ─── TRANSFÉRER LE MESSAGE D'UN PARENT À SON ENSEIGNANTE (2026-10-08) ─────
+  //
+  // Demande de Maxime : « despite the message that nous ecrire goes only to la
+  // plateforme, parents still use it to communicate to the school. » Le cas qui
+  // l'a déclenchée : un parent a annoncé par ce canal, à 6 h 30, que son fils
+  // serait absent — en l'adressant à « Madame la Directrice ». Personne à
+  // l'école ne l'a su.
+  //
+  // 🔴 ET C'EST EXACTEMENT LA VOIE QUI AVAIT ÉTÉ ÉCARTÉE LE 2026-10-01.
+  // La règle écrite alors tient toujours, et elle dit COMMENT faire : « à
+  // reconstruire seulement si le besoin revient, et EN MESSAGE NEUF, jamais en
+  // ajoutant un school_id à l'existant. » Le besoin est revenu ; la méthode ne
+  // change pas.
+  //
+  // `transfertCible` vaut : `null` tant qu'on ne sait pas, la chaîne
+  // "aucune" quand l'expéditeur n'a pas d'enseignante rattachée, ou
+  // { id, nom, enfant }. Trois états et non deux : « je ne sais pas encore »
+  // ne doit pas s'afficher comme « il n'y a personne ».
+  const [transfertCible, setTransfertCible] = useState(null);
+  const [transfertOuvert, setTransfertOuvert] = useState(false);
+  const [transfertNote, setTransfertNote] = useState("");
+  const [transfertEnvoi, setTransfertEnvoi] = useState(false);
+  const [transfertFait, setTransfertFait] = useState("");
+  const [transfertAvisRate, setTransfertAvisRate] = useState(false);
+  const [transfertErr, setTransfertErr] = useState("");
+
   // ─── ÉCHANGES DE L'ÉCOLE (direction et référent) — LOT D ───────────────────
   // Demande de la direction : être au courant de toute communication
   // enseignant → parent. C'est une VUE, pas un envoi : rien n'est dupliqué,
@@ -2626,6 +2652,140 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       pushToast("Impossible d'envoyer la réponse. Réessayez.", "error");
     }
     setAdminSending(false);
+  };
+
+  /* ── QUI EST L'ENSEIGNANTE DE CE PARENT ? (2026-10-08) ────────────────────
+   * Résolu à l'ouverture du message, pas au clic : le bouton doit déjà porter
+   * un NOM. « Transférer à l'enseignante » sans dire laquelle demanderait à
+   * Maxime de faire confiance à une déduction qu'il ne voit pas.
+   *
+   * Deux chemins, dans cet ordre : l'élève rattaché au compte parent puis son
+   * titulaire (`students.teacher_id`), et à défaut `parents.linked_teacher_id`.
+   * Le premier est la vérité courante — un transfert de classe met `teacher_id`
+   * à jour, pas le lien du parent. */
+  useEffect(() => {
+    const m = openMsg;
+    setTransfertOuvert(false);
+    setTransfertNote("");
+    setTransfertFait("");
+    setTransfertAvisRate(false);
+    setTransfertErr("");
+    if (!isAdmin || !m || m.audience !== "admin" || !m.sender_id) { setTransfertCible(null); return; }
+    let annule = false;
+    (async () => {
+      setTransfertCible(null);
+      try {
+        const { data: pa } = await supabase.from("parents")
+          .select("student_id, linked_teacher_id").eq("id", m.sender_id).maybeSingle();
+        // Pas une ligne de parent : l'expéditeur est un membre du personnel qui
+        // nous écrit. Rien à transférer, et surtout rien à deviner.
+        if (!pa) { if (!annule) setTransfertCible("aucune"); return; }
+        let enfant = "";
+        let ensId = null;
+        if (pa.student_id) {
+          const { data: st } = await supabase.from("students")
+            .select("full_name, teacher_id").eq("id", pa.student_id).maybeSingle();
+          enfant = st?.full_name || "";
+          ensId = st?.teacher_id || null;
+        }
+        ensId = ensId || pa.linked_teacher_id || null;
+        if (!ensId) { if (!annule) setTransfertCible("aucune"); return; }
+        const { data: tc } = await supabase.from("teachers")
+          .select("id, full_name").eq("id", ensId).maybeSingle();
+        if (!annule) {
+          setTransfertCible(tc?.id
+            ? { id: tc.id, nom: tc.full_name || "l'enseignante", enfant }
+            : "aucune");
+        }
+      } catch (_) {
+        // On ne sait pas : on n'affiche donc rien, plutôt que « personne ».
+        if (!annule) setTransfertCible(null);
+      }
+    })();
+    return () => { annule = true; };
+  }, [isAdmin, openMsg?.id, openMsg?.audience, openMsg?.sender_id]);
+
+  /* Transférer. DEUX écritures, et elles ne pèsent pas le même poids.
+   *
+   * 1. LE TRANSFERT lui-même : un message NEUF vers l'enseignante.
+   *    🔴 `school_id` ET `student_id` à NULL, et un `thread_id` NEUF.
+   *       - `school_id` null : c'est lui seul qui tient la confidentialité.
+   *         Renseigné, `messages read scoped` ouvrirait la copie à toute la
+   *         direction, et `educam_school_exchanges` l'afficherait dans
+   *         « Échanges de l'école ». L'enseignante le lit parce qu'il lui est
+   *         ADRESSÉ (`recipient_id`), ce qui suffit : sa boîte de réception
+   *         filtre sur ce seul champ.
+   *       - `student_id` null : renseigné, la copie apparaîtrait aussi dans la
+   *         boîte des DEUX parents de l'élève (ils lisent par `student_id`).
+   *         Le nom de l'enfant va donc dans le TEXTE, pas dans la colonne.
+   *       - fil neuf : le fil du parent est le canal confidentiel avec la
+   *         plateforme. Y glisser un message adressé à l'école mélangerait
+   *         deux canaux dans une même conversation.
+   *
+   * 2. L'AVIS AU PARENT, dans son fil : il a écrit dans un canal qu'on lui
+   *    présente comme réservé à la plateforme. Le transférer sans le dire
+   *    casserait cette promesse. Ce n'est pas une politesse, c'est la
+   *    contrepartie du transfert. Volontairement SANS alerte WhatsApp : la
+   *    réponse de Maxime, elle, en porte une, et deux notifications pour un
+   *    seul échange apprennent surtout à les ignorer.
+   */
+  const transfererAEnseignante = async (m) => {
+    if (!m || !transfertCible || transfertCible === "aucune" || transfertEnvoi) return;
+    if (!online) { pushToast("Pas de réseau. Réessayez une fois connecté.", "error"); return; }
+    setTransfertEnvoi(true);
+    setTransfertErr("");
+    setTransfertAvisRate(false);
+    const qui = senderLabel(m);
+    const quand = fmtDate(m.created_at);
+    const note = transfertNote.trim();
+    const entete = `Message reçu de ${qui}${transfertCible.enfant ? `, parent de ${transfertCible.enfant},` : ""}`
+      + ` le ${quand}. Transmis par l'équipe EduCam.`;
+    const corps = `${entete}\n\n« ${m.body} »${note ? `\n\n— ${note}` : ""}`;
+    // 🔴 Le drapeau existe pour ne pas MENTIR en cas d'échec partiel : si le
+    // transfert est passé et que l'avis au parent échoue, dire « rien n'a été
+    // envoyé » enverrait Maxime transférer une seconde fois.
+    let transmis = false;
+    try {
+      const { data, error } = await supabase.from("messages").insert({
+        sender_id: teacher.id,
+        recipient_id: transfertCible.id,
+        audience: "admin",
+        school_id: null,
+        student_id: null,
+        thread_id: newId(),
+        subject: `Transmis : ${m.subject || "message d'un parent"}`,
+        body: corps,
+      }).select().single();
+      if (error) throw error;
+      transmis = true;
+      // L'alerte WhatsApp vers l'enseignante. Au mieux : le message dans
+      // l'application est déjà arrivé. C'est elle qui fait qu'une absence
+      // annoncée à 6 h 30 ne soit pas lue à midi.
+      notifyDirectMessage({ messageId: data.id }).catch(() => {});
+      try {
+        const { error: e2 } = await supabase.from("messages").insert({
+          sender_id: teacher.id,
+          recipient_id: m.sender_id,
+          audience: "admin",
+          school_id: null,
+          student_id: null,
+          thread_id: m.thread_id || m.id,
+          subject: m.subject || "Communiquer avec la plateforme",
+          body: `Votre message du ${quand} a été transmis à ${transfertCible.nom}, l'enseignante de votre enfant.`,
+        });
+        if (e2) throw e2;
+      } catch (_) {
+        setTransfertAvisRate(true);
+      }
+      setTransfertFait(transfertCible.nom);
+      setTransfertOuvert(false);
+      setTransfertNote("");
+    } catch (_) {
+      setTransfertErr(transmis
+        ? "Le message est bien parti chez l'enseignante. Ne transférez pas une seconde fois."
+        : "Transfert impossible pour le moment. Rien n'a été envoyé — votre texte est conservé, réessayez.");
+    }
+    setTransfertEnvoi(false);
   };
 
   // ---- LOT D : charger les échanges enseignant → parent de l'école ----------
@@ -5565,6 +5725,78 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               <a href={m.link_url} target="_blank" rel="noreferrer" className="ec-link" style={{ fontSize: FONT.md }}>
                 Ouvrir le lien ↗
               </a>
+            )}
+          </div>
+        )}
+
+        {/* TRANSMETTRE À L'ENSEIGNANTE (2026-10-08).
+            Posé AVANT « Répondre », dans l'ordre où le geste se fait : on lit,
+            on fait suivre à qui peut agir, puis on répond au parent. */}
+        {isAdmin && m.audience === "admin" && m.sender_id && transfertCible && (
+          <div style={{ marginTop: 22, paddingTop: 18, borderTop: `1px solid ${COLORS.border}` }}>
+            <CardLabel>Transmettre à l'école</CardLabel>
+            {transfertCible === "aucune" ? (
+              <Callout tone="warn" icon="⚠️" style={{ marginTop: 8 }}>
+                Aucune enseignante n'est rattachée à cet expéditeur : il faut la
+                prévenir à la main.
+              </Callout>
+            ) : transfertFait ? (
+              <>
+                <Callout tone="brand" icon="✓" style={{ marginTop: 8 }}>
+                  Transmis à {transfertFait}, avec une alerte WhatsApp. Le parent
+                  a été informé, dans ce fil, que son message a été transmis.
+                </Callout>
+                {transfertAvisRate && (
+                  <Callout tone="warn" icon="⚠️" style={{ marginTop: 10 }}>
+                    En revanche, le mot qui prévient le parent n'a pas pu être
+                    enregistré. Dites-le-lui dans votre réponse.
+                  </Callout>
+                )}
+              </>
+            ) : !transfertOuvert ? (
+              <div style={{ marginTop: 8 }}>
+                <p style={{ fontSize: FONT.sm, color: COLORS.ink2, lineHeight: 1.6, maxWidth: "62ch" }}>
+                  Part chez <b>{transfertCible.nom}</b>
+                  {transfertCible.enfant ? `, enseignante de ${transfertCible.enfant}` : ""}, et chez
+                  elle seule — <b>la direction ne le verra pas</b>. Elle recevra
+                  une alerte WhatsApp, et le parent sera informé que vous avez
+                  transmis son message.
+                </p>
+                <div style={{ marginTop: 10 }}>
+                  <Button variant="ghost" onClick={() => setTransfertOuvert(true)}>
+                    Transférer à l'enseignante
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ marginTop: 8 }}>
+                <label htmlFor="ec-transfert-note" style={{ fontSize: FONT.sm, color: COLORS.ink2 }}>
+                  Un mot à ajouter pour {transfertCible.nom} (facultatif)
+                </label>
+                <textarea
+                  id="ec-transfert-note"
+                  value={transfertNote}
+                  onChange={(e) => setTransfertNote(e.target.value)}
+                  rows={2}
+                  placeholder="Par exemple : « à traiter ce matin »…"
+                  style={{
+                    width: "100%", boxSizing: "border-box", resize: "vertical", marginTop: 8,
+                    padding: "11px 13px", fontFamily: "inherit", fontSize: FONT.md, color: COLORS.ink,
+                    border: `1px solid ${COLORS.border2}`, borderRadius: 10, background: COLORS.card,
+                  }}
+                />
+                <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 10 }}>
+                  <Button variant="ghost" onClick={() => setTransfertOuvert(false)} disabled={transfertEnvoi}>
+                    Annuler
+                  </Button>
+                  <Button onClick={() => transfererAEnseignante(m)} disabled={transfertEnvoi}>
+                    {transfertEnvoi ? "Envoi…" : `Transmettre à ${transfertCible.nom}`}
+                  </Button>
+                </div>
+              </div>
+            )}
+            {transfertErr && (
+              <Callout tone="crit" icon="⚠️" style={{ marginTop: 10 }}>{transfertErr}</Callout>
             )}
           </div>
         )}

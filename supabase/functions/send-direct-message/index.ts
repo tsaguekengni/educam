@@ -34,10 +34,22 @@ const CORS = {
 const json = (b: unknown, s = 200) =>
   new Response(JSON.stringify(b), { status: s, headers: { ...CORS, "Content-Type": "application/json" } });
 const digits = (s: string) => (s || "").replace(/[^0-9]/g, "");
-// Les DEUX parents reçoivent (décision de Maxime, 2026-10-01). Dédoublonné sur
-// les CHIFFRES, et le numéro du COMPTE parent est ajouté s'il diffère : un
-// parent inscrit avec un autre téléphone que celui donné à l'école doit être
-// joint là où il est.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DESTINATAIRES D'UN ENFANT — règle UNIQUE, partagée par les trois fonctions
+// WhatsApp depuis le 2026-10-07 :
+//
+//   1. le numéro de CHAQUE COMPTE PARENT de l'enfant (`parents.phone`) — TOUS
+//      les comptes, pas seulement le destinataire nommé : la boîte de réception
+//      montre déjà le message à tous les parents de l'enfant (lecture par
+//      `student_id`), le WhatsApp suit la même règle. C'est aussi par là qu'un
+//      troisième adulte inscrit devient joignable, sans dépendre d'une case
+//      libre côté école.
+//   2. puis `parent_phone` et `parent_phone_2`, les numéros saisis par l'école.
+//
+// `parent_phone_3` n'est PAS un destinataire : c'est la case de réserve.
+// Dédoublonné sur les CHIFFRES.
+// ─────────────────────────────────────────────────────────────────────────────
 const addPhone = (out: string[], p?: string | null) => {
   const d = digits(p || "");
   if (d && !out.some((x) => digits(x) === d)) out.push(p as string);
@@ -99,13 +111,23 @@ Deno.serve(async (req) => {
     studentId = msg.student_id;
     let childName = "";
     if (msg.student_id) {
+      // Les comptes parents d'abord : leur numéro est celui qu'ils ont donné
+      // eux-mêmes en s'inscrivant.
+      const { data: pas } = await admin.from("parents")
+        .select("id, full_name, phone").eq("student_id", msg.student_id);
+      for (const pa of pas || []) {
+        addPhone(numbers, pa.phone);
+        if (msg.recipient_id && pa.id === msg.recipient_id) toName = pa.full_name || toName;
+      }
       const { data: st } = await admin.from("students")
         .select("full_name, parent_phone, parent_phone_2").eq("id", msg.student_id).maybeSingle();
       addPhone(numbers, st?.parent_phone);
       addPhone(numbers, st?.parent_phone_2);
       childName = st?.full_name || "";
     }
-    if (msg.recipient_id) {
+    // Message addressed to a parent account whose child is not on the message
+    // (or whose row was not reached above) — fall back to that account alone.
+    if (!toName && msg.recipient_id) {
       const { data: pa } = await admin.from("parents")
         .select("full_name, phone").eq("id", msg.recipient_id).maybeSingle();
       addPhone(numbers, pa?.phone);
@@ -115,10 +137,40 @@ Deno.serve(async (req) => {
     // their child rather than leaving the greeting blank.
     if (!toName) toName = childName ? `Parent de ${firstName(childName)}` : "cher parent";
   } else if (msg.recipient_id) {
+    /* 🔴 ON RÉSOUT LE DESTINATAIRE PAR CE QU'IL EST, PAS PAR L'AUDIENCE.
+     * Corrigé le 2026-10-08.
+     *
+     * Cette branche ne cherchait QUE dans `teachers`, parce qu'on la lisait
+     * comme « la branche collègue ». Mais le canal « Nous écrire » porte
+     * `audience = 'admin'` DANS LES DEUX SENS : la réponse de la plateforme à
+     * un parent passe donc ici, son identifiant était cherché parmi les
+     * enseignants, introuvable, et l'envoi journalisé `no_phone_on_file`.
+     *
+     * Vérifié en production avant de corriger : la réponse de Maxime à
+     * M. Paul ABENA, le 2026-10-02 à 10:45:27, a produit à 10:45:29 une ligne
+     * `skipped / no_phone_on_file`. **Le parent n'a jamais été prévenu.**
+     *
+     * ⭐ L'audience dit de quel CANAL relève le message, pas QUI le reçoit.
+     * Deux questions différentes, une seule colonne consultée : c'est la même
+     * confusion que `senderLabel`, qui déduisait l'expéditeur de l'audience au
+     * lieu de le lire sur `sender_id` (corrigé le 2026-10-02).
+     *
+     * ⚠️ ET POUR UN PARENT, ICI, ON NE PRÉVIENT QUE LE COMPTE QUI A ÉCRIT.
+     * Volontairement différent de la branche ci-dessus, qui joint tous les
+     * adultes de l'enfant. Un échange avec la plateforme est privé : prévenir
+     * l'autre parent lui apprendrait que celui-ci nous a écrit. On ne touche
+     * donc ni aux numéros tenus par l'école, ni aux autres comptes. */
     const { data: tc } = await admin.from("teachers")
       .select("full_name, phone").eq("id", msg.recipient_id).maybeSingle();
-    addPhone(numbers, tc?.phone);          // un collègue n'a qu'un numéro
-    toName = tc?.full_name || "cher collègue";
+    if (tc) {
+      addPhone(numbers, tc.phone);          // un collègue n'a qu'un numéro
+      toName = tc.full_name || "cher collègue";
+    } else {
+      const { data: pa } = await admin.from("parents")
+        .select("full_name, phone").eq("id", msg.recipient_id).maybeSingle();
+      addPhone(numbers, pa?.phone);
+      toName = pa?.full_name || "cher parent";
+    }
   }
 
   const logRow = {
