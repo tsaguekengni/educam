@@ -508,6 +508,9 @@ function renderRichText(text) {
  * pas seulement au bloc qui porte l'en-tête. Voir `bilanCursiveFrom`.
  * ══════════════════════════════════════════════════════════════════════════ */
 const CURSIVE_FONT = '"Borel", "Segoe Print", "Comic Sans MS", cursive';
+// Rouge des titres de la trace (ligne « Leçon », titres numérotés), comme le
+// stylo rouge du cahier. Assez foncé pour rester lisible au projecteur.
+const CURSIVE_TITLE_RED = "#C62828";
 const CURSIVE_HEADING = /(À RECOPIER|CE QUE JE RETIENS|MON DEVOIR|MON DÉFI|COPY IN YOUR NOTEBOOK|WHAT I REMEMBER|MY HOMEWORK|MY CHALLENGE)/;
 
 /* LES PAGES DE CAHIER (images du Bilan) SONT MASQUÉES — 2026-10-02.
@@ -518,6 +521,19 @@ const CURSIVE_HEADING = /(À RECOPIER|CE QUE JE RETIENS|MON DEVOIR|MON DÉFI|COP
  * re-téléverser. Les schémas de maths et sciences restent visibles dans la
  * section Contenu de chaque leçon. */
 const HIDE_BILAN_IMAGES = true;
+
+/* LES SCHÉMAS À RECOPIER REVIENNENT DANS LE BILAN — 2026-10-12.
+ * Retours écrits de Mme Batam (hauteur et médiane, reproduction humaine) et de
+ * Serge (formule de la moyenne) : les élèves recopient le DESSIN, il doit donc
+ * être dans le résumé, juste après l'explication. Les anciennes « pages de
+ * cahier » pleines de texte restent masquées ; seule une image dont la légende
+ * commence par « Schéma à recopier » s'affiche. C'est la piste notée le
+ * 2026-10-02 dans EduCam_Police_Cursive_Borel.md. Rien à changer en base pour
+ * les anciennes leçons : leurs légendes ne commencent pas ainsi. */
+const SCHEMA_A_RECOPIER = /^\s*sch[ée]ma\s+[àa]\s+recopier/i;
+function isHiddenBilanImage(block) {
+  return HIDE_BILAN_IMAGES && block?.block_type === "image" && !SCHEMA_A_RECOPIER.test(String(block.caption || ""));
+}
 
 // Index du premier bloc de texte du Bilan qui ouvre la trace ou le devoir
 // (−1 s'il n'y en a pas : aucune cursive dans cette section).
@@ -600,8 +616,10 @@ function renderCursiveText(rawText, lesson) {
       <span style={{ fontFamily: CURSIVE_FONT, fontWeight: 400 }}>
         {body.split(/(\*\*[^*]+\*\*)/g).map((part, i) => {
           const m = part.match(/^\*\*([^*]+)\*\*$/);
+          // Titres en ROUGE et soulignés, comme dans le cahier (retours de
+          // Serge, 2026-10-08 : « écris le titre de la leçon en rouge »).
           return m
-            ? <span key={i} style={{ textDecoration: "underline", textUnderlineOffset: "0.18em", textDecorationThickness: "0.06em" }}>{m[1]}</span>
+            ? <span key={i} style={{ color: CURSIVE_TITLE_RED, textDecoration: "underline", textUnderlineOffset: "0.18em", textDecorationThickness: "0.06em" }}>{m[1]}</span>
             : part;
         })}
       </span>
@@ -8398,7 +8416,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                         ) : (
                           blocks.map((block, k) => {
                             const isBilan = section.section_type === "bilan";
-                            if (isBilan && HIDE_BILAN_IMAGES && block.block_type === "image") return null;
+                            if (isBilan && isHiddenBilanImage(block)) return null;
                             if (isAnswerKeyBlock(block)) {
                               // Corrigé des exercices en classe : enseignant·e seulement, replié.
                               if (isParent) return null;
@@ -8905,7 +8923,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                       </div>
                     ) : (
                       blocks.map((block, k) => {
-                        if (section.section_type === "bilan" && HIDE_BILAN_IMAGES && block.block_type === "image") return null;
+                        if (section.section_type === "bilan" && isHiddenBilanImage(block)) return null;
                         if (isAnswerKeyBlock(block)) return null; // corrigé : jamais au projecteur
                         if (block.block_type === "text") {
                           // The Bilan section is the trace écrite ("à recopier"):
