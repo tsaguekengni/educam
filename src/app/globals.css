@@ -694,10 +694,28 @@ button, [role="button"], .ec-btn, .ec-row, .ec-choice, .ec-bottomnav button, .ec
 /* --- Entrées de rail réservées au grand écran ------------------------------
    Le rail porte toutes les destinations du rôle. La barre basse du téléphone,
    elle, reste courte : au-delà de cinq entrées les cibles deviennent trop
-   étroites. Les entrées secondaires restent accessibles sur téléphone par le
-   bloc « Accès rapides » de l'accueil. */
+   étroites.
+
+   🔴 CE COMMENTAIRE DISAIT UNE CHOSE FAUSSE, corrigée le 2026-10-12 : « les
+   entrées secondaires restent accessibles sur téléphone par le bloc "Accès
+   rapides" de l'accueil ». Vérifié : ce bloc ne contient QUE l'emploi du
+   temps, le programme, les résultats et deux entrées de direction — jamais la
+   MESSAGERIE, qui était précisément la destination injoignable. Une entrée
+   masquée ici n'avait donc aucune voie de repli sur téléphone.
+
+   Depuis, `BottomNav` répartit lui-même : dès qu'une destination sort de la
+   barre, la dernière place revient à « Plus », qui ouvre un panneau avec tout
+   le reste. `ec-nav-wideonly` ne masque donc plus rien d'inatteignable. */
 .ec-nav-wideonly { display: none !important; }
 @media (min-width: 900px) { .ec-nav-wideonly { display: flex !important; } }
+
+/* L'inverse : visible SUR TÉLÉPHONE seulement — le bouton « Plus » et son
+   panneau. ⚠️ Le point de bascule est 900 px, celui du rail, et surtout PAS
+   le drapeau `isMobile` du JavaScript, qui bascule à 640 px : un calage sur
+   lui aurait laissé le défaut intact entre 641 et 899 px, invisible sur
+   téléphone comme sur portable et bien présent sur tablette. */
+.ec-nav-phoneonly { display: flex !important; }
+@media (min-width: 900px) { .ec-nav-phoneonly { display: none !important; } }
 
 /* Pastille de non-lus dans le rail */
 .ec-nav-pill {

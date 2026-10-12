@@ -413,7 +413,20 @@ export function EntryRow({ name, value, status, total, inputRef, onChange, onCom
 /* ========================================================================== */
 /* Composant principal — aiguillage par rôle                                   */
 /* ========================================================================== */
-export default function Results({ teacher, school, parent, student, results: resultsProp, onBack, onOpenLesson, initialTab }) {
+/* `lectureSeule` et `classeLabel` : ajoutés le 2026-10-12 pour que la
+ * direction, le référent et le technicien lisent les résultats d'une classe
+ * CHOISIE, exactement comme ils consultent son emploi du temps.
+ *
+ * ⚠️ `teacher` est alors la TITULAIRE DE LA CLASSE CONSULTÉE, pas la personne
+ * connectée. C'est voulu : tout cet écran est construit autour de
+ * `teacher.id` — les élèves, les leçons enseignées, les moyennes. Lui passer
+ * la classe consultée réemploie l'écran tel quel, au lieu d'en écrire un
+ * second qui dériverait du premier. Mais cela rend `lectureSeule`
+ * OBLIGATOIRE : sans lui, l'écran proposerait de saisir des notes au nom de
+ * l'enseignante, et la politique `results manage` les accepterait pour un
+ * administrateur. L'écran serait alors un faux : les notes porteraient le nom
+ * de la titulaire. */
+export default function Results({ teacher, school, parent, student, results: resultsProp, onBack, onOpenLesson, initialTab, lectureSeule, classeLabel }) {
   const isParent = !!parent;
 
   const backLink = (
@@ -448,16 +461,19 @@ export default function Results({ teacher, school, parent, student, results: res
   }
 
   /* --------------------------- ENSEIGNANT --------------------------------- */
-  return <TeacherResults teacher={teacher} school={school} backLink={backLink} initialTab={initialTab} />;
+  return <TeacherResults teacher={teacher} school={school} backLink={backLink} initialTab={initialTab}
+                         lectureSeule={lectureSeule} classeLabel={classeLabel} />;
 }
 
 /* -------------------------------------------------------------------------- */
 /* Enseignant — saisie + vue classe + détail élève                             */
 /* -------------------------------------------------------------------------- */
-function TeacherResults({ teacher, school, backLink, initialTab }) {
+function TeacherResults({ teacher, school, backLink, initialTab, lectureSeule, classeLabel }) {
   const { pushToast, ToastViewport } = useToasts();
 
-  const [tab, setTab] = useState(initialTab === "class" ? "class" : "entry"); // "entry" | "class"
+  // En lecture seule il n'y a qu'une vue : on y est d'emblée, et la barre
+  // d'onglets disparaît — un onglet unique n'est pas un choix.
+  const [tab, setTab] = useState(lectureSeule || initialTab === "class" ? "class" : "entry"); // "entry" | "class"
   const [loading, setLoading] = useState(true);
   const [students, setStudents] = useState([]);
   const [taughtLessons, setTaughtLessons] = useState([]);
@@ -479,7 +495,25 @@ function TeacherResults({ teacher, school, backLink, initialTab }) {
   const [detail, setDetail] = useState(null); // { student, history }
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [teacher?.id]);
-  useEffect(() => { if (lessonId && resultDate && students.length) loadExisting(); /* eslint-disable-next-line */ }, [lessonId, resultDate, students.length]);
+  /* 🔴 `!lectureSeule` N'EST PAS UNE ÉCONOMIE DE REQUÊTE — C'EST UN GARDE-FOU
+   * DE CACHE, posé le 2026-10-12 en relisant `loadExisting`.
+   *
+   * Sa clé est `results_day_<leçon>_<date>` : elle ne porte NI l'enseignante,
+   * NI l'école. La requête, elle, ne filtre que sur la leçon et la date — ce
+   * qu'elle rapporte dépend donc entièrement de QUI la pose : la politique
+   * `results read scoped` rend à une enseignante les notes de sa classe, et à
+   * un administrateur celles de TOUTES les écoles.
+   *
+   * ⚠️ Donc si un administrateur consultait une classe et que cet effet
+   * tournait, le cache hors ligne du navigateur garderait, sous cette clé
+   * partagée, les notes de toutes les écoles — et l'enseignante qui ouvrirait
+   * ensuite la même leçon à la même date sur ce poste les relirait. L'écran de
+   * consultation n'a aucun besoin de cette requête : on ne la lance pas.
+   *
+   * ⭐ La clé était déjà ainsi avant ce lot et ne gênait personne, parce
+   * qu'un seul type de compte pouvait l'atteindre. **Ouvrir un écran à un
+   * nouveau rôle change ce que ses anciennes clés de cache veulent dire.** */
+  useEffect(() => { if (!lectureSeule && lessonId && resultDate && students.length) loadExisting(); /* eslint-disable-next-line */ }, [lectureSeule, lessonId, resultDate, students.length]);
   useEffect(() => { if (tab === "class") loadSummary(); /* eslint-disable-next-line */ }, [tab, students.length]);
 
   // ⚠️ Both reads go through the offline cache. Without this the whole screen is
@@ -830,18 +864,34 @@ function TeacherResults({ teacher, school, backLink, initialTab }) {
     <div>
       {backLink}
       <h1 className="ec-h1">Résultats</h1>
-      <p className="ec-sub">{school?.name || "Votre classe"} · {students.length} élève{students.length > 1 ? "s" : ""}</p>
+      <p className="ec-sub">
+        {lectureSeule && classeLabel ? classeLabel : (school?.name || "Votre classe")}
+        {" · "}{students.length} élève{students.length > 1 ? "s" : ""}
+      </p>
 
-      <div style={{ margin: "18px 0 16px" }}>
-        <Tabs
-          value={tab}
-          onChange={(k) => setTab(k)}
-          ariaLabel="Vue des résultats"
-          items={[{ key: "entry", label: "Saisie du jour" }, { key: "class", label: "Vue classe" }]}
-        />
-      </div>
+      {lectureSeule ? (
+        /* ⚠️ Le dire, et ne pas se contenter de masquer la saisie. Un écran de
+           résultats sans bouton d'enregistrement peut se lire comme un écran
+           cassé ; une phrase le rend volontaire. */
+        <Callout tone="brand" icon="🔎" style={{ margin: "18px 0 16px" }}>
+          Consultation en lecture seule. Seule l'enseignante de la classe saisit
+          ses notes.
+        </Callout>
+      ) : (
+        <div style={{ margin: "18px 0 16px" }}>
+          <Tabs
+            value={tab}
+            onChange={(k) => setTab(k)}
+            ariaLabel="Vue des résultats"
+            items={[{ key: "entry", label: "Saisie du jour" }, { key: "class", label: "Vue classe" }]}
+          />
+        </div>
+      )}
 
-      {tab === "entry" ? (
+      {/* `&& !lectureSeule` : la barre d'onglets a disparu, donc `tab` ne peut
+          plus valoir « entry » — mais une condition qui dépend d'un état
+          d'affichage n'est pas une garantie. Celle-ci en est une. */}
+      {tab === "entry" && !lectureSeule ? (
         <div className="ec-grid">
           <Card className="ec-c4" style={{ alignSelf: "start" }}>
             <div className="ec-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))" }}>

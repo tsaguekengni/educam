@@ -859,7 +859,26 @@ const edtLibelleEcart = (lundiIso) => {
   const n = edtEcartSemaines(lundiIso);
   if (n === 0) return "cette semaine";
   if (n === 1) return "la semaine prochaine";
-  return `dans ${n} semaines`;
+  if (n > 1) return `dans ${n} semaines`;
+  // 🔴 LE PASSÉ MANQUAIT, et c'est ce qui se voyait le moins. Cette fonction
+  // n'avait que des cas n >= 0 : une semaine passée aurait affiché
+  // « dans -2 semaines ». Ajouté le 2026-10-12 avec la navigation en arrière.
+  if (n === -1) return "la semaine dernière";
+  return `il y a ${-n} semaines`;
+};
+
+/* Le lundi de la RENTRÉE, et c'est la borne du retour en arrière.
+ *
+ * L'année scolaire du Littoral commence en septembre (Sept = U1, voir
+ * MONTH_UNIT_MAP). Avant septembre, on est encore dans l'année scolaire
+ * précédente, d'où le décalage d'un an quand le mois est antérieur à
+ * septembre. ⭐ Une borne qui VEUT DIRE quelque chose : « on remonte jusqu'à
+ * la rentrée » s'explique à une directrice, « on remonte de 12 semaines » non.
+ * Et elle borne aussi la requête, donc le volume. */
+const edtLundiRentree = () => {
+  const d = new Date();
+  const annee = d.getMonth() >= 8 ? d.getFullYear() : d.getFullYear() - 1;
+  return edtLundiIso(new Date(annee, 8, 1));
 };
 
 /* Des lignes de `timetable_slots` vers les lignes éditables de l'écran.
@@ -2510,6 +2529,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [adminSending, setAdminSending] = useState(false);
   const [openMsg, setOpenMsg] = useState(null);                // the message opened in the reading pane
 
+  /* Le panneau « Plus » de la barre du téléphone (2026-10-12).
+     ⚠️ ICI, et pas dans `BottomNav` : cette fonction est APPELÉE (`{BottomNav()}`),
+     pas montée. Un `useState` à l'intérieur ferait un hook appelé depuis le
+     rendu du composant parent — le piège React déjà payé quatre fois sur ce
+     fichier. */
+  const [navPlus, setNavPlus] = useState(false);
+
   // ─── TRANSFÉRER LE MESSAGE D'UN PARENT À SON ENSEIGNANTE (2026-10-08) ─────
   //
   // Demande de Maxime : « despite the message that nous ecrire goes only to la
@@ -4027,6 +4053,74 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
      ⚠️ Pas une `const` dérivée mais une FONCTION : `CalendarView` est appelé,
      pas monté, et ces chargements sont appelés depuis des effets. Une fonction
      lit l'état au moment de l'appel, sans ajouter de hook. */
+  /* ══════════════════════════════════════════════════════════════════════
+   * LE SÉLECTEUR DE CLASSE — extrait de `CalendarView` le 2026-10-12.
+   *
+   * Il vivait à l'intérieur de la vue emploi du temps. Les résultats en ont
+   * désormais besoin à l'identique (demande de Maxime : « sur le volet
+   * résultats, ça doit être comme pour l'emploi du temps »), et le recopier
+   * aurait créé deux sélecteurs qui divergent — la raison pour laquelle
+   * `edtLignesDepuisSlots` avait déjà été factorisé.
+   *
+   * ⭐ ET IL PARTAGE L'ÉTAT, VOLONTAIREMENT : `edtEcoleVue` et `edtClasseVue`
+   * sont « l'école et la classe que je consulte », pas « la classe de l'écran
+   * emploi du temps ». Choisir une classe dans un écran la garde dans l'autre.
+   * Deux états séparés auraient obligé la direction à choisir deux fois, et
+   * auraient permis aux deux écrans de parler de classes différentes en même
+   * temps — ce qui est exactement comment on lit un chiffre pour un autre.
+   *
+   * ⚠️ APPELÉE, jamais montée en `<Élément/>` : elle n'a aucun hook et doit
+   * rester ainsi (le piège React payé quatre fois sur ce fichier). */
+  const vueChoixClasse = ({ titre, quoi }) => (
+      <div>
+        {/* Le technicien peut remonter à la liste des écoles ; la direction
+            n'en a qu'une, donc pas de fil d'Ariane pour elle. */}
+        {PROFILES_ENABLED && isAdmin && edtEcoleVue && (
+          <Breadcrumb items={[
+            { label: "Écoles", onClick: () => { setEdtEcoleVue(null); setEdtClasseVue(null); } },
+            { label: edtEcoleVue.name || "École" },
+          ]} />
+        )}
+        <h1 className="ec-h1">{titre}</h1>
+        <p className="ec-sub">
+          {PROFILES_ENABLED && isAdmin && edtEcoleVue
+            ? `${edtEcoleVue.name} — choisissez une classe pour consulter ${quoi}, en lecture seule.`
+            : `Choisissez une classe pour consulter ${quoi} — en lecture seule.`}
+        </p>
+        {edtClasses === null ? (
+          <div style={{ marginTop: 18 }}><SkeletonRows rows={4} /></div>
+        ) : edtClasses.length === 0 ? (
+          <Card style={{ marginTop: 18 }}>
+            <EmptyState icon="▤" title="Aucune classe dans cette école">
+              Une classe apparaît ici dès qu'un enseignant est rattaché à l'école.
+            </EmptyState>
+          </Card>
+        ) : (
+          <div style={{ display: "grid", gap: 8, marginTop: 18 }}>
+            {edtClasses.map((c) => {
+              const niv = LEVELS.find((l) => l.id === c.level);
+              return (
+                <ListRow
+                  key={c.id}
+                  icon="▤"
+                  title={c.class_label || niv?.name || "Classe"}
+                  meta={[niv?.name, c.full_name].filter(Boolean).join(" · ")}
+                  onClick={() => {
+                    /* La semaine consultée repart sur la semaine en cours :
+                       garder le lundi de la classe précédente ferait lire
+                       une autre classe à une autre date. */
+                    setCalLundi(null);
+                    if (niv) setSelectedLevel(niv);
+                    setEdtClasseVue(c);
+                  }}
+                />
+              );
+            })}
+          </div>
+        )}
+      </div>
+  );
+
   const edtOwnerAffiche = () => {
     if (isParent) return parentStudent?.teacher_id || null;
     if (isSchoolAdmin || (PROFILES_ENABLED && isAdmin)) return edtClasseVue?.id || null;
@@ -4080,11 +4174,22 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
      vidé la bande de jours dès la première coupure, et personne ne l'aurait
      relié à ce lot.
 
-     ⚠️ La clé porte la semaine en cours, comme celle de `fetchTimetable`, parce
-     que le filtre `week_start >= ce lundi` change de contenu chaque lundi. Sans
-     ça, une entrée gardée en cache resservirait des exceptions périmées.
-     Le filtre borne aussi la taille : les exceptions passées sont mortes et
-     n'ont aucune raison de voyager. */
+     🔴 LA BORNE BASSE EST PASSÉE DE « CE LUNDI » À « LE LUNDI DE LA RENTRÉE »
+     le 2026-10-12. Elle disait « les exceptions passées sont mortes et n'ont
+     aucune raison de voyager » — c'était vrai tant que personne ne regardait
+     en arrière. Demande de Maxime : la direction et le référent doivent pouvoir
+     relire les semaines écoulées, et un jour férié ou une journée déplacée en
+     fait justement partie.
+
+     ⚠️ LA CLÉ DE CACHE A CHANGÉ DE NOM (`..._v2_...`) PARCE QUE LA FORME DE LA
+     REQUÊTE A CHANGÉ. C'est la règle du projet, et elle existe précisément pour
+     ce cas : sans renommage, un poste qui avait déjà la réponse d'hier aurait
+     resservi une liste SANS les semaines passées, et l'écran aurait affiché des
+     semaines vides sans lever la moindre erreur.
+
+     ⚠️ La clé garde la semaine en cours : la borne basse ne bouge plus chaque
+     lundi, mais une relecture hebdomadaire reste un bon filet contre une
+     exception ajoutée entre-temps. */
   const fetchTimetableBrut = async () => {
     const ownerId = edtOwnerAffiche();
     const lundi = edtLundiIso(new Date());
@@ -4098,10 +4203,10 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       setCalBrut(data || []);
       return;
     }
-    const data = await cachedQuery("timetable_raw_" + ownerId + "_" + lundi, () =>
+    const data = await cachedQuery("timetable_raw_v2_" + ownerId + "_" + lundi, () =>
       supabase.from("timetable_slots").select("*")
         .eq("owner_teacher_id", ownerId)
-        .or(`week_start.is.null,week_start.gte.${lundi}`)
+        .or(`week_start.is.null,week_start.gte.${edtLundiRentree()}`)
         .order("day_of_week").order("slot_order"));
     setCalBrut(data || []);
   };
@@ -5761,6 +5866,9 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           { key: "calendar", icon: "▤", label: "Emploi du temps", phone: false, onClick: go("calendar", "calendar") },
         ] },
         { sect: "Suivi", items: [
+          // Ajouté le 2026-10-12 : le technicien consulte les résultats d'une
+          // classe, école puis classe, comme pour l'emploi du temps.
+          { key: "results", icon: "✓", label: "Résultats", phone: false, onClick: go("results") },
           { key: "activitylog", icon: "◔", label: "Activité", phone: false, onClick: go("activitylog") },
           { key: "messages", icon: "✉", label: "Messagerie", phone: false, onClick: go("messages") },
         ] },
@@ -5796,6 +5904,40 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     }
     groups = groups.filter((g) => g.items.length > 0);
 
+    /* ══════════════════════════════════════════════════════════════════════
+     * 🔴 CE QUI NE TENAIT PAS DANS LA BARRE N'EXISTAIT PAS — corrigé le
+     * 2026-10-12.
+     *
+     * Le rail de gauche et la barre du bas sont LE MÊME menu : une entrée
+     * `phone: false` reçoit la classe `ec-nav-wideonly`, que le CSS masque
+     * sous 900 px. Sur ordinateur le rail les porte toutes ; sur téléphone
+     * elles disparaissaient — sans défilement, sans « … », sans rien qui dise
+     * qu'il en existait d'autres.
+     *
+     * 📏 Mesuré avant de corriger, et la direction était la plus mal servie :
+     *   · administrateur : 5 visibles, 3 inaccessibles (emploi du temps,
+     *     activité, MESSAGERIE) ;
+     *   · direction et référent : 4 visibles, 4 inaccessibles (programme,
+     *     activité, messagerie, échanges de l'école) — alors qu'il restait
+     *     une place libre dans la barre ;
+     *   · enseignante et parent : tout était atteignable, et c'est pour cela
+     *     que personne ne l'avait vu.
+     *
+     * ⭐ LA RÈGLE : dès qu'une destination sort de la barre, la dernière place
+     * revient à « Plus ». On garde QUATRE entrées lisibles plutôt que six
+     * libellés de 11 px écrasés sur 360 px — et surtout, plus aucune
+     * destination n'est injoignable. Quand rien ne dépasse (l'enseignante),
+     * la barre garde ses cinq entrées et « Plus » n'apparaît pas. */
+    const toutes = groups.flatMap((g) => g.items);
+    const placesBarre = toutes.some((it) => !it.phone) ? 4 : 5;
+    const enBarre = toutes.filter((it) => it.phone).slice(0, placesBarre);
+    const dansLePlus = toutes.filter((it) => !enBarre.includes(it));
+    /* ⚠️ LA PASTILLE DES NON-LUS DOIT SUIVRE LA MESSAGERIE. Si elle part dans
+       le panneau et que la pastille reste derrière, un message arrive et plus
+       personne ne le voit : la correction serait un recul sur le défaut
+       qu'elle répare. */
+    const nonLusCaches = dansLePlus.some((it) => it.key === "messages") ? unreadCount : 0;
+
     // Identité affichée au pied du rail (masquée sur téléphone par le CSS).
     const who = isParent
       ? (parent?.full_name || "Parent")
@@ -5811,6 +5953,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     // suffit, un rail permanent de 250 px lui présenterait surtout du vide.
     // Sur téléphone — son usage principal — rien ne change.
     return (
+      <>
       <nav className={`ec-bottomnav${isParent ? " ec-bottomnav--parent" : ""}`} aria-label="Navigation principale">
         <div className="ec-nav-brand" aria-hidden="true">
           <span>EC</span>
@@ -5827,7 +5970,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               <button
                 key={it.key}
                 onClick={it.onClick}
-                className={it.phone ? undefined : "ec-nav-wideonly"}
+                className={enBarre.includes(it) ? undefined : "ec-nav-wideonly"}
                 aria-current={screen === it.key ? "page" : undefined}
               >
                 <span aria-hidden="true" className="ec-nav-ico">{it.icon}</span>
@@ -5840,6 +5983,19 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           </Fragment>
         ))}
 
+        {dansLePlus.length > 0 && (
+          <button
+            className="ec-nav-phoneonly"
+            onClick={() => setNavPlus(true)}
+            aria-expanded={navPlus}
+            aria-label={`Plus de destinations${nonLusCaches > 0 ? `, ${nonLusCaches} message(s) non lu(s)` : ""}`}
+          >
+            <span aria-hidden="true" className="ec-nav-ico">⋯</span>
+            <span style={{ whiteSpace: "nowrap" }}>Plus</span>
+            {nonLusCaches > 0 && <span className="ec-nav-pill">{nonLusCaches}</span>}
+          </button>
+        )}
+
         <div className="ec-nav-foot">
           <span aria-hidden="true">{initials}</span>
           <span style={{ minWidth: 0 }}>
@@ -5848,6 +6004,66 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           </span>
         </div>
       </nav>
+
+      {/* LE PANNEAU — téléphone seulement, au-dessus de la barre (z-index 50).
+          Le fond sombre est cliquable pour refermer : sur téléphone, c'est le
+          geste qu'on essaie en premier. */}
+      {navPlus && dansLePlus.length > 0 && (
+        <div className="ec-nav-phoneonly" style={{
+          position: "fixed", inset: 0, zIndex: 60,
+          flexDirection: "column", justifyContent: "flex-end",
+          background: "rgba(0,0,0,.42)",
+        }}>
+          <button
+            aria-label="Fermer"
+            onClick={() => setNavPlus(false)}
+            style={{ position: "absolute", inset: 0, background: "none", border: 0, cursor: "pointer" }}
+          />
+          <div
+            role="dialog"
+            aria-label="Autres destinations"
+            style={{
+              position: "relative", background: COLORS.card,
+              borderTopLeftRadius: 16, borderTopRightRadius: 16,
+              borderTop: `1px solid ${COLORS.border}`,
+              padding: "10px 8px calc(14px + env(safe-area-inset-bottom))",
+              boxShadow: "0 -8px 28px rgba(0,0,0,.18)",
+            }}
+          >
+            <div style={{
+              width: 38, height: 4, borderRadius: 999, background: COLORS.border2,
+              margin: "2px auto 10px",
+            }} aria-hidden="true" />
+            {dansLePlus.map((it) => (
+              <button
+                key={it.key}
+                onClick={() => { setNavPlus(false); it.onClick(); }}
+                aria-current={screen === it.key ? "page" : undefined}
+                style={{
+                  display: "flex", alignItems: "center", gap: 14, width: "100%",
+                  minHeight: 52, padding: "10px 14px", background: "none", border: 0,
+                  fontSize: FONT.md, fontWeight: 700, textAlign: "left",
+                  color: screen === it.key ? COLORS.g600 : COLORS.ink,
+                }}
+              >
+                <span aria-hidden="true" style={{ fontSize: 21, lineHeight: 1, width: 24, textAlign: "center" }}>{it.icon}</span>
+                <span style={{ flex: 1 }}>{it.label}</span>
+                {it.key === "messages" && unreadCount > 0 && (
+                  <span className="ec-nav-pill">{unreadCount}</span>
+                )}
+              </button>
+            ))}
+            <button
+              onClick={() => setNavPlus(false)}
+              className="ec-btn ec-btn--ghost ec-btn--block"
+              style={{ marginTop: 8 }}
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
+      )}
+      </>
     );
   };
 
@@ -6642,55 +6858,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     }
 
     if (edtChoisitUneClasse && !edtClasseVue) {
-      return (
-        <div>
-          {/* Le technicien peut remonter à la liste des écoles ; la direction
-              n'en a qu'une, donc pas de fil d'Ariane pour elle. */}
-          {PROFILES_ENABLED && isAdmin && edtEcoleVue && (
-            <Breadcrumb items={[
-              { label: "Écoles", onClick: () => { setEdtEcoleVue(null); setEdtClasseVue(null); } },
-              { label: edtEcoleVue.name || "École" },
-            ]} />
-          )}
-          <h1 className="ec-h1">Emploi du temps</h1>
-          <p className="ec-sub">
-            {PROFILES_ENABLED && isAdmin && edtEcoleVue
-              ? `${edtEcoleVue.name} — choisissez une classe pour consulter son emploi du temps, en lecture seule.`
-              : "Choisissez une classe pour consulter son emploi du temps — en lecture seule."}
-          </p>
-          {edtClasses === null ? (
-            <div style={{ marginTop: 18 }}><SkeletonRows rows={4} /></div>
-          ) : edtClasses.length === 0 ? (
-            <Card style={{ marginTop: 18 }}>
-              <EmptyState icon="▤" title="Aucune classe dans cette école">
-                Une classe apparaît ici dès qu'un enseignant est rattaché à l'école.
-              </EmptyState>
-            </Card>
-          ) : (
-            <div style={{ display: "grid", gap: 8, marginTop: 18 }}>
-              {edtClasses.map((c) => {
-                const niv = LEVELS.find((l) => l.id === c.level);
-                return (
-                  <ListRow
-                    key={c.id}
-                    icon="▤"
-                    title={c.class_label || niv?.name || "Classe"}
-                    meta={[niv?.name, c.full_name].filter(Boolean).join(" · ")}
-                    onClick={() => {
-                      /* La semaine consultée repart sur la semaine en cours :
-                         garder le lundi de la classe précédente ferait lire
-                         une autre classe à une autre date. */
-                      setCalLundi(null);
-                      if (niv) setSelectedLevel(niv);
-                      setEdtClasseVue(c);
-                    }}
-                  />
-                );
-              })}
-            </div>
-          )}
-        </div>
-      );
+      return vueChoixClasse({ titre: "Emploi du temps", quoi: "son emploi du temps" });
     }
 
     /* ══════════════════════════════════════════════════════════════════════
@@ -6969,7 +7137,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               type="button"
               className="ec-btn ec-btn--ghost"
               onClick={() => setCalLundi(edtDecaleSemaine(calLundiEff, -1))}
-              disabled={calLundiEff <= calLundiCourant}
+              /* Jusqu'au lundi de la rentrée, et pas plus loin : avant, il n'y
+                 a rien à lire, et une flèche qui recule sans fin laisse croire
+                 le contraire. (Avant le 2026-10-12 la borne était « cette
+                 semaine » : on ne pouvait pas reculer du tout.) */
+              disabled={calLundiEff <= edtLundiRentree()}
               aria-label="Semaine précédente"
               style={{ minWidth: 52 }}
             >‹</button>
@@ -6986,6 +7158,22 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                 {" · du "}{edtLibelleJourCourt(calLundiEff, 1)}
                 {" au "}{edtLibelleJourCourt(calLundiEff, 5)}
               </div>
+              {/* 🔴 CE N'EST PAS UN ARCHIVAGE, ET IL FAUT LE DIRE.
+                  `edtFusionneSemaine` combine les créneaux PERMANENTS
+                  d'aujourd'hui avec les exceptions enregistrées pour la
+                  semaine demandée. Pour une semaine passée, les
+                  exceptions sont donc exactes, mais le fond est l'emploi du
+                  temps ACTUEL — pas celui qui était en vigueur à
+                  l'époque. Personne ne garde l'historique du modèle
+                  permanent, et faire croire le contraire à une direction
+                  qui relit une semaine serait pire que de ne rien montrer. */}
+              {edtEcartSemaines(calLundiEff) < 0 && (
+                <div style={{ fontSize: "var(--ec-fs-1)", color: COLORS.ink3, marginTop: 4, lineHeight: 1.4 }}>
+                  Semaine passée : les fériés et journées
+                  modifiés de cette semaine-là sont exacts ; le reste
+                  affiche l'emploi du temps habituel d'aujourd'hui.
+                </div>
+              )}
             </div>
 
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -10622,10 +10810,58 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             </div>
           );
         })()}
-        {screen === "results" && PROFILES_ENABLED && !isAdmin && (
+        {/* 🔴 `!isAdmin` RETIRÉ LE 2026-10-12. L'écran des résultats était
+            explicitement fermé au technicien — ce qui se tenait tant qu'il n'y
+            avait aucun moyen de choisir une classe : sans classe, l'écran
+            lisait SON identifiant et rendait zéro élève. Maintenant qu'il
+            choisit une école puis une classe, la porte s'ouvre.
+            ⚠️ Et il fallait la rouvrir DES DEUX CÔTÉS : sans l'entrée dans le
+            rail ajoutée plus haut, ce branchement n'aurait jamais été atteint
+            et le lot aurait eu l'air de ne rien faire. */}
+        {screen === "results" && PROFILES_ENABLED && (
           isParent
             ? <Results parent={parent} student={parentStudent} results={parentResults} onOpenLesson={(id) => openLesson(id)} onBack={() => setScreen("home")} />
-            : <Results teacher={teacher} school={schoolContext} onBack={goBack} initialTab={resultsTab} />
+            : edtChoisitUneClasse
+              /* 🔴 MÊME CHEMIN QUE L'EMPLOI DU TEMPS — 2026-10-12.
+                 La direction, le référent et le technicien n'ont pas de classe
+                 à eux : sans classe choisie, cet écran lisait `teacher.id`,
+                 c'est-à-dire LEUR propre identifiant, et rendait zéro élève et
+                 zéro leçon. Un écran vide qui n'était pas une erreur, et que
+                 rien n'expliquait. C'est le défaut n°16 de l'emploi du temps,
+                 au même endroit du même raisonnement.
+                 ⚠️ `lectureSeule` n'est pas décoratif : voir le commentaire en
+                 tête de `Results`. L'administrateur a le droit d'ÉCRIRE des
+                 notes (politique `results manage`), donc sans ce drapeau
+                 l'écran lui proposerait d'en saisir au nom de l'enseignante. */
+              ? (edtClasseVue
+                  ? <>
+                      {/* Même commande et MÊME LIBELLÉ que sur l'emploi du temps
+                          — « Changer de classe ». Deux affordances différentes
+                          pour le même geste, sur deux écrans jumeaux, c'est une
+                          chose de plus à apprendre pour rien. */}
+                      <div style={{ marginBottom: 4 }}>
+                        <button
+                          type="button"
+                          className="ec-btn ec-btn--ghost"
+                          onClick={() => setEdtClasseVue(null)}
+                        >
+                          Changer de classe
+                        </button>
+                      </div>
+                      <Results
+                      teacher={{ id: edtClasseVue.id, role: "teacher" }}
+                      school={{ name: (isAdmin ? edtEcoleVue?.name : null) || schoolContext?.name }}
+                      onBack={goBack}
+                      initialTab="class"
+                      lectureSeule
+                      classeLabel={[
+                        edtClasseVue.class_label || LEVELS.find((l) => l.id === edtClasseVue.level)?.name,
+                        edtClasseVue.full_name,
+                      ].filter(Boolean).join(" · ")}
+                      />
+                    </>
+                  : vueChoixClasse({ titre: "Résultats", quoi: "ses résultats" }))
+              : <Results teacher={teacher} school={schoolContext} onBack={goBack} initialTab={resultsTab} />
         )}
         {screen === "activitylog" && PROFILES_ENABLED && (isAdmin || isSchoolAdmin) && (
           <ActivityLog school={schoolContext} isAdmin={isAdmin} onBack={goBack}
