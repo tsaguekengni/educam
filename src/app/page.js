@@ -189,6 +189,25 @@ export default function Home() {
     setLoading(true);
     setError("");
 
+    // Un champ vide n'est PAS un mauvais mot de passe. Sans ce garde-fou, un
+    // email vide partait jusqu'a Supabase, qui repondait « missing email or
+    // phone » — et l'ecran affichait quand meme « Email ou mot de passe
+    // incorrect ». Le 2026-10-12, le soir du premier envoi WhatsApp aux
+    // familles, six tentatives sont parties avec un email vide : des parents
+    // ont reessaye leur mot de passe encore et encore en croyant s'etre
+    // trompes. Dire ce qui manque coute deux lignes.
+    const emailSaisi = (email || "").trim();
+    if (!emailSaisi) {
+      setError("Entrez votre adresse email");
+      setLoading(false);
+      return;
+    }
+    if (!password) {
+      setError("Entrez votre mot de passe");
+      setLoading(false);
+      return;
+    }
+
     // Hors ligne : dire la vérité plutôt que d'accuser le mot de passe.
     if (typeof navigator !== "undefined" && !navigator.onLine) {
       setError(
@@ -201,12 +220,24 @@ export default function Home() {
     }
 
     const { data, error: authError } = await supabase.auth.signInWithPassword({
-      email,
+      email: emailSaisi,
       password,
     });
 
     if (authError) {
-      setError("Email ou mot de passe incorrect");
+      // Distinguer ce que l'utilisateur peut corriger de ce qu'il ne peut pas.
+      // Tout aplatir en « email ou mot de passe incorrect » envoyait les gens
+      // reessayer le seul element qui n'etait pas en cause.
+      const brut = String(authError?.message || "");
+      if (/missing email or phone/i.test(brut)) {
+        setError("Entrez votre adresse email");
+      } else if (/email not confirmed/i.test(brut)) {
+        setError("Votre compte n'est pas encore confirme. Verifiez vos emails.");
+      } else if (/rate limit|too many/i.test(brut)) {
+        setError("Trop de tentatives. Patientez quelques minutes avant de reessayer.");
+      } else {
+        setError("Email ou mot de passe incorrect");
+      }
       setLoading(false);
       return;
     }

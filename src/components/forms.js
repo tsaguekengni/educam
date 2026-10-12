@@ -51,6 +51,10 @@ export function Field({ label, hint, error, required, type = "text", ...rest }) 
           id={id}
           type={type}
           className="ec-input"
+          // `required` arrive bien jusqu'a l'<input> : sans cette ligne,
+          // l'asterisque rouge etait le SEUL effet de la propriete et le
+          // navigateur laissait passer un champ vide. Voir FieldShell.
+          required={required}
           aria-invalid={error ? "true" : undefined}
           aria-describedby={errId || hintId}
           {...rest}
@@ -75,6 +79,7 @@ export function PasswordField({ label = "Mot de passe", hint, error, required, .
             type={shown ? "text" : "password"}
             className="ec-input"
             style={{ paddingRight: 88 }}
+            required={required}
             aria-invalid={error ? "true" : undefined}
             aria-describedby={errId || hintId}
             {...rest}
@@ -108,6 +113,7 @@ export function SelectField({ label, hint, error, required, options = [], childr
         <select
           id={id}
           className="ec-input"
+          required={required}
           aria-invalid={error ? "true" : undefined}
           aria-describedby={errId || hintId}
           style={{ cursor: "pointer" }}
@@ -135,6 +141,7 @@ export function TextAreaField({ label, hint, error, required, rows = 4, ...rest 
           rows={rows}
           className="ec-input"
           style={{ minHeight: 90, resize: "vertical", lineHeight: 1.5 }}
+          required={required}
           aria-invalid={error ? "true" : undefined}
           aria-describedby={errId || hintId}
           {...rest}
