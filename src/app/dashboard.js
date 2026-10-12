@@ -659,7 +659,23 @@ const EDT_TYPES = [
   { key: "pause:programme", label: "Programme de l'école", nom: "Programme de l'école", ancre: true },
   { key: "pause:english", label: "English (enseignant extérieur)", nom: "English (enseignant extérieur)", ancre: true },
   { key: "pause:tic", label: "TIC", nom: "TIC", ancre: true },
-  { key: "pause:evaluation", label: "Évaluation", nom: "Évaluation" },
+  /* 🔴 L'ÉVALUATION PREND LA JOURNÉE ENTIÈRE — demande de Maxime, 2026-10-09 :
+   * *« dans l'emploi du temps, l'option évaluation, ils veulent qu'elle soit
+   * comme férié : quand on la sélectionne, elle couvre toute la journée, car
+   * les évaluations prennent la journée complète. »*
+   *
+   * ⚠️ MAIS PAS « COMME FÉRIÉ » EN TOUT : une journée d'évaluation **peut**
+   * être permanente (« tous les vendredis »), là où un férié permanent
+   * fermerait l'école tous les lundis de l'année — le défaut n°11 du
+   * 2026-10-03. Les deux comportements étaient portés par UN SEUL drapeau ;
+   * ils sont désormais séparés, parce qu'ils ne répondent pas à la même
+   * question :
+   *   · `journeeEntiere`      → remplace la journée, 420 min, durée non réglable ;
+   *   · `uneSemaineSeulement` → « À partir de maintenant » interdit.
+   * Le férié porte les deux. L'évaluation ne porte que le premier. */
+  { key: "pause:evaluation", label: "Évaluation (toute la journée)", nom: "Évaluation",
+    journeeEntiere: true,
+    texteJournee: "Évaluations toute la journée — aucune leçon à projeter" },
   { key: "pause:revision", label: "Révision", nom: "Révision" },
   /* 🔴 LE JOUR FÉRIÉ PREND LA JOURNÉE ENTIÈRE — demande de Maxime, 2026-10-02
    * (« lundi le 05 serait férié, et ça prend toute la journée, on a besoin d'un
@@ -673,15 +689,56 @@ const EDT_TYPES = [
    *     des durées de `EDT_DUREES`) ;
    *   · « À partir de maintenant » est INTERDIT dessus — ce serait fermer
    *     l'école tous les lundis de l'année. « Une fois » est dans la demande.
+   *     ⚠️ Ce troisième comportement vit maintenant dans `uneSemaineSeulement`,
+   *     SON drapeau à lui : l'évaluation partage les deux premiers et pas
+   *     celui-ci (voir le bloc de l'évaluation ci-dessus).
    *
    * ⚠️ Deux mécanismes distincts, et les deux sont nécessaires : CE créneau dit
    * à l'enseignante que sa journée est fermée ; `EDT_FERIES` dit au voyant de
    * retard de ne pas compter ce jour comme une occasion d'enseigner. L'un sans
    * l'autre, soit elle voit un lundi normal, soit le voyant lui promet un
-   * rattrapage qui n'aura pas lieu. */
-  { key: "pause:ferie", label: "Jour férié (toute la journée)", nom: "Jour férié", journeeEntiere: true },
+   * rattrapage qui n'aura pas lieu.
+   * ⚠️ L'évaluation n'a PAS besoin de ce second mécanisme : une journée
+   * d'évaluation ne porte aucun créneau de leçon, donc le voyant n'y compte
+   * aucun passage de lui-même. C'est le calcul qui s'ajuste, pas une liste à
+   * tenir à jour. */
+  { key: "pause:ferie", label: "Jour férié (toute la journée)", nom: "Jour férié",
+    journeeEntiere: true, uneSemaineSeulement: true,
+    texteJournee: "L'école est fermée — aucune leçon" },
 ];
 const EDT_FERIE_KEY = "pause:ferie";
+
+/* ─── CE QU'UN CRÉNEAU SANS LEÇON DIT DE LUI-MÊME — 2026-10-09, défaut n°18 ──
+ * 📏 Mesuré en base avant d'écrire : **31 des 57 créneaux** du modèle permanent
+ * de Mme Batam portent `subject_id = 'pause'` (récréations, programme de
+ * l'école, English, TIC, évaluation, révision). Et la vue « un jour » n'avait
+ * AUCUN garde-fou pour eux : `subject_coverage` ne porte pas de ligne `pause`,
+ * donc `isTeacherTaught('pause')` est faux ; aucune leçon ni aucun sujet ne
+ * porte cette matière ; la carte tombait donc sur son dernier repli et
+ * affichait **« Sujet à définir pour cette semaine »** — sur une récréation.
+ *
+ * ⭐ Plus de la moitié de sa semaine réclamait un contenu que personne ne doit
+ * écrire. Et la journée d'évaluation demandée le 2026-10-09 atterrissait
+ * exactement là : la journée ENTIÈRE aurait dit « Sujet à définir ».
+ * **Corriger le créneau sans corriger ce qu'il fait DIRE à l'écran n'aurait
+ * été qu'une demi-correction** — troisième fois que ce piège est payé.
+ *
+ * Chaque type dit donc ce qu'il est. ⚠️ Les clés sont les `component_id` tels
+ * qu'ils sont EN BASE, pas les libellés : `dejeuner` et `etude` n'ont plus de
+ * type côté enseignante mais existent encore dans des lignes anciennes. */
+const EDT_TEXTE_PAUSE = {
+  ferie: "L'école est fermée — pas de classe ce jour-là.",
+  evaluation: "Évaluation — la plateforme ne sert pas de leçon sur ce créneau.",
+  revision: "Révision de ce qui a déjà été enseigné — pas de leçon nouvelle.",
+  recreation: "Récréation.",
+  programme: "Temps réservé par l'école.",
+  english: "Anglais, assuré par un enseignant extérieur — la plateforme ne fournit pas cette leçon.",
+  tic: "TIC — la plateforme ne fournit pas cette leçon.",
+  dejeuner: "Pause déjeuner.",
+  etude: "Étude surveillée.",
+};
+const edtTextePause = (componentId) =>
+  EDT_TEXTE_PAUSE[componentId] || "Pas de leçon à projeter sur ce créneau.";
 const edtTypeByKey = (k) => EDT_TYPES.find((t) => t.key === k);
 const edtKeyOf = (slot) =>
   slot.subject_id === "pause" ? `pause:${slot.component_id}` : "lecon";
@@ -1393,8 +1450,17 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
   const calc = edtRecalcule(lignes);
   const finJournee = calc.length ? calc[calc.length - 1].fin : edtMin(EDT_DEBUT);
   const resteFinJournee = edtMin(EDT_FIN) - finJournee;
-  // Une journée fériée n'accepte rien d'autre, et ne peut pas devenir permanente.
-  const estFerie = lignes.some((l) => edtTypeByKey(l.kind)?.journeeEntiere);
+  /* Une journée entière (férié OU évaluation) n'accepte rien d'autre. Mais
+     seule celle qui porte `uneSemaineSeulement` refuse de devenir permanente :
+     « tous les vendredis = évaluation » est légitime, « tous les lundis =
+     férié » était le défaut n°11. Trois questions, trois valeurs — les
+     mélanger est exactement ce qui a rendu la correction du 2026-10-09
+     nécessaire. */
+  const typeJournee = lignes
+    .map((l) => edtTypeByKey(l.kind)).find((t) => t?.journeeEntiere) || null;
+  const estJourneeEntiere = !!typeJournee;
+  const estFerie = lignes.some((l) => l.kind === EDT_FERIE_KEY);
+  const estUneSemaineSeulement = lignes.some((l) => edtTypeByKey(l.kind)?.uneSemaineSeulement);
 
   // Toute modification passe par ici : c'est le seul endroit qui mémorise
   // l'état précédent, donc le seul qui rend « annuler » fiable.
@@ -1404,19 +1470,24 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
     setMsg(null);
   };
 
-  // La ligne unique d'une journée fériée : 07:30 → 14:30, rien d'autre.
-  const ligneFerie = () => ({
-    uid: `ferie-${Date.now()}`, kind: EDT_FERIE_KEY,
-    subject_id: "pause", component_id: "ferie",
+  /* La ligne unique d'une journée entière : 07:30 → 14:30, rien d'autre.
+     ⚠️ Prend la CLÉ en paramètre depuis le 2026-10-09 : elle servait au seul
+     férié, elle sert aussi à l'évaluation. Le `component_id` se déduit de la
+     clé — c'est la même règle que `edtKeyOf` dans l'autre sens, donc il n'y a
+     pas deux listes à tenir d'accord. */
+  const ligneJourneeEntiere = (key) => ({
+    uid: `jour-${key.split(":")[1]}-${Date.now()}`, kind: key,
+    subject_id: "pause", component_id: key.split(":")[1],
     minutes: edtMin(EDT_FIN) - edtMin(EDT_DEBUT),
     ancreDebut: edtMin(EDT_DEBUT),
   });
-  const marquerFerie = () => modifier(() => [ligneFerie()]);
+  const marquerFerie = () => modifier(() => [ligneJourneeEntiere(EDT_FERIE_KEY)]);
 
-  /* Retirer le férié REND LA JOURNÉE HABITUELLE, il ne laisse pas un écran vide.
-     Vider aurait obligé l'enseignante à retaper toute une journée pour corriger
-     un seul clic — et un écran vide juste après « ce n'est pas un jour férié »
-     ressemble à une perte de données, pas à une annulation. */
+  /* Retirer la journée entière REND LA JOURNÉE HABITUELLE, elle ne laisse pas
+     un écran vide. Vider aurait obligé l'enseignante à retaper toute une
+     journée pour corriger un seul clic — et un écran vide juste après « ce
+     n'est pas un jour férié » ressemble à une perte de données, pas à une
+     annulation. */
   const retirerFerie = () => modifier(() => edtLignesDepuisSlots(
     (brut || [])
       .filter((s) => s.day_of_week === jour && !s.week_start)
@@ -1425,12 +1496,14 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
   ));
 
   const changeType = (uid, key) => modifier((prev) => {
-    /* ⚠️ « Jour férié » REMPLACE la journée, il ne s'y ajoute pas. C'est la
-       demande telle quelle — « ça prend toute la journée » — et c'est aussi la
-       seule issue honnête : laissé comme une ligne parmi d'autres, il serait
-       poussé à 14:30 par la coupe de fin de journée et disparaîtrait, ou bien
-       il écraserait les créneaux suivants sans le dire. */
-    if (edtTypeByKey(key)?.journeeEntiere) return [ligneFerie()];
+    /* ⚠️ UN TYPE « TOUTE LA JOURNÉE » REMPLACE LA JOURNÉE, il ne s'y ajoute
+       pas — le jour férié depuis le 2026-10-02, l'évaluation depuis le
+       2026-10-09. C'est la demande telle quelle — « ça prend toute la
+       journée » — et c'est aussi la seule issue honnête : laissé comme une
+       ligne parmi d'autres, il serait poussé à 14:30 par la coupe de fin de
+       journée et disparaîtrait, ou bien il écraserait les créneaux suivants
+       sans le dire. */
+    if (edtTypeByKey(key)?.journeeEntiere) return [ligneJourneeEntiere(key)];
     return prev.map((l) => {
       if (l.uid !== uid) return l;
       const t = edtTypeByKey(key);
@@ -1499,7 +1572,7 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
     /* Garde-fou : un férié permanent fermerait l'école tous les lundis de
        l'année. Le bouton est déjà désactivé, on refuse aussi ici — un bouton
        désactivé peut être contourné, une règle au point d'écriture non. */
-    if (!lundi && estFerie) {
+    if (!lundi && estUneSemaineSeulement) {
       setMsg({
         t: "Un jour férié ne s'enregistre que pour une semaine : utilisez « Seulement cette semaine-là ».",
         tone: "err",
@@ -1963,9 +2036,12 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
                 </div>
 
                 {t?.journeeEntiere ? (
-                  /* Pas de menu de durée pour un férié : 420 minutes n'est pas
-                     dans `EDT_DUREES`, et une durée réglable inviterait à
-                     fabriquer un « férié de 30 minutes » qui ne veut rien dire. */
+                  /* Pas de menu de durée pour une journée entière : 420 minutes
+                     n'est pas dans `EDT_DUREES`, et une durée réglable
+                     inviterait à fabriquer un « férié de 30 minutes » ou une
+                     « journée d'évaluation de 45 minutes » qui ne veulent rien
+                     dire. Qui veut une évaluation d'une heure prend le type
+                     « Révision » ou une leçon, pas une demi-journée entière. */
                   <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 700, color: COLORS.ink2 }}>
                     Toute la journée
                   </div>
@@ -2017,8 +2093,11 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
                   </div>
                 ) : (
                   <div style={{ fontSize: "var(--ec-fs-3)", color: COLORS.ink3, fontWeight: 600 }}>
+                    {/* Le texte vient du TYPE (`texteJournee`) : « l'école est
+                        fermée » est vrai d'un férié et faux d'une journée
+                        d'évaluation, où la classe est bien là. */}
                     {t?.journeeEntiere
-                      ? "L'école est fermée — aucune leçon"
+                      ? (t.texteJournee || "Toute la journée — aucune leçon")
                       : t?.ancre ? "Horaire fixé par l'école" : "Pas de leçon à projeter"}
                   </div>
                 )}
@@ -2054,6 +2133,8 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
           <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 700, color: resteFinJournee < 0 ? COLORS.crit : COLORS.ink2 }}>
             {estFerie
               ? "Journée fériée : l'école est fermée du matin au soir"
+              : estJourneeEntiere
+                ? `Journée d'évaluation : elle occupe ${EDT_DEBUT} → ${EDT_FIN} en entier`
               : resteFinJournee > 0
                 ? `Fin à ${edtHhmm(finJournee)} — ${resteFinJournee} min libres avant ${EDT_FIN}`
                 : `La journée est complète : elle se termine à ${EDT_FIN}`}
@@ -2062,18 +2143,27 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
             {/* Le férié est aussi dans le menu « Type de créneau », mais en un
                 geste depuis ici : c'est une journée entière qu'on déclare, pas
                 un créneau qu'on règle. */}
+            {/* Un seul bouton, trois états. Quand une journée d'évaluation est
+                posée, il faut pouvoir en sortir sans passer par le menu de
+                type — et le libellé doit nommer ce qu'on retire, sinon
+                « ce n'est pas un jour férié » apparaîtrait sur une journée
+                d'évaluation. */}
             <button
               type="button"
               className="ec-btn ec-btn--ghost"
-              onClick={estFerie ? retirerFerie : marquerFerie}
+              onClick={estJourneeEntiere ? retirerFerie : marquerFerie}
             >
-              {estFerie ? "Ce n'est pas un jour férié" : "Jour férié"}
+              {estFerie
+                ? "Ce n'est pas un jour férié"
+                : estJourneeEntiere
+                  ? "Ce n'est pas une journée d'évaluation"
+                  : "Jour férié"}
             </button>
             <button
               type="button"
               className="ec-btn ec-btn--ghost"
               onClick={ajouter}
-              disabled={estFerie || resteFinJournee < EDT_DUREES[0]}
+              disabled={estJourneeEntiere || resteFinJournee < EDT_DUREES[0]}
             >
               Ajouter un créneau
             </button>
@@ -2089,6 +2179,21 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
               {edtLibelleJourCourt(lundiSel, jour)} sera férié. Un jour férié ne s'enregistre
               que pour sa semaine : les autres {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()}s
               de l'année gardent votre emploi du temps habituel.
+            </>
+          ) : estJourneeEntiere ? (
+            /* 🔴 LES DEUX PORTÉES SONT OUVERTES ICI, et c'est la différence
+               avec le férié : « tous les vendredis = évaluation » est un
+               rythme d'école parfaitement normal. On NOMME donc le choix au
+               lieu de le fermer — mais on dit aussi ce qu'il coûte, parce
+               qu'une journée d'évaluation permanente retire ses créneaux de
+               leçon pour toute l'année, et que le voyant de retard le comptera. */
+            <>
+              Le {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()}{" "}
+              {edtLibelleJourCourt(lundiSel, jour)} sera consacré aux évaluations,
+              de {EDT_DEBUT} à {EDT_FIN}. Pour cette seule semaine, ou tous les{" "}
+              {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()}s ? Chaque{" "}
+              {EDT_JOURS.find((j) => j.n === jour)?.nom.toLowerCase()} ainsi réservé
+              ne porte plus aucune leçon.
             </>
           ) : (
             <>
@@ -2114,8 +2219,8 @@ function TimetableEditor({ teacher, timetable, subjects, online, onSaved, onBack
             type="button"
             className="ec-btn"
             onClick={() => enregistrer("toujours")}
-            disabled={saving || estFerie}
-            title={estFerie ? "Un jour férié ne se répète pas chaque semaine." : undefined}
+            disabled={saving || estUneSemaineSeulement}
+            title={estUneSemaineSeulement ? "Un jour férié ne se répète pas chaque semaine." : undefined}
           >
             {saving ? "Enregistrement…" : "À partir de maintenant"}
           </button>
@@ -6925,6 +7030,21 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                 {[1, 2, 3, 4, 5].map((d) => {
                   const sl = getDaySlots(d, calSlots).slice().sort(trier);
                   const ferie = sl.some((s) => s.component_id === "ferie");
+                  /* 🔴 UNE JOURNÉE D'ÉVALUATION N'EST PAS UN JOUR FÉRIÉ —
+                     2026-10-09. La classe est là, l'enseignante est là ; ce
+                     qu'il n'y a pas, c'est une leçon à projeter. Lui servir le
+                     pavé « pas de classe » du férié aurait dit faux aux
+                     parents, précisément le jour le plus important du mois. */
+                  /* ⚠️ ET LA CONDITION PORTE SUR LA DURÉE, pas seulement sur
+                     « un seul créneau » : elle a déjà des évaluations de 30 à
+                     60 min dans ses journées ordinaires, et une exception
+                     d'une semaine peut très bien ne porter qu'un créneau court.
+                     Tester le nombre aurait fait annoncer « toute la journée »
+                     sur une évaluation de 08:00 à 08:30. */
+                  const journeeEval = !ferie && sl.length === 1
+                    && sl[0].component_id === "evaluation"
+                    && (toMinutes(sl[0].end_time) - toMinutes(sl[0].start_time))
+                       >= (edtMin(EDT_FIN) - edtMin(EDT_DEBUT));
                   const cestAujourdhui = calSemaineCourante && todayDow === d;
                   return (
                     <Card key={d} style={{
@@ -6957,6 +7077,16 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                             fontWeight: 700, color: COLORS.crit,
                           }}>
                             Jour férié — pas de classe
+                          </div>
+                        ) : journeeEval ? (
+                          <div style={{
+                            padding: "12px 13px", fontSize: "var(--ec-fs-2)",
+                            fontWeight: 700, color: COLORS.ink2,
+                          }}>
+                            Évaluations — toute la journée
+                            <div style={{ fontSize: "var(--ec-fs-1)", fontWeight: 600, color: COLORS.ink3, marginTop: 3 }}>
+                              {String(sl[0].start_time || "").slice(0, 5)} – {String(sl[0].end_time || "").slice(0, 5)}
+                            </div>
                           </div>
                         ) : sl.length === 0 ? (
                           <div style={{ padding: "10px 13px", fontSize: "var(--ec-fs-2)", color: COLORS.ink3 }}>
@@ -7101,6 +7231,15 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                   const topic = getTopic(calUnite, calSemaine, slot.subject_id, slot.component_id);
                   const color = getSubjectColor(slot.subject_id);
                   const tt = isTeacherTaught(slot.subject_id);
+                  /* 🔴 DÉFAUT n°18 — 2026-10-09. Un créneau de pause n'a aucune
+                     leçon à servir, et il n'en manque aucune. Sans ce drapeau,
+                     la carte traversait toute la cascade (`tt`, la file, le
+                     sujet, le mois terminé) et tombait sur son dernier repli :
+                     **« Sujet à définir pour cette semaine »** — sur une
+                     récréation. 📏 31 des 57 créneaux de son modèle permanent.
+                     ⚠️ Le test porte sur `subject_id`, pas sur une liste de
+                     `component_id` : toute pause future est couverte d'office. */
+                  const pause = slot.subject_id === "pause" || slot.subject_id === "etude";
                   /* 🔴 LE RELEVÉ D'ABORD, LA FILE ENSUITE — 2026-10-06.
                      Le rang du créneau parmi ceux de la MÊME sous-matière ce
                      jour-là : il permet d'attribuer la 1ʳᵉ leçon marquée au
@@ -7109,11 +7248,14 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                   const rang = daySlots.filter((s2, j) => j <= i
                     && s2.subject_id === slot.subject_id
                     && s2.component_id === slot.component_id).length;
-                  const faite = tt ? null
+                  const faite = (tt || pause) ? null
                     : edtLeconEnseigneeCeJour(slot.subject_id, slot.component_id, calJourIso, rang);
                   /* Une leçon enseignée ce jour-là RESTE sur son créneau. Ce
-                     n'est qu'à défaut qu'on demande à la file ce qui vient. */
-                  const lesson = faite || (tt ? null : getQueuedLesson(slot.subject_id, slot.component_id));
+                     n'est qu'à défaut qu'on demande à la file ce qui vient.
+                     ⚠️ `pause` sort de la boucle AVANT la file : une récréation
+                     ne doit pas devenir cliquable, même par accident. */
+                  const lesson = (tt || pause) ? null
+                    : (faite || getQueuedLesson(slot.subject_id, slot.component_id));
                   const st = toMinutes(slot.start_time), en = toMinutes(slot.end_time);
                   const isNow = showingToday && st != null && en != null && minutesNow >= st && minutesNow < en;
                   const isPast = showingToday && en != null && minutesNow >= en;
@@ -7168,7 +7310,16 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                             {isNow ? " · en cours" : isPast ? " · terminée" : ""}
                           </div>
 
-                          {tt ? (
+                          {/* La pause D'ABORD : elle court-circuite toute la
+                              cascade de résolution de leçon, qui n'a rien à
+                              lui dire. Le créneau se nomme déjà au-dessus
+                              (« Récréation », « Évaluation ») ; ici on dit
+                              seulement pourquoi il n'y a pas de leçon. */}
+                          {pause ? (
+                            <div style={{ fontSize: FONT.sm, color: COLORS.ink3, marginTop: 8, lineHeight: 1.5 }}>
+                              {edtTextePause(slot.component_id)}
+                            </div>
+                          ) : tt ? (
                             <div style={{ marginTop: 9 }}>
                               <Badge tone="neutral">Enseignée par l'enseignant(e)</Badge>
                               <div style={{ fontSize: FONT.sm, color: COLORS.ink3, marginTop: 6, lineHeight: 1.5 }}>
