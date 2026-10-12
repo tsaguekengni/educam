@@ -190,12 +190,17 @@ export default function Home() {
     setError("");
 
     // Un champ vide n'est PAS un mauvais mot de passe. Sans ce garde-fou, un
-    // email vide partait jusqu'a Supabase, qui repondait « missing email or
-    // phone » — et l'ecran affichait quand meme « Email ou mot de passe
+    // email vide partait jusqu'à Supabase, qui répondait « missing email or
+    // phone » — et l'écran affichait quand même « Email ou mot de passe
     // incorrect ». Le 2026-10-12, le soir du premier envoi WhatsApp aux
-    // familles, six tentatives sont parties avec un email vide : des parents
-    // ont reessaye leur mot de passe encore et encore en croyant s'etre
-    // trompes. Dire ce qui manque coute deux lignes.
+    // familles, six tentatives sont parties avec un email vide, et huit autres
+    // ont échoué sur « identifiants invalides » : des parents ont réessayé leur
+    // mot de passe encore et encore en croyant s'être trompés.
+    //
+    // ⭐ Le `.trim()` n'est pas cosmétique : un clavier de téléphone ajoute
+    // volontiers une espace finale, et une adresse suivie d'une espace est
+    // refusée comme un mauvais identifiant. Il explique probablement une part
+    // des huit.
     const emailSaisi = (email || "").trim();
     if (!emailSaisi) {
       setError("Entrez votre adresse email");
@@ -227,14 +232,14 @@ export default function Home() {
     if (authError) {
       // Distinguer ce que l'utilisateur peut corriger de ce qu'il ne peut pas.
       // Tout aplatir en « email ou mot de passe incorrect » envoyait les gens
-      // reessayer le seul element qui n'etait pas en cause.
+      // réessayer le seul élément qui n'était pas en cause.
       const brut = String(authError?.message || "");
       if (/missing email or phone/i.test(brut)) {
         setError("Entrez votre adresse email");
       } else if (/email not confirmed/i.test(brut)) {
-        setError("Votre compte n'est pas encore confirme. Verifiez vos emails.");
+        setError("Votre compte n'est pas encore confirmé. Vérifiez vos emails.");
       } else if (/rate limit|too many/i.test(brut)) {
-        setError("Trop de tentatives. Patientez quelques minutes avant de reessayer.");
+        setError("Trop de tentatives. Patientez quelques minutes avant de réessayer.");
       } else {
         setError("Email ou mot de passe incorrect");
       }
