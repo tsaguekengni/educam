@@ -531,9 +531,54 @@ export default function Home() {
       return;
     }
 
-    await supabase.auth.resetPasswordForEmail(email.trim(), {
+    /* 🔴 LA RÉPONSE DE SUPABASE ÉTAIT JETÉE — corrigé le 2026-10-12, le jour
+     * où l'envoi de courriels a été allumé pour de bon.
+     *
+     * Le code appelait `resetPasswordForEmail` sans regarder ce qu'il en
+     * revenait, puis affichait « un lien vient d'être envoyé » dans TOUS les
+     * cas. Tant que le drapeau était éteint, personne n'atteignait cet écran et
+     * le défaut dormait. ⭐ **Allumer un drapeau réveille les défauts du code
+     * qu'il cachait** — c'est le moment de les relire, pas après.
+     *
+     * ⚠️ DEUX SILENCES À NE PAS CONFONDRE :
+     *   · « cette adresse n'a pas de compte » DOIT rester muet, sinon le
+     *     formulaire devient un moyen de savoir qui est inscrit sur la
+     *     plateforme. Supabase ne renvoie d'ailleurs AUCUNE erreur dans ce
+     *     cas, exprès : la réussite muette est le comportement voulu, et le
+     *     message de succès ci-dessous est écrit pour ne rien trahir.
+     *   · « le courriel n'est pas parti » — serveur d'envoi en panne, quota
+     *     atteint, réseau coupé — ne dit RIEN sur l'existence d'un compte et
+     *     doit se dire. Le taire, c'est envoyer un parent attendre un message
+     *     qui n'arrivera jamais.
+     *
+     * ⭐ On distingue donc par le TYPE D'ERREUR, jamais par l'adresse.
+     *
+     * ⚠️ Réserve assumée : le quota « patientez avant de redemander » de
+     * Supabase peut, sur certaines versions, ne s'appliquer qu'à une adresse
+     * existante — un attaquant patient y lirait un indice. Le message
+     * ci-dessous est donc rédigé pour parler de LA PLATEFORME et jamais de
+     * l'adresse saisie, et le risque résiduel est accepté : 17 familles qui
+     * attendent un courriel fantôme coûtent plus cher. */
+    const { error: resetErr } = await supabase.auth.resetPasswordForEmail(email.trim(), {
       redirectTo: typeof window === "undefined" ? undefined : window.location.origin,
     });
+
+    if (resetErr) {
+      const brut = String(resetErr?.message || "");
+      if (/rate limit|only request this after|too many|over_email_send/i.test(brut)) {
+        setError(
+          "Trop de demandes viennent d'être faites sur la plateforme. " +
+          "Patientez quelques minutes, puis réessayez."
+        );
+      } else {
+        setError(
+          "L'envoi du courriel a échoué. Votre adresse n'est pas en cause : " +
+          "réessayez dans un moment, et prévenez l'école si cela se répète."
+        );
+      }
+      setLoading(false);
+      return;
+    }
 
     setSuccess(
       "Si un compte existe pour cette adresse, un lien de réinitialisation vient d'être envoyé. " +
@@ -589,11 +634,46 @@ export default function Home() {
     setLoading(false);
   };
 
+  /* ══════════════════════════════════════════════════════════════════════
+   * 🔴 LE FILET QUI EMPÊCHE UN BOUTON DE RESTER FIGÉ — posé le 2026-10-12.
+   *
+   * Aucun des quatre gestionnaires (`handleLogin`, `handleRegister`,
+   * `handleForgot`, `handleSetNewPassword`) n'avait de `try`. Ils relâchent le
+   * bouton par une trentaine de `setLoading(false)` disséminés, un par chemin
+   * de sortie — ce qui tient tant que rien ne LÈVE. Qu'un appel réseau casse
+   * en vol (connexion coupée à Douala, DNS qui tombe, onglet qui perd le
+   * réseau pendant la requête) et aucune de ces lignes n'est atteinte : le
+   * bouton reste sur « Connexion… », « Inscription… » ou « Envoi… »
+   * indéfiniment, et rien à l'écran ne dit ce qui s'est passé.
+   *
+   * ⭐ C'EST LA TROISIÈME FOIS QUE CE DÉFAUT EST PAYÉ sur ce projet :
+   * `submitFeedback` le 2026-10-06, `transfererAEnseignante` le 2026-10-08.
+   * Les deux fois la conclusion écrite était la même — **le remède est
+   * structurel, pas une relecture plus attentive.** Alors on le pose ici, à
+   * l'ENDROIT UNIQUE où ces gestionnaires sont appelés, plutôt que de
+   * réindenter quatre fonctions et leurs trente sorties : un `catch` au point
+   * d'appel attrape la promesse rejetée d'un `async`, d'où qu'elle vienne.
+   *
+   * ⚠️ Et c'est l'écran qui compte le plus : 17 familles s'y connectent depuis
+   * un téléphone, sur un réseau qui tombe. Un bouton figé y est indiscernable
+   * d'une plateforme en panne. */
+  const filetAuth = (promesse) => {
+    Promise.resolve(promesse).catch((e) => {
+      // On ne connaît pas la cause — c'est justement pourquoi on est ici. On
+      // dit ce qui est vrai et actionnable, et on rend le bouton.
+      setError(
+        "La connexion au serveur a été interrompue. Vérifiez votre réseau, " +
+        "puis réessayez."
+      );
+      setLoading(false);
+    });
+  };
+
   const submit = (e) => {
     e.preventDefault();
     if (loading) return;
-    if (mode === "forgot") return handleForgot();
-    mode === "login" ? handleLogin() : handleRegister();
+    if (mode === "forgot") return filetAuth(handleForgot());
+    filetAuth(mode === "login" ? handleLogin() : handleRegister());
   };
 
   // Retour d'un lien de réinitialisation : choisir un nouveau mot de passe.
@@ -618,7 +698,7 @@ export default function Home() {
             {error && <Callout tone="crit" icon="⚠" style={{ marginTop: 16 }}>{error}</Callout>}
 
             <form
-              onSubmit={(e) => { e.preventDefault(); if (!loading) handleSetNewPassword(); }}
+              onSubmit={(e) => { e.preventDefault(); if (!loading) filetAuth(handleSetNewPassword()); }}
               style={{ marginTop: 18 }}
             >
               <PasswordField
