@@ -6300,13 +6300,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           </div>
         )}
       </Card>
-    ) : (
-      <Card>
-        <EmptyState icon="✉" title="Aucun message ouvert">
-          Choisissez un message dans la liste pour le lire ici.
-        </EmptyState>
-      </Card>
-    );
+    ) : null;   // pas de volet « en attente » : voir le commentaire de la grille
 
     return (
       <div>
@@ -6630,11 +6624,23 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         )}
 
         <div className="ec-grid" style={{ marginTop: 18 }}>
-          {/* Quand un message est ouvert, la liste disparaît sur téléphone
-              seulement ; le volet de lecture, lui, n'apparaît sur téléphone
-              que s'il y a quelque chose à lire. */}
-          <div className={`ec-c5${openMsg ? " ec-deskonly" : ""}`}>{list}</div>
-          <div className={`ec-c7${openMsg ? "" : " ec-deskonly"}`}>{detail}</div>
+          {/* ⚠️ TANT QU'AUCUN MESSAGE N'EST OUVERT, IL N'Y A PAS DE VOLET DE
+              LECTURE — pas même vide. Il en existait un, portant « Aucun
+              message ouvert · Choisissez un message dans la liste », rendu en
+              permanence dès 900 px de large : une carte qui n'apprenait rien
+              et occupait la moitié de l'écran à côté de la liste.
+              Signalé par Maxime le 2026-10-13 (« literally has no use »).
+
+              Désormais : sans message, la liste prend les 12 colonnes et le
+              volet n'est pas rendu du tout ; avec un message, on retrouve les
+              deux volets 5/7. Un volet ne doit exister qu'avec son contenu.
+
+              Le comportement téléphone est inchangé : `ec-deskonly` sur la
+              liste la fait disparaître sous 900 px quand on lit un message,
+              et le bouton « Retour à la boîte de réception » (`ec-hide-wide`)
+              y ramène. */}
+          <div className={openMsg ? "ec-c5 ec-deskonly" : "ec-c12"}>{list}</div>
+          {openMsg && <div className="ec-c7">{detail}</div>}
         </div>
       </div>
     );
@@ -6709,13 +6715,10 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       );
     };
 
-    const detail = !openExch ? (
-      <Card>
-        <EmptyState icon="✉" title="Choisissez un échange">
-          Le texte complet du message s'affichera ici.
-        </EmptyState>
-      </Card>
-    ) : (
+    // Même règle que la boîte de réception (2026-10-13) : pas de volet de
+    // lecture tant qu'il n'y a rien à lire. L'état vide « Choisissez un
+    // échange » a été retiré ; la liste prend toute la largeur à la place.
+    const detail = !openExch ? null : (
       <Card>
         <div className="ec-cardhd">
           <h2 className="ec-cardtitle">{openExch.head.subject || "Sans objet"}</h2>
@@ -6773,7 +6776,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         </Card>
 
         <div className="ec-grid" style={{ marginTop: 18 }}>
-          <div className={`ec-c5${openExch ? " ec-deskonly" : ""}`}>
+          <div className={openExch ? "ec-c5 ec-deskonly" : "ec-c12"}>
             {groups.length === 0 ? (
               <Card>
                 <EmptyState icon="📭" title="Aucun échange">
@@ -6794,7 +6797,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               </>
             )}
           </div>
-          <div className={`ec-c7${openExch ? "" : " ec-deskonly"}`}>{detail}</div>
+          {openExch && <div className="ec-c7">{detail}</div>}
         </div>
       </div>
     );
