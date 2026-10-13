@@ -3475,6 +3475,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // open a lesson, so "Retour" brings them back to that exact spot.
   const listScrollY = useRef(0);
   const pendingRestore = useRef(false);
+  // Une ouverture de lecon a la fois. `openLesson` enchaine un telechargement
+  // puis trois lectures : sur une connexion de telephone camerounais la fenetre
+  // est largement assez longue pour qu'un second appui passe. On obtenait alors
+  // deux chargements complets et deux lignes `lesson_open` pour un seul geste.
+  // Mesure du 2026-10-12/13 sur les vrais parents : quatre familles ont produit
+  // des grappes de 2 a 3 ouvertures de la MEME lecon en moins de deux secondes.
+  const openingLesson = useRef(null);
 
   useEffect(() => {
     if (screen === "lesson") {
@@ -5332,7 +5339,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     if (editQuizQuestions.length > 1) setEditQuizQuestions(editQuizQuestions.filter((_, i) => i !== index));
   };
 
-  const openLesson = async (lessonId, opts = {}) => {
+  const ouvrirLecon = async (lessonId, opts = {}) => {
     // When stepping between lessons (Précédent/Suivant) we keep the originally
     // saved list position so "Retour" still lands where the review started.
     if (!opts.keepListScroll) listScrollY.current = window.scrollY;
@@ -5400,6 +5407,20 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       schoolId: isParent ? parentStudent?.school_id : (teacher?.school_id || schoolContext?.id),
       eventType: "lesson_open", lessonId, detail: bundle?.lesson?.title || null,
     });
+  };
+
+  // Le second appui est IGNORE, pas mis en file : la personne voulait ouvrir
+  // cette lecon-la, une fois. `finally` relache le verrou meme si l'ouverture
+  // echoue, sans quoi un echec reseau bloquerait toutes les ouvertures
+  // suivantes jusqu'au rechargement de la page.
+  const openLesson = async (lessonId, opts = {}) => {
+    if (openingLesson.current !== null) return;
+    openingLesson.current = lessonId;
+    try {
+      await ouvrirLecon(lessonId, opts);
+    } finally {
+      openingLesson.current = null;
+    }
   };
 
   // Toggle "Leçon enseignée" for the current teacher + lesson.
@@ -6186,7 +6207,9 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         {m.link_url && (
           <div style={{ marginTop: 20 }}>
             {lessonLink(m) ? (
-              <Button onClick={() => openLesson(Number(m.link_url))}>Ouvrir la leçon</Button>
+              <Button disabled={loadingLesson} onClick={() => openLesson(Number(m.link_url))}>
+                  {loadingLesson ? "Ouverture…" : "Ouvrir la leçon"}
+                </Button>
             ) : (
               <a href={m.link_url} target="_blank" rel="noreferrer" className="ec-link" style={{ fontSize: FONT.md }}>
                 Ouvrir le lien ↗
