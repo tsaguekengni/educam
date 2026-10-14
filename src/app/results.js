@@ -22,6 +22,8 @@ import { logActivity } from "../lib/activity";
 import { enqueue, listQueue, cachedQuery } from "../lib/offline";
 import { RANK_TRANCHE_ENABLED } from "../lib/flags";
 import { COLORS, FONT, SUBJECT_NAMES } from "../lib/theme";
+/* Le seuil d'alerte au parent vit dans UN seul fichier — voir lib/seuil.js. */
+import { aSignaler, aSignalerPourcent, SEUIL_ALERTE_POURCENT } from "../lib/seuil";
 import {
   Card, CardLabel, Badge, Button, EmptyState, SkeletonRows, ListRow,
   Tabs, StatTile, SubjectChip, Callout, Meter,
@@ -80,23 +82,31 @@ const subjectShort = (id) => SUBJECT_META[id]?.short || "Autre";
  * contrôle — jamais dans une échelle inventée : afficher « 10/10 » à un parent
  * pour un contrôle sur 5 serait faux.
  *
- * « À renforcer » doit rester STRICTEMENT sous la moitié : le signalement
- * `difficulty` vaut `score / total < 0.5`. Un simple `total / 2` donnerait
- * 5/10 = 0,5, qui ne déclenche PAS le signalement — un élève marqué « à
- * renforcer » à chaque leçon n'apparaîtrait alors jamais dans les « leçons à
- * revoir » de son parent. `ceil(t / 2) - 1` le garantit pour tout total
- * (5 → 2 = 40 %, 10 → 4 = 40 %).
+ * « À renforcer » doit TOUJOURS déclencher le signalement au parent : un élève
+ * marqué « à renforcer » à chaque leçon qui n'apparaîtrait jamais dans les
+ * « leçons à revoir » de son parent, c'est l'alerte qui se tait quand elle
+ * devrait sonner. `ceil(t / 2) - 1` donne 40 % quel que soit le total
+ * (5 → 2, 10 → 4), donc bien sous le seuil de {@link SEUIL_ALERTE_POURCENT}.
+ *
+ * ⚠️ Si le seuil redescendait un jour sous 40 %, ce bouton cesserait de
+ * déclencher. Le contrôle automatique `seuil.mjs` le vérifie pour tous les
+ * totaux de 1 à 20 — il n'y a rien à surveiller à la main.
  */
 const quickScores = (total) => {
   const t = Number(total) || 0;
   return { acquis: t, renforcer: Math.max(0, Math.ceil(t / 2) - 1), non: 0 };
 };
 
+/* Les DEUX TONS décidés avec Maxime, et ils doivent coller au seuil d'alerte :
+   « à consolider » jusqu'à 60 % (3/5), « à revoir » à 40 % et en dessous
+   (2/5). 🔴 Avant, la bande disait « Fragile » pour un 60 % pendant que la même
+   note partait au parent comme leçon à revoir : deux mots différents pour le
+   même enfant, sur deux écrans. Un parent qui lit ça ne sait plus lequel croire. */
 const scoreBand = (p) => {
   if (p == null) return null;
-  if (p < 50) return { label: "À revoir", tone: "crit" };
-  if (p < 70) return { label: "Fragile", tone: "warn" };
-  return null; // ≥ 70 % : pas de bruit, le pourcentage suffit
+  if (p <= 40) return { label: "À revoir", tone: "crit" };
+  if (p <= SEUIL_ALERTE_POURCENT) return { label: "À consolider", tone: "warn" };
+  return null; // au-dessus du seuil : pas de bruit, le pourcentage suffit
 };
 
 /** Bande d'une moyenne sur 20 (contexte camerounais : notes sur 20). */
@@ -226,7 +236,7 @@ export function StudentTrajectory({ results = [], classAverages20, showTranche, 
   const recentFirst = [...scored].sort((a, b) => String(b.result_date).localeCompare(String(a.result_date)));
   const reviewMap = new Map();
   recentFirst.forEach((r) => {
-    const weak = r.difficulty || r.p < 50;
+    const weak = r.difficulty || aSignalerPourcent(r.p);
     if (weak && r.lesson_id != null && !reviewMap.has(r.lesson_id)) reviewMap.set(r.lesson_id, r);
   });
   const review = [...reviewMap.values()].slice(0, 6);
@@ -610,7 +620,7 @@ function TeacherResults({ teacher, school, backLink, initialTab, lectureSeule, c
     const payload = {
       student_id: id, lesson_id: Number(lessonId), school_id: school?.id || null,
       teacher_id: teacher.id, result_date: resultDate,
-      score, total: tot, difficulty: tot > 0 ? score / tot < 0.5 : false,
+      score, total: tot, difficulty: aSignaler(score, tot),
       entered_by: teacher.id,
       // ⚠️ The moment the teacher actually typed this note, sent explicitly.
       // The column defaults to now(), so notes entered across a whole offline
