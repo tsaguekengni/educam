@@ -19,6 +19,8 @@ import {
 } from "../lib/offline";
 import { drainQueue } from "../lib/sync";
 import { COLORS, FONT, SHADOW, TINTS, subjectColor } from "../lib/theme";
+/* Le seuil d'alerte au parent vit dans UN seul fichier — voir lib/seuil.js. */
+import { aSignaler } from "../lib/seuil";
 import { Button, Card, CardLabel, Badge, Callout, ListRow, IconButton, EmptyState, Tabs, Breadcrumb, Meter, StatTile, Skeleton, SkeletonRows } from "../components/ui";
 import { Sparkline, fr } from "../components/charts";
 import { useToasts } from "../components/overlays";
@@ -6931,6 +6933,33 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       || (toMinutes(a.start_time) || 0) - (toMinutes(b.start_time) || 0);
     const daySlots = getDaySlots(selectedDay, calSlots).slice().sort(trier);
 
+    /* ══════════════════════════════════════════════════════════════════════
+     * CE QU'IL FAUT POUR PRÉPARER LES QUIZ — 2026-10-14, 2e passe.
+     *
+     * 🔴 Ce calcul se faisait DANS le clic, et le clic se terminait par un
+     * `return` muet quand il manquait quelque chose. Résultat : pour la
+     * direction et le technicien, tant qu'aucune classe n'était choisie, le
+     * bouton ne faisait RIEN — sans un mot. Même chose un jour sans leçon à
+     * l'emploi du temps. Un bouton qui ne répond pas ne se lit pas comme
+     * « il manque une information » : il se lit comme « c'est cassé ».
+     *
+     * ⭐ On calcule donc AU RENDU, et le bouton sait dire pourquoi il ne
+     * peut pas encore servir. Rien n'est gratuit ici : tout est synchrone et
+     * ne porte que sur les créneaux d'UNE journée.
+     * ════════════════════════════════════════════════════════════════════ */
+    const quizOwner = isParent ? null : edtOwnerAffiche();
+    const quizLecons = isParent ? [] : Array.from(new Set(daySlots
+      .filter((s) => s.subject_id !== "pause" && s.subject_id !== "etude"
+        && !isTeacherTaught(s.subject_id))
+      .map((s) => getQueuedLesson(s.subject_id, s.component_id))
+      .filter(Boolean)
+      .map((l) => l.id)));
+    const quizEmpeche = !quizOwner
+      ? "Choisissez d'abord une classe : les quiz portent la liste de ses élèves."
+      : quizLecons.length === 0
+        ? "Aucune leçon à préparer ce jour-là."
+        : null;
+
     /* ⚠️ Le surlignage « en cours » exige DEUX conditions, pas une : le bon
        jour ET la bonne semaine. Avant le sélecteur de semaine la seconde allait
        de soi ; depuis, consulter le lundi de la semaine prochaine un lundi
@@ -7244,26 +7273,34 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                 * hors-ligne de la semaine — la leçon EN FILE pour ce créneau,
                 * donc la bonne quand on prépare une journée à venir. */}
               {!isParent && calVue !== "semaine" && calJourIso && (
-                <button
-                  type="button"
-                  className="ec-btn ec-btn--ghost"
-                  title="Ouvre les quiz de cette journée, prêts à imprimer"
-                  onClick={() => {
-                    const ids = Array.from(new Set(daySlots
-                      .filter((s) => s.subject_id !== "pause" && s.subject_id !== "etude"
-                        && !isTeacherTaught(s.subject_id))
-                      .map((s) => getQueuedLesson(s.subject_id, s.component_id))
-                      .filter(Boolean)
-                      .map((l) => l.id)));
-                    const owner = edtOwnerAffiche();
-                    if (!owner || ids.length === 0) return;
-                    window.open(
-                      "/quiz?classe=" + owner + "&date=" + calJourIso + "&lecons=" + ids.join(","),
-                      "_blank", "noopener");
-                  }}
-                >
-                  Préparer les quiz
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="ec-btn ec-btn--ghost"
+                    disabled={!!quizEmpeche}
+                    title={quizEmpeche || "Ouvre les quiz de cette journée, prêts à imprimer"}
+                    style={quizEmpeche ? { opacity: 0.45, cursor: "not-allowed" } : undefined}
+                    onClick={() => {
+                      if (quizEmpeche) return;
+                      window.open(
+                        "/quiz?classe=" + quizOwner + "&date=" + calJourIso
+                          + "&lecons=" + quizLecons.join(","),
+                        "_blank", "noopener");
+                    }}
+                  >
+                    Préparer les quiz
+                  </button>
+                  {/* La raison s'ÉCRIT : une infobulle ne s'affiche pas sur un
+                      bouton désactivé, et ne se lit pas du tout au doigt. */}
+                  {quizEmpeche && (
+                    <span style={{
+                      fontSize: 12, color: COLORS.ink3, alignSelf: "center",
+                      maxWidth: 260, lineHeight: 1.3,
+                    }}>
+                      {quizEmpeche}
+                    </span>
+                  )}
+                </>
               )}
             </div>
           </Card>
@@ -9491,7 +9528,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               // La leçon à revoir la plus récente.
               const weak = [...scored]
                 .sort((a, b) => String(b.result_date).localeCompare(String(a.result_date)))
-                .find((r) => r.difficulty || r.score / r.total < 0.5);
+                .find((r) => r.difficulty || aSignaler(r.score, r.total));
 
               return (
                 <Card style={{ background: COLORS.hero, borderColor: COLORS.heroBrd }}>
@@ -9540,7 +9577,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
                 : null;
               const reviewIds = new Set();
               parentResults.forEach((r) => {
-                const weak = r.difficulty || (r.total > 0 && r.score != null && r.score / r.total < 0.5);
+                const weak = r.difficulty || aSignaler(r.score, r.total);
                 if (weak && r.lesson_id != null) reviewIds.add(r.lesson_id);
               });
               return (
@@ -9608,7 +9645,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               [...parentResults]
                 .sort((a, b) => String(b.result_date).localeCompare(String(a.result_date)))
                 .forEach((r) => {
-                  const weak = r.difficulty || (r.total > 0 && r.score != null && r.score / r.total < 0.5);
+                  const weak = r.difficulty || aSignaler(r.score, r.total);
                   if (weak && r.lesson_id != null && !reviewMap.has(r.lesson_id)) reviewMap.set(r.lesson_id, r);
                 });
               const reviewLessons = Array.from(reviewMap.values());
