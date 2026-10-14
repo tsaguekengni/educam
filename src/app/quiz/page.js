@@ -143,6 +143,9 @@ export default function QuizImpression() {
   const [etat, setEtat] = useState("chargement");
   const [erreur, setErreur] = useState("");
   const [lot, setLot] = useState(null);
+  /* Les leçons cochées. Déclaré ICI, avec les autres états : un hook ne peut pas
+     vivre après les retours anticipés plus bas. */
+  const [choix, setChoix] = useState(null);
 
   useEffect(() => {
     let annule = false;
@@ -203,7 +206,13 @@ export default function QuizImpression() {
           const q5 = qs.filter((q) => q.slot === 5);
           if (communes.length === 3 && q4.length === 5 && q5.length === 5) {
             const parVersion = (arr) => Object.fromEntries(arr.map((q) => [q.version, q]));
-            pretes.push({ lecon, communes, q4: parVersion(q4), q5: parVersion(q5) });
+            /* 🔴 `rang` est la place de la leçon dans la journée, et elle ne bouge
+               JAMAIS, même si on décoche des leçons ensuite. C'est elle qui fixe
+               le décalage des versions (plus bas). Si on prenait la place dans la
+               liste filtrée, réimprimer une seule leçon lui donnerait d'autres
+               versions que la première impression — et la feuille de correction
+               déjà entre les mains de l'enseignante deviendrait fausse. */
+            pretes.push({ rang: pretes.length, lecon, communes, q4: parVersion(q4), q5: parVersion(q5) });
           } else {
             incompletes.push({ lecon, nb: qs.length });
           }
@@ -215,6 +224,7 @@ export default function QuizImpression() {
 
         if (!annule) {
           setLot({ classe: classeRes.data, ecole, dateIso, eleves, pretes, incompletes });
+          setChoix(new Set(pretes.map((b) => b.lecon.id)));  // tout coché par défaut
           setEtat("pret");
         }
       } catch (e) {
@@ -246,6 +256,16 @@ export default function QuizImpression() {
   const moitie = Math.ceil(n / 2);
   const pagesParLecon = moitie + 1;
   const decalageLot = decalageDuJour(dateIso);
+
+  /* Ce qui part à l'imprimante : les leçons cochées, dans l'ordre de la journée. */
+  const coches = choix || new Set(pretes.map((b) => b.lecon.id));
+  const visibles = pretes.filter((b) => coches.has(b.lecon.id));
+
+  const basculer = (id) => {
+    const s = new Set(coches);
+    if (s.has(id)) s.delete(id); else s.add(id);
+    setChoix(s);
+  };
 
   const champReponse = (q, estMaths) => {
     if (q.pleine_ligne || (q.answer || "").length > 45) return <div className="ligne" />;
@@ -391,8 +411,10 @@ export default function QuizImpression() {
   };
 
   const feuilles = [];
-  pretes.forEach((bloc, k) => {
-    const decalage = (k + decalageLot) % 5;
+  visibles.forEach((bloc) => {
+    /* `bloc.rang`, pas la position dans `visibles` : les versions d'une leçon
+       ne doivent pas changer selon ce qui est coché à côté (voir plus haut). */
+    const decalage = (bloc.rang + decalageLot) % 5;
     for (let s = 0; s < moitie; s += 1) {
       const haut = s;
       const bas = s + moitie;
@@ -409,37 +431,106 @@ export default function QuizImpression() {
     feuilles.push(pageCorrection(bloc, decalage));
   });
 
-  const totalPages = pretes.length * pagesParLecon + 1;
+  const totalPages = visibles.length * pagesParLecon + 1;
 
   return (
     <>
       <style>{CSS}</style>
 
+      {/* ══════════════════════════════════════════════════════════════════════
+        * LE CHOIX DES LEÇONS — 2026-10-14, demande de Maxime.
+        *
+        * Il vit ICI, sur la page d'impression, et pas dans l'emploi du temps :
+        * c'est là qu'on voit le résultat changer (le nombre de pages suit), et
+        * c'est ce qui permet de REVENIR sur la même adresse pour réimprimer une
+        * seule leçon dont le quiz a été corrigé, sans refaire les autres.
+        *
+        * Toute cette barre disparaît à l'impression (`.ecran`).
+        * ════════════════════════════════════════════════════════════════════ */}
       <div className="ecran">
         <h1 style={{ fontSize: 18, margin: "0 0 6px" }}>
           Quiz du {libelleDate(dateIso)}
         </h1>
         <p style={{ fontSize: 13, color: "#333", margin: "0 0 10px" }}>
-          {pretes.length} quiz · {n} élèves · {totalPages} pages.
-          {" "}Imprimez, puis coupez les feuilles de quiz en deux au trait pointillé.
+          {visibles.length} quiz sur {pretes.length} · {n} élèves ·{" "}
+          <b>{totalPages} pages</b>. Imprimez, puis coupez les feuilles de quiz en
+          deux au trait pointillé.
         </p>
+
+        <div style={{
+          border: "1px solid #C7CFD6", borderRadius: 8, padding: "10px 12px",
+          margin: "0 0 10px", maxWidth: 620,
+        }}>
+          <div style={{
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            gap: 10, marginBottom: 6,
+          }}>
+            <b style={{ fontSize: 13 }}>Leçons à imprimer</b>
+            <span style={{ display: "flex", gap: 8 }}>
+              <button
+                type="button" className="ec-btn ec-btn--ghost ec-btn--sm"
+                onClick={() => setChoix(new Set(pretes.map((b) => b.lecon.id)))}
+              >Tout cocher</button>
+              <button
+                type="button" className="ec-btn ec-btn--ghost ec-btn--sm"
+                onClick={() => setChoix(new Set())}
+              >Tout décocher</button>
+            </span>
+          </div>
+          {pretes.map((b) => (
+            <label
+              key={b.lecon.id}
+              style={{
+                display: "flex", alignItems: "baseline", gap: 8, padding: "4px 0",
+                fontSize: 13, cursor: "pointer",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={coches.has(b.lecon.id)}
+                onChange={() => basculer(b.lecon.id)}
+                style={{ width: 16, height: 16, flex: "none" }}
+              />
+              <span>
+                <b>{MATIERES[b.lecon.subject_id] || b.lecon.subject_id}</b>
+                {" — "}{b.lecon.title}
+              </span>
+            </label>
+          ))}
+        </div>
+
         {incompletes.length > 0 && (
           <p style={{ fontSize: 13, color: "#A83E1E", margin: "0 0 10px" }}>
             Pas de quiz disponible pour : {incompletes.map((x) => x.lecon.title).join(", ")}.
           </p>
         )}
-        <button type="button" className="ec-btn" onClick={() => window.print()}>
-          Imprimer
-        </button>
+
+        {visibles.length === 0 ? (
+          <p style={{ fontSize: 13, color: "#A83E1E", margin: 0 }}>
+            Aucune leçon cochée — il n&apos;y a rien à imprimer.
+          </p>
+        ) : (
+          <button type="button" className="ec-btn" onClick={() => window.print()}>
+            Imprimer {visibles.length === 1 ? "cette leçon" : "les " + visibles.length + " leçons"}
+          </button>
+        )}
       </div>
 
       <div className="qz">
+        {/* La page de garde ne sort QUE s'il y a quelque chose à imprimer :
+            si rien n'est coché, le document est vide — sinon on imprimerait
+            une page de garde toute seule. */}
+        {visibles.length > 0 && (
         <div className="feuille">
           <div className="garde">
             <h1>Quiz de leçon — {String(classe?.level || "").toUpperCase()}<br />{libelleDate(dateIso)}</h1>
             <p className="st">
               {ecole ? ecole + " · " : ""}{classe?.full_name} · {n} élèves &nbsp;|&nbsp;
-              {" "}{pretes.length} quiz · {totalPages} pages
+              {" "}{visibles.length} quiz · {totalPages} pages
+              {visibles.length < pretes.length
+                && (pretes.length - visibles.length === 1
+                  ? " (1 leçon de la journée n'est pas dans ce document)"
+                  : ` (${pretes.length - visibles.length} leçons de la journée ne sont pas dans ce document)`)}
             </p>
 
             <h2>Mode d&apos;emploi</h2>
@@ -471,7 +562,9 @@ export default function QuizImpression() {
               • La note se saisit dans l&apos;application avec un <b>total de 5</b>.
             </div>
 
-            <h2>Les {pretes.length} quiz de ce document</h2>
+            <h2>
+              {visibles.length === 1 ? "Le quiz de ce document" : `Les ${visibles.length} quiz de ce document`}
+            </h2>
             <table className="som"><tbody>
               <tr>
                 <th style={{ width: "9mm" }}>#</th>
@@ -479,7 +572,7 @@ export default function QuizImpression() {
                 <th style={{ width: "30mm" }}>Matière</th>
                 <th style={{ width: "26mm" }}>Pages</th>
               </tr>
-              {pretes.map((b, k) => {
+              {visibles.map((b, k) => {
                 const debut = 2 + k * pagesParLecon;
                 return (
                   <tr key={b.lecon.id}>
@@ -493,6 +586,7 @@ export default function QuizImpression() {
             </tbody></table>
           </div>
         </div>
+        )}
 
         {feuilles}
       </div>
