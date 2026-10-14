@@ -7228,6 +7228,43 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               >
                 {calVue === "semaine" ? "Voir un jour" : "Voir ma semaine"}
               </button>
+              {/* ══════════════════════════════════════════════════════════
+                * PRÉPARER LES QUIZ DU JOUR — 2026-10-14.
+                *
+                * Le seul point d'entrée du dispositif de quiz. Il n'apparaît
+                * QUE dans la vue d'un jour : en vue semaine, « le jour » serait
+                * ambigu et le référent imprimerait la mauvaise journée.
+                *
+                * 🔴 C'est ICI qu'on résout « créneau → leçon », et nulle part
+                * ailleurs : la page d'impression reçoit des identifiants de
+                * leçon tout faits. Si elle refaisait ce calcul de son côté, les
+                * deux écrans finiraient par se contredire.
+                *
+                * `getQueuedLesson` est la même lecture que celle du bandeau
+                * hors-ligne de la semaine — la leçon EN FILE pour ce créneau,
+                * donc la bonne quand on prépare une journée à venir. */}
+              {!isParent && calVue !== "semaine" && calJourIso && (
+                <button
+                  type="button"
+                  className="ec-btn ec-btn--ghost"
+                  title="Ouvre les quiz de cette journée, prêts à imprimer"
+                  onClick={() => {
+                    const ids = Array.from(new Set(daySlots
+                      .filter((s) => s.subject_id !== "pause" && s.subject_id !== "etude"
+                        && !isTeacherTaught(s.subject_id))
+                      .map((s) => getQueuedLesson(s.subject_id, s.component_id))
+                      .filter(Boolean)
+                      .map((l) => l.id)));
+                    const owner = edtOwnerAffiche();
+                    if (!owner || ids.length === 0) return;
+                    window.open(
+                      "/quiz?classe=" + owner + "&date=" + calJourIso + "&lecons=" + ids.join(","),
+                      "_blank", "noopener");
+                  }}
+                >
+                  Préparer les quiz
+                </button>
+              )}
             </div>
           </Card>
         )}
