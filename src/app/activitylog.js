@@ -29,8 +29,30 @@ const EVENT_LABEL = {
 const STATS_CAP = 4000;   // plafond explicite pour les agrégats (pas de lecture illimitée)
 const PAGE = 30;          // taille de page du journal
 
-const fmtDate = (s) => (s ? String(s).slice(0, 10) : "—");
-const fmtDateTime = (s) => (s ? String(s).slice(0, 16).replace("T", " ") : "—");
+// ⚠️ Heures affichées à l'heure de l'ÉCOLE (Douala, UTC+1), jamais en UTC ni à
+// l'heure du poste qui regarde : `created_at` est stocké en UTC, et le couper au
+// caractère affichait 11:27 pour une connexion faite à 12:27 en classe — et à
+// Québec, `getHours()` aurait parlé l'heure de Québec.
+const TZ_ECOLE = "Africa/Douala";
+const _ymd = new Intl.DateTimeFormat("en-CA", { timeZone: TZ_ECOLE, year: "numeric", month: "2-digit", day: "2-digit" });
+const _hm = new Intl.DateTimeFormat("fr-FR", { timeZone: TZ_ECOLE, hour: "2-digit", minute: "2-digit", hour12: false });
+const _h = new Intl.DateTimeFormat("en-GB", { timeZone: TZ_ECOLE, hour: "2-digit", hour12: false });
+// Safari refuse l'espace à la place du « T » et un décalage sans minutes (« +00 ») :
+// on normalise avant de lire (piège payé le 2026-10-06, conception §4c).
+const _d = (s) => {
+  const iso = String(s).trim().replace(" ", "T").replace(/([+-]\d{2})$/, "$1:00");
+  const d = new Date(iso); return isNaN(d) ? null : d;
+};
+const fmtDate = (s) => { const d = s && _d(s); return d ? _ymd.format(d) : "—"; };
+const fmtDateTime = (s) => { const d = s && _d(s); return d ? `${_ymd.format(d)} ${_hm.format(d)}` : "—"; };
+const heureEcole = (s) => { const d = _d(s); return d ? Number(_h.format(d)) % 24 : 12; };
+
+// Libellé de rôle affiché à côté d'un nom. « reviewer » est l'ancien rôle par
+// défaut (supprimé le 2026-10-04) : des lignes anciennes le portent encore.
+const ROLE_LABEL = {
+  teacher: "Enseignant", referent: "Référent", school_admin: "Direction",
+  parent: "Parent", admin: "Administrateur", reviewer: "Ancien compte",
+};
 const dm = (iso) => { const [, m, d] = String(iso || "").split("-"); return d && m ? `${d}/${m}` : iso; };
 
 export default function ActivityLog({ school, isAdmin, onBack, initialTab, onActAsTeacher, onActAsParent }) {
@@ -47,6 +69,7 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
   // Journal (pagination serveur, indépendante des agrégats)
   const [jEvent, setJEvent] = useState("all");
   const [jRole, setJRole] = useState("all");
+  const [jActor, setJActor] = useState("all");
   // Plage de dates : bornes INCLUSIVES côté écran. `created_at` est un
   // timestamp, donc la borne haute est envoyée en « fin de journée » — sans
   // quoi filtrer « jusqu'au 12 août » exclurait tout le 12 août.
@@ -71,8 +94,8 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
   const isOffline = () => typeof navigator !== "undefined" && !navigator.onLine;
 
   useEffect(() => { loadData(); /* eslint-disable-next-line */ }, [school?.id, isAdmin]);
-  useEffect(() => { if (tab === "journal") loadJournal(); /* eslint-disable-next-line */ }, [tab, jEvent, jRole, jFrom, jTo, jPage, school?.id, isAdmin]);
-  useEffect(() => { setJPage(0); }, [jEvent, jRole, jFrom, jTo]);
+  useEffect(() => { if (tab === "journal") loadJournal(); /* eslint-disable-next-line */ }, [tab, jEvent, jRole, jActor, jFrom, jTo, jPage, school?.id, isAdmin]);
+  useEffect(() => { setJPage(0); }, [jEvent, jRole, jActor, jFrom, jTo]);
 
   const scoped = (q) => (!isAdmin && school?.id ? q.eq("school_id", school.id) : q);
 
@@ -87,7 +110,7 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
     // Plafond relevé : cette lecture ramène jusqu'à STATS_CAP lignes, ce que les
     // 5 s par défaut ne couvrent pas sur une connexion lente — on retomberait
     // sur le cache en se croyant hors ligne.
-    const meta = await cachedQueryMeta(`activity_${scopeKey}`, async () => {
+    const meta = await cachedQueryMeta(`activity_v2_${scopeKey}`, async () => {
       const [{ data: teachers }, { data: students }] = await Promise.all([
         scoped(supabase.from("teachers").select("id, full_name, role")),
         scoped(supabase.from("students").select("id, full_name, teacher_id")),
@@ -118,20 +141,20 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
       const teacherStats = teacherList.map((t) => {
         const x = byActor[t.id] || { counts: {}, last: null, events: [] };
         const c = x.counts;
-        const taught = c.mark_taught || 0, opened = c.lesson_open || 0, proj = c.projector || 0, results = c.results_entered || 0, fb = c.feedback || 0;
+        const taught = c.mark_taught || 0, opened = c.lesson_open || 0, proj = c.projector || 0, results = c.results_entered || 0, fb = c.feedback || 0, logins = c.login || 0;
         let oddHour = false;
         (x.events || []).forEach((e) => {
           if (e.event_type === "mark_taught" || e.event_type === "lesson_open") {
-            const h = new Date(e.created_at).getHours();
+            const h = heureEcole(e.created_at);
             if (h < 6 || h >= 21) oddHour = true;
           }
         });
         const flags = [];
         if (!x.last) flags.push("Jamais actif");
         if (taught > 0 && opened === 0) flags.push("Marque enseigné sans ouvrir");
-        if (taught > 0 && results === 0) flags.push("Enseigne sans saisir de résultats");
+        if (taught > 0 && results === 0 && t.role === "teacher") flags.push("Enseigne sans saisir de résultats");
         if (oddHour) flags.push("Heure inhabituelle");
-        return { id: t.id, name: t.full_name || "Enseignant", taught, opened, proj, results, fb, last: x.last, flags };
+        return { id: t.id, name: t.full_name || "Enseignant", role: t.role, taught, opened, proj, results, fb, logins, last: x.last, flags };
       }).sort((a, b) => b.flags.length - a.flags.length || (b.last || "").localeCompare(a.last || ""));
 
       const now = Date.now();
@@ -152,6 +175,11 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
 
       const nm = {};
       teacherList.forEach((t) => { nm[t.id] = t.full_name || "Enseignant"; });
+      // Liste des personnes pour le filtre « Personne » du journal (équipe seulement :
+      // 246 élèves en feraient une liste illisible, l'onglet Parents sert à cela).
+      const people = teacherList
+        .map((t) => ({ id: t.id, name: t.full_name || "Sans nom", role: t.role }))
+        .sort((a, b) => a.name.localeCompare(b.name, "fr"));
       parentsData.forEach((p) => { nm[p.id] = `Parent · ${studentName[p.student_id] || "élève"}`; });
 
       // Activité par jour sur 14 jours (pour la synthèse).
@@ -177,6 +205,7 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
 
       return { data: {
         nameMap: nm,
+        people,
         teacherStats, parentStats, days, byEvent,
         totalEvents: (acts || []).length,
         cappedStats: (acts || []).length >= STATS_CAP,
@@ -209,8 +238,9 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
       .order("created_at", { ascending: false }));
     if (jEvent !== "all") q = q.eq("event_type", jEvent);
     if (jRole !== "all") q = q.eq("actor_role", jRole);
-    if (jFrom) q = q.gte("created_at", `${jFrom}T00:00:00`);
-    if (jTo) q = q.lte("created_at", `${jTo}T23:59:59.999`);
+    if (jActor !== "all") q = q.eq("actor_id", jActor);
+    if (jFrom) q = q.gte("created_at", `${jFrom}T00:00:00+01:00`);
+    if (jTo) q = q.lte("created_at", `${jTo}T23:59:59.999+01:00`);
     return q;
   };
 
@@ -218,7 +248,7 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
   // seule qu'on puisse honnêtement servir depuis le cache — filtrer ou paginer,
   // c'est interroger la base, pas relire ce qu'on avait déjà.
   const journalIsDefault =
-    jPage === 0 && jEvent === "all" && jRole === "all" && !jFrom && !jTo;
+    jPage === 0 && jEvent === "all" && jRole === "all" && jActor === "all" && !jFrom && !jTo;
 
   const loadJournal = async () => {
     const scopeKey = isAdmin ? "all" : (school?.id || "none");
@@ -280,7 +310,7 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
       const body = list.map((r) => [
         r.created_at,
         nameMap[r.actor_id] || r.actor_id || "",
-        r.actor_role || "",
+        ROLE_LABEL[r.actor_role] || r.actor_role || "",
         EVENT_LABEL[r.event_type] || r.event_type || "",
         r.detail || "",
         r.school_id || "",
@@ -379,7 +409,7 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
           {/* ---- Onglets ---- */}
           <div className="ec-c12">
           <div style={{ margin: "4px 0 14px", display: "flex", gap: 6, background: COLORS.track, borderRadius: 999, padding: 4, maxWidth: 460 }} role="tablist" aria-label="Lentille d'activité">
-            {[["teachers", "Enseignants"], ["parents", "Parents"], ["journal", "Journal"]].map(([id, label]) => (
+            {[["teachers", "Équipe"], ["parents", "Parents"], ["journal", "Journal"]].map(([id, label]) => (
               <button key={id} role="tab" aria-selected={tab === id} onClick={() => setTab(id)} style={{
                 flex: 1, minHeight: 40, padding: "8px 10px", borderRadius: 999, border: 0, fontSize: FONT.sm, fontWeight: 700,
                 background: tab === id ? COLORS.card : "transparent", color: tab === id ? COLORS.g700 : COLORS.ink2,
@@ -411,15 +441,25 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
                         onKeyDown={act ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); act(); } } : undefined}
                         style={{ borderLeft: `3px solid ${t.flags.length ? COLORS.crit : COLORS.g300}`, cursor: act ? "pointer" : undefined }}>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                          <div style={{ fontSize: "var(--ec-fs-4)", fontWeight: 700, color: COLORS.ink }}>{t.name}</div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", minWidth: 0 }}>
+                            <span style={{ fontSize: "var(--ec-fs-4)", fontWeight: 700, color: COLORS.ink }}>{t.name}</span>
+                            {t.role && t.role !== "teacher" && <Badge tone="neutral">{ROLE_LABEL[t.role] || t.role}</Badge>}
+                          </div>
                           <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3 }}>actif {fmtDate(t.last)}</div>
                         </div>
                         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 8 }}>
+                          <Stat label="connexions" n={t.logins} />
                           <Stat label="enseignées" n={t.taught} /><Stat label="ouvertes" n={t.opened} />
                           <Stat label="projecteur" n={t.proj} /><Stat label="résultats" n={t.results} />
                           <Stat label="commentaires" n={t.fb} />
                         </div>
                         {t.flags.length > 0 && flags(t.flags)}
+                        <button type="button"
+                          onClick={(e) => { e.stopPropagation(); setJActor(t.id); setTab("journal"); }}
+                          onKeyDown={(e) => e.stopPropagation()}
+                          style={{ marginTop: 10, background: "none", border: 0, padding: 0, cursor: "pointer", fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.g700 }}>
+                          Voir son journal ›
+                        </button>
                         {act && (
                           <div className="ec-actcard__cta" style={{ marginTop: 10, fontSize: "var(--ec-fs-2)", fontWeight: 700, color: COLORS.g700 }}>
                             Ouvrir sa vue · consulter ou agir en tant que lui <span aria-hidden="true">›</span>
@@ -482,11 +522,18 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
                   <option value="all">Toutes les actions</option>
                   {Object.entries(EVENT_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
                 </SelectField>
+                <SelectField label="Personne" value={jActor} onChange={(e) => setJActor(e.target.value)}>
+                  <option value="all">{"Tout le monde"}</option>
+                  {(data.people || []).map((p) => (
+                    <option key={p.id} value={p.id}>{p.name} · {ROLE_LABEL[p.role] || p.role}</option>
+                  ))}
+                </SelectField>
                 <SelectField label="Rôle" value={jRole} onChange={(e) => setJRole(e.target.value)}>
                   <option value="all">Tous les rôles</option>
                   <option value="teacher">Enseignants</option>
-                  <option value="parent">Parents</option>
+                  <option value="referent">Référents</option>
                   <option value="school_admin">Direction</option>
+                  <option value="parent">Parents</option>
                 </SelectField>
                 <Field label="Depuis le" type="date" value={jFrom} onChange={(e) => setJFrom(e.target.value)} />
                 <Field label="Jusqu'au" type="date" value={jTo} onChange={(e) => setJTo(e.target.value)} />
@@ -496,9 +543,9 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
                 <Button variant="ghost" size="sm" onClick={exportCsv} disabled={jExporting || jCount === 0}>
                   {jExporting ? "Export en cours…" : "Exporter en CSV"}
                 </Button>
-                {(jFrom || jTo || jEvent !== "all" || jRole !== "all") && (
+                {(jFrom || jTo || jEvent !== "all" || jRole !== "all" || jActor !== "all") && (
                   <Button variant="ghost" size="sm"
-                    onClick={() => { setJEvent("all"); setJRole("all"); setJFrom(""); setJTo(""); }}>
+                    onClick={() => { setJEvent("all"); setJRole("all"); setJActor("all"); setJFrom(""); setJTo(""); }}>
                     Effacer les filtres
                   </Button>
                 )}
@@ -525,8 +572,11 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
                       <div key={i} className="ec-card" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 12px" }}>
                         <div style={{ minWidth: 0 }}>
                           <span style={{ fontSize: FONT.md, fontWeight: 700, color: COLORS.ink }}>
-                            {nameMap[a.actor_id] || (a.actor_role || "Utilisateur")}
+                            {nameMap[a.actor_id] || ROLE_LABEL[a.actor_role] || a.actor_role || "Utilisateur"}
                           </span>
+                          {nameMap[a.actor_id] && a.actor_role && a.actor_role !== "parent" && (
+                            <span style={{ fontSize: FONT.sm, color: COLORS.ink3 }}>{" · "}{ROLE_LABEL[a.actor_role] || a.actor_role}</span>
+                          )}
                           <span style={{ fontSize: FONT.md, color: COLORS.ink2 }}>
                             {" · "}{EVENT_LABEL[a.event_type] || a.event_type}{a.detail ? ` (${a.detail})` : ""}
                           </span>
