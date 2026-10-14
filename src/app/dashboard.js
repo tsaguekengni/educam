@@ -3603,6 +3603,16 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [sectionBlocks, setSectionBlocks] = useState({}); // { [section_id]: [block, ...] in order }
   const [lessonExercises, setLessonExercises] = useState([]);
   const [loadingLesson, setLoadingLesson] = useState(false);
+  // Au-delà de quelques secondes, le voile d'ouverture le DIT et propose
+  // d'annuler : sur un réseau de téléphone qui cale, un voile muet et sans
+  // sortie serait pire que le bouton mort qu'il remplace.
+  const [ouvertureLente, setOuvertureLente] = useState(false);
+  useEffect(() => {
+    if (!loadingLesson) return;
+    const t = setTimeout(() => setOuvertureLente(true), 8000);
+    // Remis à zéro en sortie : la prochaine ouverture repart « rapide ».
+    return () => { clearTimeout(t); setOuvertureLente(false); };
+  }, [loadingLesson]);
   const [lessonPassed, setLessonPassed] = useState(false);
   // "Leçon enseignée" — teacher marks a lesson as taught (unlocks it for parents later).
   const [lessonTaught, setLessonTaught] = useState(false);
@@ -5356,6 +5366,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     } catch (_) {
       if (OFFLINE_ENABLED) bundle = await loadLessonBundle(lessonId);
     }
+    if (opts.jeton && openingLesson.current !== opts.jeton) return;
     if (!bundle) {
       // Hors ligne et leçon jamais téléchargée (ou identifiant invalide).
       // C'était l'échec le plus probable en classe : l'enseignante appuyait,
@@ -5392,6 +5403,10 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       } catch (_) {}
     }
 
+    // Annulée entre-temps (bouton « Annuler » du voile) : on ne montre rien et
+    // on n'écrit pas de `lesson_open` — l'ouverture n'a pas eu lieu.
+    if (opts.jeton && openingLesson.current !== opts.jeton) return;
+
     setCurrentLesson(bundle.lesson);
     setLessonSections(sortSections(bundle.sections));
     setSectionBlocks(bundle.blocksBySection || {});
@@ -5415,14 +5430,34 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // cette lecon-la, une fois. `finally` relache le verrou meme si l'ouverture
   // echoue, sans quoi un echec reseau bloquerait toutes les ouvertures
   // suivantes jusqu'au rechargement de la page.
+  //
+  // 2026-10-14 : le verrou seul ne suffisait pas. Il empêchait le doublon, mais
+  // l'écran restait MUET pendant le chargement (le squelette vit dans
+  // LessonScreen, qu'on n'atteint qu'à la fin) : on croyait avoir mal cliqué.
+  // D'où le voile « Ouverture de la leçon… » rendu au niveau du tableau de bord.
+  // Le verrou porte un JETON (un objet neuf par ouverture) et non l'identifiant
+  // de la leçon : après « Annuler » puis une nouvelle ouverture de la MÊME leçon,
+  // l'ancienne ne doit ni s'afficher ni relâcher le verrou de la nouvelle.
   const openLesson = async (lessonId, opts = {}) => {
     if (openingLesson.current !== null) return;
-    openingLesson.current = lessonId;
+    const jeton = { lessonId };
+    openingLesson.current = jeton;
     try {
-      await ouvrirLecon(lessonId, opts);
+      await ouvrirLecon(lessonId, { ...opts, jeton });
     } finally {
-      openingLesson.current = null;
+      // Seulement si c'est encore NOTRE ouverture. Et `setLoadingLesson(false)`
+      // ici aussi : si `ouvrirLecon` lève une erreur en route, le voile
+      // resterait sinon posé sur l'application jusqu'au rechargement.
+      if (openingLesson.current === jeton) {
+        openingLesson.current = null;
+        setLoadingLesson(false);
+      }
     }
+  };
+
+  const annulerOuverture = () => {
+    openingLesson.current = null;
+    setLoadingLesson(false);
   };
 
   // Toggle "Leçon enseignée" for the current teacher + lesson.
@@ -11028,6 +11063,28 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           pushToast={pushToast}
           usurpation={!!impersonating}
         />
+      )}
+      {/* Voile d'ouverture d'une leçon. Rendu ICI et pas dans LessonScreen :
+          pendant le chargement on est encore sur l'écran d'origine. Il couvre
+          tout l'écran, donc un second appui est physiquement impossible. Sur
+          l'écran « leçon » (Précédent / Suivant), le squelette existant suffit. */}
+      {loadingLesson && screen !== "lesson" && (
+        <div className="ec-ouverture" role="status" aria-live="polite" aria-busy="true">
+          <div className="ec-ouverture__carte">
+            <span className="ec-ouverture__roue" aria-hidden="true" />
+            <div style={{ fontSize: "var(--ec-fs-4)", fontWeight: 800, color: COLORS.ink }}>
+              Ouverture de la leçon…
+            </div>
+            {ouvertureLente && (
+              <>
+                <div style={{ fontSize: FONT.sm, color: COLORS.ink2, lineHeight: 1.5, maxWidth: 260 }}>
+                  {"La connexion est lente. La leçon arrive, inutile d'appuyer à nouveau."}
+                </div>
+                <Button variant="ghost" size="sm" onClick={annulerOuverture}>Annuler</Button>
+              </>
+            )}
+          </div>
+        </div>
       )}
       <ToastViewport />
     </div>
