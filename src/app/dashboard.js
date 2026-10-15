@@ -971,6 +971,39 @@ const edtUniteDuMois = (d) => EDT_UNITE_PAR_MOIS[d.getMonth()] || null;
  */
 const EDT_UNITE_DEPART = 2;
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * 🧭 LE PROGRAMME REFONDU — 2026-10-15 (voir claude/EduCam_Refonte_Programme_CM1.md §8)
+ *
+ * Depuis la refonte, une leçon ne se range plus par « unité · semaine » mais
+ * par NOTION : chaque leçon des 4 matières couvertes porte en base
+ *   · `role`  — `lecon` (la leçon longue), `revision` (la séance de 30 min),
+ *               `retiree` ou `fusionnee` (plus servie à la classe) ;
+ *   · `rang`  — sa place dans le mois : leçon 1, leçon 2, révision 1, leçon 3…
+ *   · `notion_id` — la notion de `programme_notions`, qui donne le MOIS.
+ * Une leçon SANS rôle (anglais, TIC…) se comporte exactement comme avant.
+ *
+ * ⚠️ On n'a RIEN renuméroté en base : les semaines restent ce qu'elles
+ * étaient, parce que les fichiers du téléverseur retrouvent leur leçon par
+ * (matière, sous-matière, unité, semaine). L'ordre vient donc de `rang`, et le
+ * mois de la notion (`unite_programme`), jamais plus de `week_number`.
+ *
+ * Deux leçons changent de mois par leur notion : 153 (rattachée à septembre)
+ * et 189 (rattachée à janvier). C'est voulu.
+ * ══════════════════════════════════════════════════════════════════════════ */
+const EDT_ROLES_HORS_CLASSE = new Set(["retiree", "fusionnee"]);
+// La classe reçoit-elle encore cette leçon ?
+const edtEnClasse = (l) => !EDT_ROLES_HORS_CLASSE.has(l?.role);
+// Le mois de la leçon au sens du programme refondu (repli : son unité d'origine).
+const edtUniteDe = (l) => l?.unite_programme ?? l?.unit_number ?? 0;
+// Sa place dans le mois ; une leçon sans rang passe après les autres.
+const edtRangDe = (l) => (l?.rang ?? 99);
+// L'ordre du programme : mois, puis rang, puis (ancien ordre) semaine et id.
+const edtOrdreProgramme = (a, b) =>
+  edtUniteDe(a) - edtUniteDe(b)
+  || edtRangDe(a) - edtRangDe(b)
+  || (a.week_number || 1) - (b.week_number || 1)
+  || (a.id || 0) - (b.id || 0);
+
 // Premier jour d'école de l'année (confirmé par Maxime : lundi 5 octobre 2026).
 // Le voyant de retard ne compte pas les jours d'école qui le précèdent : ils
 // gonfleraient la capacité de rattrapage d'un mois qui n'a pas commencé.
@@ -1055,8 +1088,15 @@ function edtJoursEcoleRestants(aujourdhui) {
  * La seconde liste est la RÉPONSE à la première : elle dit où est la place.
  * ══════════════════════════════════════════════════════════════════════════
  */
-function edtCalculeRetard({ lessons, timetable, unite, subjects, coverage, aujourdhui }) {
+function edtCalculeRetard({ lessons: toutesLecons, timetable, unite, subjects, coverage, aujourdhui }) {
   const joursRestants = edtJoursEcoleRestants(aujourdhui || new Date());
+  /* Programme refondu (2026-10-15) : on ne compte que ce que la classe reçoit
+     encore — une leçon retirée ou fusionnée n'est pas « due » — et chaque
+     leçon compte dans le MOIS de sa notion. Tout le calcul ci-dessous lit
+     `unit_number` : on le remplace ici, une fois, par le mois du programme. */
+  const lessons = (toutesLecons || [])
+    .filter(edtEnClasse)
+    .map((l) => ({ ...l, unit_number: edtUniteDe(l) }));
 
   /* ⚠️ `=== "covered"`, STRICTEMENT — jamais « tout sauf teacher_taught ».
      `coverage` arrive d'une requête asynchrone : au premier rendu il est vide.
@@ -3756,6 +3796,9 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [timetable, setTimetable] = useState([]);
   const [topics, setTopics] = useState([]);
   const [availableLessons, setAvailableLessons] = useState([]);
+  // Les notions du programme refondu (table `programme_notions`), chargées avec
+  // les leçons par `fetchAllLessons`. Vide pour un niveau qui n'en a pas.
+  const [notions, setNotions] = useState([]);
   // Couverture par matière : 'covered' (leçons sur la plateforme) vs
   // 'teacher_taught' (conçue et enseignée directement par l'enseignant·e).
   // Une matière teacher_taught masque ses sous-sections et affiche un message,
@@ -4336,9 +4379,27 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
        avant aurait été resservie SANS ce champ, et la carte du créneau aurait
        affiché un titre sans sa description — sans lever la moindre erreur.
        Règle du projet : une entrée de cache change de NOM quand sa FORME change. */
-    const data = await cachedQuery("lessons_v2_" + selectedLevel.id, () =>
-      supabase.from("lessons").select("id, subject_id, component_id, level, unit_number, week_number, title, objective")
+    /* 🧭 CLÉ RENOMMÉE EN v3 LE 2026-10-15 — même règle : le select gagne
+       `notion_id, role, rang, a_refondre` (programme refondu). Une entrée v2
+       resservie sans ces champs ferait servir les leçons retirées.
+       ⚠️ Filet : si la requête v3 ne rend rien (colonnes absentes dans une
+       autre base, réseau coupé sans cache v3), on relit l'ancienne forme
+       plutôt que d'afficher une classe sans aucune leçon. Sans rôle, chaque
+       leçon se comporte comme avant la refonte. */
+    let data = await cachedQuery("lessons_v3_" + selectedLevel.id, () =>
+      supabase.from("lessons")
+        .select("id, subject_id, component_id, level, unit_number, week_number, title, objective, notion_id, role, rang, a_refondre")
         .eq("level", selectedLevel.id));
+    if (!data) {
+      data = await cachedQuery("lessons_v2_" + selectedLevel.id, () =>
+        supabase.from("lessons").select("id, subject_id, component_id, level, unit_number, week_number, title, objective")
+          .eq("level", selectedLevel.id));
+    }
+    const notionsNiveau = (await cachedQuery("notions_v1_" + selectedLevel.id, () =>
+      supabase.from("programme_notions")
+        .select("id, subject_id, component_id, unit_number, ordre, titre, objectifs, format, duree_lecon_min, bloc_min, rang_lecon, rang_revision, revision_source_lesson_id, source_refonte_lesson_ids")
+        .eq("level", selectedLevel.id))) || [];
+    const notionParId = new Map(notionsNiveau.map((n) => [n.id, n]));
     /* 🔴 LE PROPRIÉTAIRE VIENT DE `edtOwnerAffiche()` DEPUIS LE 2026-10-07 —
        c'était la DEUXIÈME moitié du défaut n°16, et elle n'avait pas été vue.
        Ce calcul était `isParent ? la classe de l'enfant : teacher?.id`, et le
@@ -4378,8 +4439,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         taughtMap = new Map((tg || []).map((r) => [r.lesson_id, r.taught_at]));
       } catch (_) {}
     }
+    setNotions(notionsNiveau);
     setAvailableLessons((data || []).map((l) => ({
       ...l, taught: taughtMap.has(l.id), taught_at: taughtMap.get(l.id) || null,
+      // Le mois au sens du programme refondu (voir `edtUniteDe`).
+      unite_programme: notionParId.get(l.notion_id)?.unit_number ?? l.unit_number,
     })));
   };
 
@@ -4475,12 +4539,27 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // A lesson row with no week_number is treated as week 1 so pre-migration
   // content keeps showing. Omitting weekNumber matches any lesson in the unit.
   const getLessonForTopic = (subjectId, componentId, unitNumber, weekNumber) => {
-    return availableLessons.find(l =>
+    const correspond = (l) =>
       l.subject_id === subjectId &&
       l.component_id === componentId &&
       l.unit_number === unitNumber &&
-      (weekNumber == null || (l.week_number || 1) === weekNumber)
-    );
+      (weekNumber == null || (l.week_number || 1) === weekNumber);
+    // Programme refondu : à adresse égale, la leçon que la classe reçoit
+    // encore passe avant une leçon retirée ou fusionnée.
+    return availableLessons.find((l) => correspond(l) && edtEnClasse(l))
+      || availableLessons.find(correspond);
+  };
+
+  /* Révision servie seulement APRÈS sa leçon (règle de Lyne : une leçon longue,
+     puis une révision). Une révision reste en attente tant que la leçon de sa
+     notion n'est pas enseignée — ou n'existe pas encore (« à produire »).
+     Exception : une notion « révision seule » n'a pas de leçon, par décision. */
+  const edtRevisionEnAttente = (l) => {
+    if (l.role !== "revision" || !l.notion_id) return false;
+    const notion = notions.find((n) => n.id === l.notion_id);
+    if (notion?.format === "revision_seule") return false;
+    const lecons = availableLessons.filter((x) => x.notion_id === l.notion_id && x.role === "lecon");
+    return lecons.length === 0 || lecons.some((x) => !x.taught);
   };
 
   /* ──────────────────────────────────────────────────────────────────────────
@@ -4544,21 +4623,21 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     for (const l of availableLessons) {
       if (l.subject_id !== subjectId || l.component_id !== componentId) continue;
       if (l.taught) continue;
+      // Programme refondu : une leçon retirée ou fusionnée n'est plus servie,
+      // et une révision attend que sa leçon soit enseignée.
+      if (!edtEnClasse(l)) continue;
+      if (edtRevisionEnAttente(l)) continue;
       // Plancher : l'année commence à l'unité 2. Les unités antérieures ne
       // sont pas « en retard », elles sont HORS PÉRIMÈTRE — la classe ne les a
       // jamais abordées sur la plateforme. Sans cette ligne, la rentrée
       // s'ouvrirait sur une leçon de septembre.
-      if ((l.unit_number || 0) < EDT_UNITE_DEPART) continue;
+      // (Depuis la refonte : le mois est celui de la NOTION, `edtUniteDe`.)
+      if (edtUniteDe(l) < EDT_UNITE_DEPART) continue;
       // Plafond : on ne sert jamais le mois prochain. Voir le bloc ci-dessus.
-      if ((l.unit_number || 0) > plafond) continue;
-      if (!next) { next = l; continue; }
-      const du = (l.unit_number || 0) - (next.unit_number || 0);
-      if (du < 0) { next = l; continue; }
-      if (du > 0) continue;
-      const dw = (l.week_number || 1) - (next.week_number || 1);
-      if (dw < 0) { next = l; continue; }
-      if (dw > 0) continue;
-      if ((l.id || 0) < (next.id || 0)) next = l;
+      if (edtUniteDe(l) > plafond) continue;
+      // Ordre : mois, puis RANG dans le mois (leçon 1, leçon 2, révision 1…),
+      // puis l'ancien ordre semaine · id pour les leçons sans rang.
+      if (!next || edtOrdreProgramme(l, next) < 0) next = l;
     }
     return next;
   };
@@ -4572,8 +4651,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const plafond = edtUnitePlafond();
     return availableLessons.filter((l) =>
       l.subject_id === subjectId && l.component_id === componentId
-      && !l.taught && (l.unit_number || 0) >= EDT_UNITE_DEPART
-      && (l.unit_number || 0) <= plafond).length;
+      && !l.taught && edtEnClasse(l) && edtUniteDe(l) >= EDT_UNITE_DEPART
+      && edtUniteDe(l) <= plafond).length;
   };
 
   /* Pourquoi la file est vide — et c'est DEUX choses, pas une.
@@ -4590,7 +4669,9 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     let auProgramme = 0, restantes = 0;
     for (const l of availableLessons) {
       if (l.subject_id !== subjectId || l.component_id !== componentId) continue;
-      const u = l.unit_number || 0;
+      // Mêmes filtres que la file, sinon « mois terminé » mentirait.
+      if (!edtEnClasse(l)) continue;
+      const u = edtUniteDe(l);
       if (u < EDT_UNITE_DEPART || u > plafond) continue;
       auProgramme += 1;
       if (!l.taught) restantes += 1;
@@ -4651,9 +4732,9 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
        ce cas, et donne le même résultat que `taught_at` dans le cas normal.
        ⭐ Quand deux tris se valent dans le cas courant, c'est le cas tordu qui
        choisit. */
-    faites.sort((a, b) => (a.unit_number || 0) - (b.unit_number || 0)
-      || (a.week_number || 1) - (b.week_number || 1)
-      || (a.id || 0) - (b.id || 0));
+    // Programme refondu : même ordre que la file (mois, rang, semaine, id).
+    // Les leçons retirées DÉJÀ enseignées restent ici : c'est l'historique réel.
+    faites.sort(edtOrdreProgramme);
     return faites[Math.max(1, rang || 1) - 1] || null;
   };
 
@@ -5102,7 +5183,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     let best = null;
     for (const l of availableLessons) {
       if (!have.has(l.id)) continue;
-      const u = l.unit_number || 0;
+      if (!edtEnClasse(l)) continue;                 // programme refondu
+      const u = edtUniteDe(l);
       const w = l.week_number || 0;
       if (!best || u > best.unit || (u === best.unit && w > best.week)) best = { unit: u, week: w };
     }
@@ -5617,9 +5699,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // only holds lessons that actually exist.
   const getAdjacentLessons = () => {
     if (!currentLesson) return { prev: null, next: null };
+    // Programme refondu : ordre du programme (mois, rang), et on saute les
+    // leçons retirées ou fusionnées jamais enseignées. Celle qu'on regarde
+    // reste toujours dans la liste, même retirée.
     const siblings = (availableLessons || [])
       .filter(l => l.subject_id === currentLesson.subject_id && l.component_id === currentLesson.component_id)
-      .sort((a, b) => (a.unit_number - b.unit_number) || ((a.week_number || 1) - (b.week_number || 1)));
+      .filter(l => edtEnClasse(l) || l.taught || l.id === currentLesson.id)
+      .sort(edtOrdreProgramme);
     const idx = siblings.findIndex(l => l.id === currentLesson.id);
     if (idx === -1) return { prev: null, next: null };
     return {
@@ -7858,7 +7944,9 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           const subj = SUBJECTS.find((sb) => sb.id === l.subject_id);
           hits.push({
             key: "l" + l.id, title: l.title,
-            meta: `${subj?.name || "Matière"} · Unité ${l.unit_number}${l.week_number ? " · Semaine " + l.week_number : ""}`,
+            meta: l.notion_id
+              ? `${subj?.name || "Matière"} · ${MONTH_UNIT_MAP[edtUniteDe(l) - 1]?.month || "Unité " + edtUniteDe(l)}${edtEnClasse(l) ? (l.role === "revision" ? " · révision" : "") : " · plus au programme de la classe"}`
+              : `${subj?.name || "Matière"} · Unité ${l.unit_number}${l.week_number ? " · Semaine " + l.week_number : ""}`,
             color: subj?.color, icon: subj?.icon, lessonId: l.id,
           });
         }
@@ -8109,6 +8197,31 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
               const compTopics = getTopicsForComponent(selectedSubject.id, comp.id);
               const compLessons = availableLessons.filter(
                 (l) => l.subject_id === selectedSubject.id && l.component_id === comp.id);
+              /* Programme refondu : on compte les NOTIONS et celles qui ont
+                 déjà leur leçon, plus les sujets de `curriculum_topics`. */
+              const compNotions = notions.filter((n) =>
+                n.subject_id === selectedSubject.id && n.component_id === comp.id && n.format === "lecon");
+              if (compNotions.length > 0) {
+                const pretes = compNotions.filter((n) =>
+                  compLessons.some((l) => l.notion_id === n.id && l.role === "lecon")).length;
+                return (
+                  <ListRow
+                    key={comp.id}
+                    icon="•"
+                    iconColor={selectedSubject.color}
+                    title={comp.name}
+                    meta={`${compNotions.length} notion${compNotions.length > 1 ? "s" : ""} sur l'année · ${pretes} leçon${pretes !== 1 ? "s" : ""} prête${pretes !== 1 ? "s" : ""}`}
+                    onClick={() => { setSelectedComponent(comp); setProgrammeView("topics"); }}
+                  >
+                    <Meter
+                      value={pretes}
+                      max={compNotions.length}
+                      color={selectedSubject.color}
+                      label={`Avancement ${comp.name}`}
+                    />
+                  </ListRow>
+                );
+              }
               return (
                 <ListRow
                   key={comp.id}
@@ -8155,6 +8268,113 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       }
       const compTopics = getTopicsForComponent(selectedSubject.id, selectedComponent.id);
       const color = selectedSubject.color;
+
+      /* ════════════════════════════════════════════════════════════════════
+       * 🧭 PROGRAMME REFONDU (2026-10-15) — la vue par NOTION.
+       * Pour les sous-matières qui ont des notions en base, chaque mois
+       * montre ses notions dans l'ordre, et pour chacune : la leçon longue,
+       * la révision de 30 min, ou « à produire ». Plus de « Semaine 1-2-3 »
+       * ni de « Semaine 4 — évaluation » : décision de Maxime du 2026-10-15
+       * (une leçon longue et une révision par notion et par mois ; la semaine
+       * 4 n'est plus une semaine d'évaluation).
+       * Les autres sous-matières gardent la vue par semaine plus bas.
+       * ════════════════════════════════════════════════════════════════════ */
+      const compNotions = notions
+        .filter((n) => n.subject_id === selectedSubject.id && n.component_id === selectedComponent.id)
+        .sort((a, b) => a.unit_number - b.unit_number || a.ordre - b.ordre);
+      if (compNotions.length > 0) {
+        const compLecons = availableLessons.filter(
+          (l) => l.subject_id === selectedSubject.id && l.component_id === selectedComponent.id);
+        const ligneLecon = (l, libelle) => (
+          <ListRow
+            key={l.id}
+            icon="▸"
+            iconColor={color}
+            title={l.title}
+            meta={`${libelle}${l.taught ? " · ✓ enseignée" : ""}${l.a_refondre && !isParent ? " · version à reprendre" : ""}${OFFLINE_ENABLED && cachedIds.includes(l.id) ? " · ✓ hors ligne" : ""}`}
+            onClick={() => openLesson(l.id)}
+          />
+        );
+        // Côté parent, on ne montre pas le chantier de production.
+        const aProduire = (texte) => isParent ? null : (
+          <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3, fontStyle: "italic", paddingLeft: 2, marginBottom: 6 }}>
+            {texte}
+          </div>
+        );
+        return (
+          <div>
+            <Breadcrumb items={[
+              { label: "Programme", onClick: () => setProgrammeView("subjects") },
+              { label: selectedSubject.name, onClick: () => setProgrammeView("components") },
+              { label: selectedComponent.name },
+            ]} />
+            <h1 className="ec-h1">{selectedComponent.name}</h1>
+            <p className="ec-sub">{selectedSubject.name} · {selectedLevel.name} · une leçon longue et une révision par notion</p>
+
+            <div style={{ marginTop: 20 }}>
+              {THEMES.map((theme, unitIdx) => {
+                const unitNum = unitIdx + 1;
+                const duMois = compNotions.filter((n) => n.unit_number === unitNum);
+                const monthInfo = MONTH_UNIT_MAP[unitIdx];
+                return (
+                  <section key={unitNum} style={{ marginBottom: 22 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
+                      <span aria-hidden="true" style={{
+                        width: 34, height: 34, borderRadius: 9, flex: "none",
+                        background: duMois.length > 0 ? color : COLORS.border,
+                        color: duMois.length > 0 ? "#fff" : COLORS.ink3,
+                        display: "grid", placeItems: "center", fontSize: "var(--ec-fs-3)", fontWeight: 800,
+                      }}>{unitNum}</span>
+                      <div>
+                        <div style={{ fontSize: "var(--ec-fs-4)", fontWeight: 700, color: COLORS.ink }}>{theme}</div>
+                        <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3 }}>{monthInfo?.month}</div>
+                      </div>
+                    </div>
+                    <div style={{ marginLeft: 17, borderLeft: `2px solid ${COLORS.border}`, paddingLeft: 20 }}>
+                      {duMois.length === 0 ? (
+                        <span style={{ fontSize: FONT.sm, color: COLORS.ink3, fontStyle: "italic" }}>
+                          Rien au programme officiel ce mois-ci
+                        </span>
+                      ) : duMois.map((n) => {
+                        const lecons = compLecons.filter((l) => l.notion_id === n.id && l.role === "lecon").sort(edtOrdreProgramme);
+                        const revisions = compLecons.filter((l) => l.notion_id === n.id && l.role === "revision");
+                        const sources = (n.source_refonte_lesson_ids || [])
+                          .map((id) => compLecons.find((l) => l.id === id) || availableLessons.find((l) => l.id === id))
+                          .filter(Boolean);
+                        return (
+                          <div key={n.id} className="ec-card" style={{ padding: "11px 14px", marginBottom: 9 }}>
+                            <div style={{ fontSize: "var(--ec-fs-3)", fontWeight: 600, color: COLORS.ink }}>{n.titre}</div>
+                            <div style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3, marginTop: 2 }}>
+                              {n.format === "bloc"
+                                ? `Calcul mental · ${n.bloc_min || 30} min dans le mois, en ouverture des leçons de calcul`
+                                : n.format === "revision_seule"
+                                  ? "Révision seule · 30 min (déjà vu un mois précédent)"
+                                  : `Leçon de ${n.duree_lecon_min || 60} min, puis une révision de 30 min`}
+                            </div>
+                            {(n.objectifs || []).length > 0 && (
+                              <ul style={{ margin: "6px 0 8px", paddingLeft: 18, fontSize: FONT.sm, color: COLORS.ink2, lineHeight: 1.5 }}>
+                                {n.objectifs.map((o, i) => <li key={i}>{o}</li>)}
+                              </ul>
+                            )}
+                            {n.format === "lecon" && (lecons.length > 0
+                              ? lecons.map((l) => ligneLecon(l, "Leçon"))
+                              : sources.length > 0
+                                ? aProduire(`Leçon à produire à partir de : ${sources.map((s) => s.title).join(" ; ")}`)
+                                : aProduire("Leçon à produire"))}
+                            {n.format !== "bloc" && (revisions.length > 0
+                              ? revisions.map((l) => ligneLecon(l, "Révision"))
+                              : aProduire("Révision à produire"))}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </section>
+                );
+              })}
+            </div>
+          </div>
+        );
+      }
 
       return (
         <div>
@@ -9882,12 +10102,23 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
 
           // Avancement par matière — exactement la source de l'écran Programme
           // (sujets au calendrier vs leçons réellement disponibles).
+          // Programme refondu : pour une matière qui a des notions, c'est
+          // « notions qui ont leur leçon » sur « notions de l'année ».
           const progress = SUBJECTS
-            .map((s) => ({
-              name: s.name,
-              done: availableLessons.filter((l) => l.subject_id === s.id).length,
-              total: topics.filter((t) => t.subject_id === s.id).length,
-            }))
+            .map((s) => {
+              const ns = notions.filter((n) => n.subject_id === s.id && n.format === "lecon");
+              if (ns.length > 0) {
+                const avecLecon = new Set(availableLessons
+                  .filter((l) => l.subject_id === s.id && l.role === "lecon" && l.notion_id)
+                  .map((l) => l.notion_id));
+                return { name: s.name, done: ns.filter((n) => avecLecon.has(n.id)).length, total: ns.length };
+              }
+              return {
+                name: s.name,
+                done: availableLessons.filter((l) => l.subject_id === s.id).length,
+                total: topics.filter((t) => t.subject_id === s.id).length,
+              };
+            })
             .filter((s) => s.total > 0)
             .sort((a, b) => (b.done / b.total) - (a.done / a.total))
             .slice(0, 4);
