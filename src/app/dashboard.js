@@ -25,6 +25,10 @@ import { Button, Card, CardLabel, Badge, Callout, ListRow, IconButton, EmptyStat
 import { Sparkline, fr } from "../components/charts";
 import { useToasts } from "../components/overlays";
 import InstallPrompt from "../components/InstallPrompt";
+import { nouvelleVersionEnLigne, rechargementDejaTente, noterRechargementTente } from "../lib/version";
+
+// Actualisation automatique : délai d'inactivité avant de recharger la page.
+const INACTIVITE_MS = 20 * 60 * 1000;
 import { normalizePhone, formatPhone, isSuspectPhone } from "../lib/phone";
 
 const LEVELS = [
@@ -3667,6 +3671,87 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const [editError, setEditError] = useState("");
   const [editUploadingKey, setEditUploadingKey] = useState(null);
 
+  // ============ ÉCHAP FERME LE MESSAGE OUVERT (2026-10-15) ============
+  // Avec le bouton « Fermer ✕ » du volet de lecture : signalé par Maxime, on ne
+  // pouvait pas refermer un message lu sur ordinateur.
+  useEffect(() => {
+    if (!openMsg && !openExch) return;
+    const onKey = (e) => { if (e.key === "Escape") { setOpenMsg(null); setOpenExch(null); } };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openMsg, openExch]);
+
+  // ============ ACTUALISATION AUTOMATIQUE (2026-10-15) ============
+  // Demande de Maxime : ne plus avoir à dire « rechargez la page ».
+  //  1. À l'OUVERTURE (donc à chaque connexion) : si une version plus récente
+  //     est en ligne, on recharge — une seule fois par version, voir version.js.
+  //  2. Après 20 MIN D'INACTIVITÉ (ou au retour sur un onglet laissé de côté
+  //     aussi longtemps) : voile « Actualisation de la page… », 5 s pour dire
+  //     « Pas maintenant », puis rechargement — code ET données à jour.
+  // ⚠️ On ne recharge JAMAIS pendant une leçon, une projection, une édition,
+  // un aperçu « agir en tant que », hors ligne, ni quand un champ contient du
+  // texte : un brouillon de message ou des notes à moitié saisies ne se
+  // perdent pas pour une actualisation.
+  const [actualisation, setActualisation] = useState(null); // null | "inactivite" | "version"
+  const derniereActivite = useRef(0); // posé au montage, voir ci-dessous
+  const actualisationBloquee = useRef(() => true);
+  useEffect(() => {
+    actualisationBloquee.current = () => {
+      if (typeof navigator !== "undefined" && !navigator.onLine) return true;
+      if (impersonating || isPresentWindow || presenting || projectorMode) return true;
+      if (screen === "lesson" || editMode || loadingLesson) return true;
+      for (const el of document.querySelectorAll("textarea, input")) {
+        const type = (el.getAttribute("type") || "text").toLowerCase();
+        const saisie = el.tagName === "TEXTAREA" || ["text", "number", "tel", "email", "search", "url"].includes(type);
+        if (saisie && !el.readOnly && !el.disabled && String(el.value || "").trim()) return true;
+      }
+      return false;
+    };
+  });
+  useEffect(() => {
+    const noter = () => { derniereActivite.current = Date.now(); };
+    noter(); // l'ouverture de la page compte comme une activité
+    const evts = ["pointerdown", "keydown", "wheel", "touchstart", "scroll"];
+    evts.forEach((ev) => window.addEventListener(ev, noter, { passive: true, capture: true }));
+    const verifier = () => {
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - derniereActivite.current < INACTIVITE_MS) return;
+      if (actualisationBloquee.current()) return;
+      setActualisation((a) => a || "inactivite");
+    };
+    const minuterie = setInterval(verifier, 60 * 1000);
+    document.addEventListener("visibilitychange", verifier);
+    return () => {
+      evts.forEach((ev) => window.removeEventListener(ev, noter, { capture: true }));
+      clearInterval(minuterie);
+      document.removeEventListener("visibilitychange", verifier);
+    };
+  }, []);
+  useEffect(() => {
+    if (impersonating || isPresentWindow) return;
+    let vivant = true;
+    nouvelleVersionEnLigne().then((v) => {
+      if (!vivant || !v || rechargementDejaTente(v)) return;
+      noterRechargementTente(v);
+      setActualisation("version");
+    });
+    return () => { vivant = false; };
+  }, [impersonating, isPresentWindow]);
+  useEffect(() => {
+    if (!actualisation) return;
+    const t = setTimeout(() => {
+      // Dernier contrôle au moment de recharger : en 5 s, la connexion a pu
+      // tomber. Recharger hors ligne ne servirait rien de neuf.
+      if (actualisation === "inactivite" && actualisationBloquee.current()) { setActualisation(null); return; }
+      window.location.reload();
+    }, actualisation === "version" ? 1500 : 5000);
+    return () => clearTimeout(t);
+  }, [actualisation]);
+  const pasMaintenant = () => {
+    derniereActivite.current = Date.now();
+    setActualisation(null);
+  };
+
   // Data
   const [timetable, setTimetable] = useState([]);
   const [topics, setTopics] = useState([]);
@@ -6204,13 +6289,25 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       <Card>
         {/* Le retour n'a de sens que sur téléphone : sur ordinateur la liste
             est restée affichée à côté. */}
-        <button
-          onClick={() => setOpenMsg(null)}
-          className="ec-link ec-hide-wide"
-          style={{ minHeight: 40, marginBottom: 14, textDecoration: "none", color: COLORS.ink2 }}
-        >
-          ‹ Retour à la boîte de réception
-        </button>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 14 }}>
+          <button
+            onClick={() => setOpenMsg(null)}
+            className="ec-link ec-hide-wide"
+            style={{ minHeight: 40, textDecoration: "none", color: COLORS.ink2 }}
+          >
+            ‹ Retour à la boîte de réception
+          </button>
+          {/* Sur ordinateur, il n'y avait AUCUN moyen de refermer le message
+              (signalé par Maxime le 2026-10-15). Échap le ferme aussi. */}
+          <button
+            onClick={() => setOpenMsg(null)}
+            className="ec-link ec-deskonly"
+            aria-label="Fermer le message"
+            style={{ marginLeft: "auto", minHeight: 40, textDecoration: "none", color: COLORS.ink2, fontWeight: 700 }}
+          >
+            Fermer ✕
+          </button>
+        </div>
         <h1 style={{ fontSize: FONT.lg, fontWeight: 800, letterSpacing: "-.02em", lineHeight: 1.25 }}>
           {m.subject || "Sans objet"}
         </h1>
@@ -6359,6 +6456,11 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
             </div>
           </div>
         )}
+        {/* Le même geste en bas, à toutes les tailles : sur téléphone, après un
+            long message, le « Retour » du haut est loin au-dessus. */}
+        <div style={{ marginTop: 22, paddingTop: 16, borderTop: `1px solid ${COLORS.border}` }}>
+          <Button variant="ghost" onClick={() => setOpenMsg(null)}>Fermer le message</Button>
+        </div>
       </Card>
     ) : null;   // pas de volet « en attente » : voir le commentaire de la grille
 
@@ -11063,6 +11165,26 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           pushToast={pushToast}
           usurpation={!!impersonating}
         />
+      )}
+      {/* Voile d'actualisation automatique (2026-10-15). Il couvre l'écran :
+          pendant ces quelques secondes, aucun geste ne peut se perdre. */}
+      {actualisation && (
+        <div className="ec-ouverture" role="status" aria-live="polite">
+          <div className="ec-ouverture__carte">
+            <span className="ec-ouverture__roue" aria-hidden="true" />
+            <div style={{ fontSize: "var(--ec-fs-4)", fontWeight: 800, color: COLORS.ink }}>
+              {actualisation === "version" ? "Mise à jour de la plateforme…" : "Actualisation de la page…"}
+            </div>
+            <div style={{ fontSize: FONT.sm, color: COLORS.ink2, lineHeight: 1.5, maxWidth: 260 }}>
+              {actualisation === "version"
+                ? "Une nouvelle version est disponible."
+                : "Pour afficher les dernières mises à jour."}
+            </div>
+            {actualisation === "inactivite" && (
+              <Button variant="ghost" size="sm" onClick={pasMaintenant}>Pas maintenant</Button>
+            )}
+          </div>
+        </div>
       )}
       {/* Voile d'ouverture d'une leçon. Rendu ICI et pas dans LessonScreen :
           pendant le chargement on est encore sur l'écran d'origine. Il couvre

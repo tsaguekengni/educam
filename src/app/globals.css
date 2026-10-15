@@ -302,6 +302,11 @@ button, [role="button"], .ec-btn, .ec-row, .ec-choice, .ec-bottomnav button, .ec
 .ec-row {
   display: flex; align-items: center; gap: var(--ec-s3);
   width: 100%; text-align: left;
+  /* ⚠️ min-width: 0 (2026-10-15). Sans lui, une ligne qui contient du texte
+     en `nowrap` (l'aperçu d'un message) impose sa largeur COMPLÈTE à la
+     colonne de grille qui la contient : la liste de la messagerie faisait
+     1 560 px dans une colonne de 530 et passait SOUS le volet de lecture. */
+  min-width: 0;
   background: var(--ec-card); border: 1px solid var(--ec-border);
   border-radius: 10px; padding: var(--ec-s3);
   transition: border-color .15s ease, background .15s ease;

@@ -119,6 +119,11 @@ self.addEventListener("fetch", (event) => {
   // Never touch Supabase API / auth / data — the app handles those via IndexedDB.
   if (url.hostname.endsWith(".supabase.co")) return;
 
+  // Nos propres routes d'API (`/api/version`, 2026-10-15) : jamais en cache.
+  // Servie en « stale-while-revalidate », la version annoncée serait celle
+  // d'hier et l'actualisation automatique ne verrait jamais rien de neuf.
+  if (url.origin === self.location.origin && url.pathname.startsWith("/api/")) return;
+
   if (url.origin === self.location.origin) {
     // The HTML document itself → network-first (never serve a stale shell).
     if (isNavigationRequest(req)) {
