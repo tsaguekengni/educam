@@ -25,6 +25,32 @@ const EVENT_LABEL = {
   login: "Connexion", lesson_open: "Leçon ouverte", projector: "Mode projecteur",
   mark_taught: "Marquée enseignée", unmark_taught: "Démarquée", results_entered: "Résultats saisis",
   feedback: "Commentaire", message_read: "Message lu",
+  lesson_close: "Temps de lecture",
+};
+
+// ── TEMPS DE LECTURE (2026-10-20) ────────────────────────────────────────────
+// Le tableau de bord du parent envoie un `lesson_close` à chaque passage en
+// arrière-plan, avec en `detail` du JSON : { titre, s, total, fin, session }.
+// `total` est le cumul de la séance au moment de l'envoi : la ligne la plus
+// haute d'une séance en donne la durée (au moins). Voir dashboard.js,
+// « TEMPS DE LECTURE DES PARENTS ».
+const LECTURE_DEBUT = "2026-10-20";   // avant cette date, aucune séance n'était mesurée
+const lireLecture = (detail) => {
+  try { const o = JSON.parse(detail); return o && typeof o === "object" ? o : null; } catch { return null; }
+};
+const duree = (sec) => {
+  const s = Math.max(0, Math.round(sec || 0));
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60), r = s % 60;
+  if (m >= 60) return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")}`;
+  return r ? `${m} min ${String(r).padStart(2, "0")} s` : `${m} min`;
+};
+// Ce qu'affiche le journal (et l'export) à la place du JSON brut.
+const detailLisible = (a) => {
+  if (a.event_type !== "lesson_close") return a.detail || "";
+  const o = lireLecture(a.detail);
+  if (!o) return a.detail || "";
+  return `${o.titre || "Leçon"} — ${duree(o.total)} au total${o.fin ? "" : ", mise en arrière-plan"}`;
 };
 const STATS_CAP = 4000;   // plafond explicite pour les agrégats (pas de lecture illimitée)
 const PAGE = 30;          // taille de page du journal
@@ -159,9 +185,23 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
 
       const now = Date.now();
       const parentStats = parentsData.map((p) => {
-        const x = byActor[p.id] || { counts: {}, last: null };
+        const x = byActor[p.id] || { counts: {}, last: null, events: [] };
         const opened = x.counts.lesson_open || 0;
         const logins = x.counts.login || 0;
+        // Temps de lecture : par séance, la plus haute valeur de `total` reçue.
+        // Les ouvertures faites depuis la mise en service sans AUCUNE ligne de
+        // durée sont comptées à part — « durée inconnue », jamais devinées.
+        const seances = new Map();
+        let ouverturesMesurables = 0;
+        (x.events || []).forEach((e) => {
+          if (e.event_type === "lesson_open" && fmtDate(e.created_at) >= LECTURE_DEBUT) ouverturesMesurables++;
+          if (e.event_type !== "lesson_close") return;
+          const o = lireLecture(e.detail);
+          if (!o?.session) return;
+          seances.set(o.session, Math.max(seances.get(o.session) || 0, Number(o.total) || 0));
+        });
+        const lectureSec = [...seances.values()].reduce((t, v) => t + v, 0);
+        const sansDuree = Math.max(0, ouverturesMesurables - seances.size);
         const mine = (msgs || []).filter((m) => m.recipient_id === p.id);
         const unread = mine.filter((m) => !m.read_at).length;
         const daysSince = x.last ? Math.floor((now - new Date(x.last).getTime()) / 86400000) : null;
@@ -170,7 +210,8 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
         else if (daysSince >= 7) flags.push(`Inactif depuis ${daysSince} j`);
         if (unread > 0) flags.push(`${unread} non lu${unread > 1 ? "s" : ""}`);
         if (x.last && opened === 0) flags.push("Ne révise pas");
-        return { id: p.id, child: studentName[p.student_id] || "Élève", opened, logins, unread, total: mine.length, last: x.last, flags };
+        return { id: p.id, child: studentName[p.student_id] || "Élève", opened, logins, unread, total: mine.length, last: x.last, flags,
+          lectureSec, seances: seances.size, sansDuree };
       }).sort((a, b) => b.flags.length - a.flags.length || (b.last || "").localeCompare(a.last || ""));
 
       const nm = {};
@@ -312,7 +353,7 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
         nameMap[r.actor_id] || r.actor_id || "",
         ROLE_LABEL[r.actor_role] || r.actor_role || "",
         EVENT_LABEL[r.event_type] || r.event_type || "",
-        r.detail || "",
+        detailLisible(r),
         r.school_id || "",
       ].map(esc).join(";"));
       // BOM : sans lui, Excel en français lit les accents de travers.
@@ -501,6 +542,10 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
                         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 8 }}>
                           <Stat label="connexions" n={p.logins} /><Stat label="leçons ouvertes" n={p.opened} />
                           <Stat label="non lus" n={p.unread} /><Stat label="reçus" n={p.total} />
+                          {(p.seances > 0 || p.sansDuree > 0) && (
+                            <Stat label={`de lecture${p.sansDuree ? ` · ${p.sansDuree} ouverture${p.sansDuree > 1 ? "s" : ""} sans durée` : ""}`}
+                              n={p.seances > 0 ? duree(p.lectureSec) : "—"} />
+                          )}
                         </div>
                         {p.flags.length > 0 && flags(p.flags)}
                         {act && (
@@ -578,7 +623,7 @@ export default function ActivityLog({ school, isAdmin, onBack, initialTab, onAct
                             <span style={{ fontSize: FONT.sm, color: COLORS.ink3 }}>{" · "}{ROLE_LABEL[a.actor_role] || a.actor_role}</span>
                           )}
                           <span style={{ fontSize: FONT.md, color: COLORS.ink2 }}>
-                            {" · "}{EVENT_LABEL[a.event_type] || a.event_type}{a.detail ? ` (${a.detail})` : ""}
+                            {" · "}{EVENT_LABEL[a.event_type] || a.event_type}{a.detail ? ` (${detailLisible(a)})` : ""}
                           </span>
                         </div>
                         <span style={{ fontSize: "var(--ec-fs-2)", color: COLORS.ink3, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>

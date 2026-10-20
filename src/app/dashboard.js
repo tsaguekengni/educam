@@ -2547,6 +2547,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const isReferent = PROFILES_ENABLED && teacher?.role === "referent";
   const isSchoolAdmin = PROFILES_ENABLED && (teacher?.role === "school_admin" || teacher?.role === "referent");
   const isParent = PROFILES_ENABLED && !!parent;
+  // ⚠️ « AGIR EN TANT QUE » N'ÉCRIT RIEN DANS LE JOURNAL (2026-10-20).
+  // La règle d'insertion de `activity_log` laisse l'administrateur écrire au
+  // nom de n'importe qui : quand Maxime ouvrait une leçon dans la vue d'un
+  // parent, c'était compté comme une lecture DE CE PARENT — et faussait
+  // exactement les chiffres qu'on regarde pour savoir si les familles révisent.
+  // Toute l'activité de ce tableau de bord passe donc par `journaliser`.
+  const journaliser = impersonating ? () => {} : logActivity;
 
   // Parent mode: the WHOLE curriculum of the linked class, each lesson tagged as
   // taught (full access) or not-yet-taught (preview — the exercise & "à recopier"
@@ -3418,7 +3425,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       }
     }
 
-    logActivity({
+    journaliser({
       actorId: senderId, actorRole: teacher?.role || "teacher",
       schoolId: rows[0].school_id, eventType: "message_sent",
       detail: rows.length > 1 ? `${rows[0].subject} (${rows.length} familles)` : rows[0].subject,
@@ -3447,7 +3454,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     const id = isParent ? parent?.id : teacher?.id;
     if (!id) return;
     loggedLogin.current = true;
-    logActivity({
+    journaliser({
       actorId: id,
       actorRole: isParent ? "parent" : (teacher?.role || "teacher"),
       schoolId: isParent ? parentStudent?.school_id : (teacher?.school_id || schoolContext?.id),
@@ -4894,7 +4901,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     // Toute modification d'un compte par le superadmin laisse une trace : c'est
     // une donnée d'enfant côté parent, et « qui a changé quoi, quand » doit
     // pouvoir se répondre (Article 12 du protocole pilote).
-    logActivity({
+    journaliser({
       actorId: teacher?.id,
       actorRole: teacher?.role || "admin",
       schoolId: patch.school_id || null,
@@ -5140,7 +5147,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     pushToast(offlineNow
       ? "Leçon marquée enseignée — partira au retour du réseau."
       : "Leçon marquée enseignée", "success");
-    logActivity({
+    journaliser({
       actorId: teacher.id, actorRole: teacher?.role || "teacher",
       schoolId: teacher?.school_id || schoolContext?.id,
       eventType: "mark_taught", lessonId: lesson.id, detail: lesson.title,
@@ -5585,12 +5592,13 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     setFeedbackOpenFor(null);
     setScreen("lesson");
     setLoadingLesson(false);
-    logActivity({
+    journaliser({
       actorId: isParent ? parent?.id : teacher?.id,
       actorRole: isParent ? "parent" : (teacher?.role || "teacher"),
       schoolId: isParent ? parentStudent?.school_id : (teacher?.school_id || schoolContext?.id),
       eventType: "lesson_open", lessonId, detail: bundle?.lesson?.title || null,
     });
+    commencerLecture(lessonId, bundle?.lesson?.title);
   };
 
   // Le second appui est IGNORE, pas mis en file : la personne voulait ouvrir
@@ -5605,6 +5613,82 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   // Le verrou porte un JETON (un objet neuf par ouverture) et non l'identifiant
   // de la leçon : après « Annuler » puis une nouvelle ouverture de la MÊME leçon,
   // l'ancienne ne doit ni s'afficher ni relâcher le verrou de la nouvelle.
+  // ── TEMPS DE LECTURE DES PARENTS (2026-10-20) ─────────────────────────────
+  // `lesson_open` dit qu'une leçon a été OUVERTE, pas qu'elle a été LUE. On
+  // mesure donc le temps où la leçon est À L'ÉCRAN — onglet visible — et non
+  // l'écart entre l'ouverture et la fermeture : un téléphone posé, écran
+  // verrouillé, n'est pas une lecture.
+  //
+  // ⚠️ Sur téléphone, la « fermeture » n'arrive souvent JAMAIS : onglet tué par
+  // le système, réseau coupé, application balayée. On n'attend donc pas la fin :
+  // un morceau `lesson_close` part À CHAQUE passage en arrière-plan, avec le
+  // cumul de la séance. La dernière ligne reçue donne au moins un minimum
+  // honnête. Une séance sans aucune ligne s'affiche « durée inconnue » — jamais
+  // devinée, jamais comptée « 30 min et + » par défaut.
+  //
+  // Un morceau est plafonné à 30 min : un ordinateur laissé ouvert sur la leçon
+  // toute la nuit n'est pas une nuit de lecture.
+  //
+  // Seulement les vrais parents : ni l'équipe, ni l'administrateur qui agit en
+  // tant que parent (`journaliser` est déjà muet dans ce cas).
+  const lecture = useRef(null);
+  const LECTURE_MORCEAU_MAX_MS = 30 * 60 * 1000;
+  const envoyerLecture = (fin) => {
+    const l = lecture.current;
+    if (!l) return;
+    if (l.visibleDepuis != null) {
+      l.morceau += Date.now() - l.visibleDepuis;
+      l.visibleDepuis = null;
+    }
+    const s = Math.round(Math.min(l.morceau, LECTURE_MORCEAU_MAX_MS) / 1000);
+    l.morceau = 0;
+    l.total += s;
+    if (s > 0 || (fin && !l.envoye)) {
+      l.envoye = true;
+      journaliser({
+        actorId: l.actorId, actorRole: "parent", schoolId: l.schoolId,
+        eventType: "lesson_close", lessonId: l.lessonId,
+        detail: JSON.stringify({ titre: l.titre, s, total: l.total, fin: !!fin, session: l.session }),
+      });
+    }
+    if (fin) lecture.current = null;
+  };
+  const commencerLecture = (lessonId, titre) => {
+    envoyerLecture(true);   // une leçon ouverte par-dessus une autre : on clôt la précédente
+    if (!isParent || impersonating || !parent?.id) return;
+    lecture.current = {
+      session: Math.random().toString(36).slice(2, 10) + Date.now().toString(36),
+      lessonId, titre: titre || "",
+      actorId: parent.id, schoolId: parentStudent?.school_id || null,
+      visibleDepuis: typeof document !== "undefined" && document.visibilityState === "visible" ? Date.now() : null,
+      morceau: 0, total: 0, envoye: false,
+    };
+  };
+  // Arrière-plan / retour, et page qui se ferme.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const onVisibilite = () => {
+      const l = lecture.current;
+      if (!l) return;
+      if (document.visibilityState === "hidden") envoyerLecture(false);
+      else if (l.visibleDepuis == null) l.visibleDepuis = Date.now();
+    };
+    const onQuitte = () => envoyerLecture(false);
+    document.addEventListener("visibilitychange", onVisibilite);
+    window.addEventListener("pagehide", onQuitte);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilite);
+      window.removeEventListener("pagehide", onQuitte);
+      envoyerLecture(true);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Quitter l'écran de la leçon (retour, autre onglet de l'application) = fin.
+  useEffect(() => {
+    if (screen !== "lesson") envoyerLecture(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen]);
+
   const openLesson = async (lessonId, opts = {}) => {
     if (openingLesson.current !== null) return;
     const jeton = { lessonId };
@@ -5662,7 +5746,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         }
         setLessonTaught(false);
         setAvailableLessons((prev) => prev.map((l) => (l.id === currentLesson.id ? { ...l, taught: false } : l)));
-        logActivity({ actorId: teacher.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "unmark_taught", lessonId: currentLesson.id, detail: currentLesson.title });
+        journaliser({ actorId: teacher.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "unmark_taught", lessonId: currentLesson.id, detail: currentLesson.title });
       } else {
         const payload = {
           teacher_id: teacher.id, lesson_id: currentLesson.id,
@@ -5680,7 +5764,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         }
         setLessonTaught(true);
         setAvailableLessons((prev) => prev.map((l) => (l.id === currentLesson.id ? { ...l, taught: true } : l)));
-        logActivity({ actorId: teacher.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "mark_taught", lessonId: currentLesson.id, detail: currentLesson.title });
+        journaliser({ actorId: teacher.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "mark_taught", lessonId: currentLesson.id, detail: currentLesson.title });
       }
       if (offlineNow) {
         pushToast("Enregistré hors ligne — partira au retour du réseau.", "success");
@@ -5813,7 +5897,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       setLessonFeedback(fb || []);
       // ⚠️ APRÈS l'écriture, jamais avant : le journal d'activité ne doit pas
       // affirmer qu'un retour a été donné quand rien n'a été écrit.
-      logActivity({ actorId: teacher?.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "feedback", lessonId: currentLesson.id, detail: currentLesson.title });
+      journaliser({ actorId: teacher?.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "feedback", lessonId: currentLesson.id, detail: currentLesson.title });
       setFeedbackOpenFor(null);
       setFbRating(0);
       setFbComment("");
@@ -6317,6 +6401,12 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     };
     const fmtDate = (s) => (s || "").slice(0, 10);
     const lessonLink = (m) => m.link_url && /^\d+$/.test(m.link_url);
+    // Plusieurs leçons (« 113,350,207 ») : le rappel de révision du soir liste
+    // TOUTES les leçons du jour. Avec un seul bouton, les parents n'ouvraient
+    // que celle-là (soir du 2026-10-19) — d'où un bouton par leçon.
+    const lessonList = (m) => (m.link_url && /^\d+(,\d+)+$/.test(m.link_url)
+      ? m.link_url.split(",").map(Number) : null);
+    const titreLecon = (id, i) => (parentLessons || []).find((l) => l.id === id)?.title || `Leçon ${i + 1}`;
 
     const unread = inbox.filter((m) => !m.read_at);
     const read = inbox.filter((m) => m.read_at);
@@ -6426,7 +6516,16 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
         </div>
         {m.link_url && (
           <div style={{ marginTop: 20 }}>
-            {lessonLink(m) ? (
+            {lessonList(m) ? (
+              <div style={{ display: "grid", gap: 8, maxWidth: "66ch" }}>
+                {lessonList(m).map((id, i) => (
+                  <Button key={id} variant="ghost" disabled={loadingLesson} onClick={() => openLesson(id)}
+                    style={{ justifyContent: "flex-start", textAlign: "left", whiteSpace: "normal" }}>
+                    📖 {titreLecon(id, i)}
+                  </Button>
+                ))}
+              </div>
+            ) : lessonLink(m) ? (
               <Button disabled={loadingLesson} onClick={() => openLesson(Number(m.link_url))}>
                   {loadingLesson ? "Ouverture…" : "Ouvrir la leçon"}
                 </Button>
@@ -9195,7 +9294,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
   const enterProjector = () => {
     setProjectorMode(true);
     try { document.documentElement.requestFullscreen?.(); } catch (_) {}
-    logActivity({ actorId: teacher?.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "projector", lessonId: currentLesson?.id, detail: currentLesson?.title });
+    journaliser({ actorId: teacher?.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "projector", lessonId: currentLesson?.id, detail: currentLesson?.title });
   };
   const exitProjector = () => {
     setProjectorMode(false);
@@ -9257,7 +9356,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
     presenterWinRef.current = win;
     setPresenting(true);
     setPresented({ id: lessonId, title: currentLesson?.title || "" });
-    logActivity({ actorId: teacher?.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "projector", lessonId, detail: currentLesson?.title });
+    journaliser({ actorId: teacher?.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "projector", lessonId, detail: currentLesson?.title });
   };
 
   // Keyboard / clicker control for the projector.
