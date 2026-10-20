@@ -5143,7 +5143,12 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
       return;
     }
     setHeroPlan((p) => ({ ...p, taught: true }));
-    setAvailableLessons((prev) => prev.map((l) => (l.id === lesson.id ? { ...l, taught: true } : l)));
+    /* 🔴 `taught_at` AUSSI, pas seulement `taught` — défaut n°19, 2026-10-20.
+       `edtLeconEnseigneeCeJour` ne retient que les leçons qui portent une
+       date : sans elle, la leçon tout juste marquée sortait du créneau et la
+       suivante prenait sa place, jusqu'au prochain rechargement. La vue de
+       la direction relit la base et ne le voyait pas. */
+    setAvailableLessons((prev) => prev.map((l) => (l.id === lesson.id ? { ...l, taught: true, taught_at: payload.taught_at } : l)));
     pushToast(offlineNow
       ? "Leçon marquée enseignée — partira au retour du réseau."
       : "Leçon marquée enseignée", "success");
@@ -5745,7 +5750,7 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           if (error) throw error;
         }
         setLessonTaught(false);
-        setAvailableLessons((prev) => prev.map((l) => (l.id === currentLesson.id ? { ...l, taught: false } : l)));
+        setAvailableLessons((prev) => prev.map((l) => (l.id === currentLesson.id ? { ...l, taught: false, taught_at: null } : l)));
         journaliser({ actorId: teacher.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "unmark_taught", lessonId: currentLesson.id, detail: currentLesson.title });
       } else {
         const payload = {
@@ -5763,7 +5768,8 @@ export default function Dashboard({ teacher, parent, onLogout, impersonating, im
           if (error) throw error;
         }
         setLessonTaught(true);
-        setAvailableLessons((prev) => prev.map((l) => (l.id === currentLesson.id ? { ...l, taught: true } : l)));
+        // 🔴 Avec sa date — sinon la leçon quitte le créneau du jour (défaut n°19, voir `markHeroTaught`).
+        setAvailableLessons((prev) => prev.map((l) => (l.id === currentLesson.id ? { ...l, taught: true, taught_at: payload.taught_at } : l)));
         journaliser({ actorId: teacher.id, actorRole: teacher?.role || "teacher", schoolId: teacher?.school_id || schoolContext?.id, eventType: "mark_taught", lessonId: currentLesson.id, detail: currentLesson.title });
       }
       if (offlineNow) {
