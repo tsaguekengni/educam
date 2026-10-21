@@ -585,30 +585,50 @@ const NOTEBOOK_COMPONENT = {
 };
 const LESSON_LINE = /^\*\*(Leçon|Lesson)\s*:\s*([^*\n]+?)\s*\*\*[ \t]*$/gm;
 
-// « Sciences : Développement durable : Gérer l'eau au village »
-// (« English: Grammar and Vocabulary: Plurals » en anglais, sans espace).
+// « Développement durable : Gérer l'eau au village »
+// (« Grammar and Vocabulary: Plurals » en anglais, sans espace).
+//
+// 2026-10-21 — LA MATIÈRE EST RETIRÉE (décision de Maxime, sur la demande
+// répétée de Serge, retours 572, 573, 575-580, 583-588, 591, 597) : le cahier
+// porte « sous-discipline : titre ». La matière ne revient que si la
+// sous-discipline est inconnue (sinon la ligne ne dirait plus de quoi il
+// s'agit). NOTEBOOK_SUBJECT reste là pour ce cas de secours.
 function notebookLessonLine(lesson, title, word) {
   const subject = SUBJECTS.find((s) => s.id === lesson?.subject_id);
   if (!subject) return null;
-  const subjectLabel = NOTEBOOK_SUBJECT[subject.id] || subject.name;
   const component = subject.components.find((c) => c.id === lesson.component_id);
   const componentLabel = NOTEBOOK_COMPONENT[lesson.component_id] || component?.name;
+  const head = componentLabel || NOTEBOOK_SUBJECT[subject.id] || subject.name;
   const sep = word === "Lesson" ? ": " : " : ";
-  return [subjectLabel, componentLabel, title].filter(Boolean).join(sep);
+  return [head, title].filter(Boolean).join(sep);
 }
+
+/* « JE RETIENS » — 2026-10-21. Mme Batam (leçon 203) et Serge (retours 585,
+ * 587, 591, 596) : juste après le titre, la trace commence par « Je retiens »,
+ * en rouge. Ajouté À L'AFFICHAGE, comme l'en-tête, pour toutes les leçons en
+ * français d'un coup. Il est en gras dans le texte, donc rouge et souligné
+ * dans la cursive.
+ * Pas ajouté si le bloc parle déjà de « retiens » (la leçon 203 l'écrit
+ * elle-même ; 9 anciennes leçons ont l'en-tête « CE QUE JE RETIENS », toujours
+ * dans le même bloc que la ligne « Leçon : », mesuré en base le 2026-10-21),
+ * ni pour l'anglais. */
+const JE_RETIENS = "**Je retiens**";
 
 function withNotebookLessonLine(text, lesson) {
   if (!lesson || !text) return text;
+  const alreadyRetiens = /retiens/i.test(text);
   return text.replace(LESSON_LINE, (line, word, title) => {
     const label = notebookLessonLine(lesson, title, word);
-    return label ? `**${label}**` : line;
+    if (!label) return line;
+    const retiens = word === "Leçon" && !alreadyRetiens ? `\n\n${JE_RETIENS}` : "";
+    return `**${label}**${retiens}`;
   });
 }
 
 // Texte d'un bloc de la trace : la ligne d'en-tête (si c'en est une) reste
 // dans la police normale, le reste passe en cursive, le gras devient souligné.
-// `lesson` (facultatif) sert à écrire l'en-tête « matière : sous-discipline :
-// titre » à la place de « Leçon : titre » (voir NOTEBOOK_SUBJECT).
+// `lesson` (facultatif) sert à écrire l'en-tête « sous-discipline : titre »
+// à la place de « Leçon : titre », suivi de « Je retiens » (voir plus haut).
 function renderCursiveText(rawText, lesson) {
   if (!rawText) return null;
   const text = withNotebookLessonLine(rawText, lesson);
